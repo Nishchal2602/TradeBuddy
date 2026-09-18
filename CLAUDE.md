@@ -23,7 +23,7 @@ Execute the defined architecture. Do not redesign the system, expand scope, or i
 
 The product is V0 paper trading only.
 
-**Never introduce real-money trading, exchange execution, exchange API keys, leverage, shorts, derivatives, or real financial transactions.**
+**Never introduce real-money trading, exchange execution, exchange API keys, real leverage, derivatives, or real financial transactions.** V0 simulates 1x unleveraged synthetic short positions in paper only — no borrowing, no margin, no liquidation, no funding mechanics. Full detail: `context/specs/trading-domain-contract.md`.
 
 ## Non-negotiable architecture rules
 
@@ -75,14 +75,16 @@ Use structured output/schema validation.
 
 The model may propose:
 
-- BUY / SELL / HOLD
+- OPEN_LONG / OPEN_SHORT / HOLD / CLOSE (not BUY/SELL — ambiguous once both directions exist)
 - confidence
-- target size
+- stop-loss and take-profit, as percentage distances from entry (required on every open)
 - horizon
 - primary driver
 - reasons
 - cited news IDs
-- invalidation conditions
+- invalidation conditions (thesis-level — separate from the executable stop-loss)
+
+The model does not propose position size — deterministic code derives it from risk-at-stop and hard exposure caps. Confidence is a threshold gate, never a size multiplier.
 
 The model may not:
 
@@ -179,12 +181,14 @@ The intended flow is:
 
 Market data + recent news
 → deterministic indicators
-→ one Gemini decision
+→ one Gemini decision (OPEN_LONG / OPEN_SHORT / HOLD / CLOSE, plus SL/TP on opens)
 → schema validation
-→ deterministic risk gate
+→ deterministic risk gate (confidence, SL/TP validation, risk-derived sizing, caps)
 → deterministic paper broker
 → Supabase persistence
 → Chrome extension
+
+Running independently, every 10 minutes: the position monitor polls prices for open positions only, checks SL/TP/collateral-exhaustion triggers, and executes through the same paper broker — see `context/specs/trading-domain-contract.md`.
 
 V0 assets:
 
@@ -198,21 +202,25 @@ V0 cadence:
 V0 execution:
 
 - paper only
-- long-or-flat
+- one net position per asset: FLAT / LONG / SHORT (no lots, no pyramiding, no partial exits)
+- shorts are 1x unleveraged synthetic paper positions only — see `context/specs/trading-domain-contract.md`
+- every open position carries a mandatory stop-loss and take-profit, validated deterministically
+- SL/TP execution runs on an independent 10-minute position-monitor cycle, not gated by the 3-hour decision cycle
+- position size is derived from risk-at-stop, then capped (max 20% NAV per trade, max 35% NAV per asset) — not a raw model-proposed percentage
 - approximately 0.1% simulated fee per side
 - approximately 0.05% simulated slippage per side
-- maximum 25% position per asset
 
 V0 deliberately excludes:
 
 - SOL
 - news/no-news control experiment
 - buy-and-hold benchmark
-- event-driven triggers
+- event-driven triggers on the decision cycle (the position monitor is a separate, deterministic exception — it exists for SL/TP execution, not for triggering new decisions)
 - backtesting
 - streaming feeds
-- shorts/leverage/derivatives
-- stop/limit orders
+- real leverage, funding, or exchange-style liquidation
+- limit orders
+- pyramiding, multi-leg positions, partial exits, trailing stops
 - multi-agent systems
 - RAG/vector databases
 - on-chain/social signals

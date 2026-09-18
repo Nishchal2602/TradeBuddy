@@ -80,14 +80,15 @@ Primary view. Reverse chronological decision cards.
 
 Each card should visually prioritize:
 
-1. Action: BUY / SELL / HOLD.
+1. Action: OPEN LONG / OPEN SHORT / HOLD / CLOSE.
 2. Asset.
 3. Confidence.
 4. Primary driver.
 5. Short reasons.
-6. Invalidation conditions.
-7. Timestamp/freshness.
-8. Expandable details.
+6. Stop-loss / take-profit (on an open) — visually distinct from invalidation conditions; one is executable, the other is the human-readable thesis.
+7. Invalidation conditions.
+8. Timestamp/freshness.
+9. Expandable details.
 
 The feed should not resemble a generic chat interface.
 
@@ -96,9 +97,11 @@ The feed should not resemble a generic chat interface.
 Compact table/list showing:
 
 - Asset.
+- Direction (long/short).
 - Position size.
 - Entry price.
 - Current price.
+- Stop-loss / take-profit levels.
 - Unrealized P&L.
 - Hold duration.
 - Invalidation state.
@@ -123,6 +126,7 @@ Explicitly design:
 - No open positions.
 - Positive P&L.
 - Negative P&L.
+- Automatic exit (stop-loss / take-profit / collateral-exhausted) — visually distinct from an agent-decided CLOSE; the position-monitor cycle triggered this, not a decision cycle.
 
 Never hide system failures behind an empty UI.
 
@@ -132,16 +136,20 @@ Use concise, evidence-based labels.
 
 Example:
 
-**BUY BTC · 74% confidence · NEWS**
+**OPEN LONG BTC · 74% confidence · NEWS**
 
 Why:
 - ETF inflow reporting is strongly positive.
 - Price is above EMA20 and EMA50.
 - Volume is 1.4× the 20-period average.
 
+Stop-loss: $74,545 (−3.0%) · Take-profit: $84,536 (+10.0%)
+
 Invalidation:
-- Price falls below the defined threshold.
-- New negative news contradicts the thesis.
+- ETF inflow trend reverses over the next few sessions.
+- Price structure breaks below EMA50 on rising volume.
+
+Stop-loss and invalidation are shown as visually distinct — the stop-loss is the executable deterministic risk field; invalidation is the model's human-readable thesis. Do not merge them into one block; conflating them is the failure mode this distinction exists to prevent.
 
 Do not display fabricated explanations. Render only persisted decision reasons and references.
 

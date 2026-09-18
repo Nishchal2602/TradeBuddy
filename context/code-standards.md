@@ -19,7 +19,7 @@
 - Validate all unknown external input at system boundaries.
 - Treat API responses as untrusted until parsed and validated.
 - Treat LLM output as untrusted until schema validation succeeds.
-- Use discriminated unions for action/state variants such as BUY/SELL/HOLD.
+- Use discriminated unions for action/state variants such as OPEN_LONG/OPEN_SHORT/HOLD/CLOSE and FLAT/LONG/SHORT.
 - Keep shared domain types in the shared layer.
 - Do not duplicate domain types across extension and server.
 - Use UTC timestamps internally and ISO 8601 strings at API boundaries.
@@ -118,9 +118,10 @@
 
 - Test deterministic indicator calculations with fixed fixtures.
 - Test risk-gate boundary conditions explicitly.
-- Test paper-broker accounting with fees and slippage.
+- Test paper-broker accounting with fees and slippage, for both long and short, including the collateral-exhaustion boundary and the gap-through-exhaustion case (fill must clamp to the exhaustion price, not the observed price).
 - Test schema validation against malformed model/provider responses.
-- Test idempotency for repeated agent-cycle execution.
+- Test idempotency for repeated agent-cycle execution, and for the position-monitor cycle independently.
+- Test the agent-cycle-vs-position-monitor concurrent-close race explicitly, both interleavings — must resolve to exactly one close, one trade, one realized P&L every time (`context/specs/trading-domain-contract.md` §6).
 - Prefer focused unit tests for deterministic logic over broad test suites in V0.
 - Do not treat successful compilation as proof that trading logic is correct.
 

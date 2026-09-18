@@ -2,7 +2,7 @@
 
 ## Overview
 
-A Chrome extension that gives a single user a live window into an autonomous AI crypto paper-trading agent. The agent runs server-side on a fixed 3-hour cadence, monitors BTC and ETH using recent market data, technical indicators, and relevant recent news, then makes a structured BUY/SELL/HOLD decision. A deterministic risk gate validates the model proposal before a paper broker executes the simulated trade with fees and slippage. Supabase stores the complete history so every decision can be inspected, including the exact inputs, reasons, and invalidation conditions that produced it. V0 is explicitly a paper-trading experiment; it must not use real funds or exchange credentials.
+A Chrome extension that gives a single user a live window into an autonomous AI crypto paper-trading agent. The agent runs server-side on a fixed 3-hour cadence, monitors BTC and ETH using recent market data, technical indicators, and relevant recent news, then makes a structured OPEN_LONG / OPEN_SHORT / HOLD / CLOSE decision, with a mandatory stop-loss and take-profit on every open. A deterministic risk gate validates the model proposal — confidence, SL/TP placement, risk-derived position size, exposure caps — before a paper broker executes the simulated trade with fees and slippage. SL/TP execution itself runs on an independent 10-minute position-monitor cycle, not gated by the 3-hour decision cycle. Supabase stores the complete history so every decision can be inspected, including the exact inputs, reasons, and invalidation conditions that produced it. V0 is explicitly a paper-trading experiment; it must not use real funds, real leverage, or exchange credentials — shorts are 1x unleveraged synthetic paper positions only (`context/specs/trading-domain-contract.md`).
 
 ## Goals
 
@@ -15,16 +15,17 @@ A Chrome extension that gives a single user a live window into an autonomous AI 
 ## Core User Flow
 
 1. User opens the Chrome extension.
-2. Extension displays the current agent status, portfolio/NAV, positions, recent decisions, and next scheduled run.
+2. Extension displays the current agent status, portfolio/NAV, positions (with direction, entry, SL/TP), recent decisions, and next scheduled run.
 3. On each scheduled 3-hour cycle, the server-side agent fetches current BTC/ETH market data and recent relevant news.
 4. Deterministic code calculates the configured technical indicators.
 5. The decision agent receives market, technical, news, portfolio, constraints, and recent-decision context.
-6. The model returns a validated BUY/SELL/HOLD proposal for BTC and/or ETH.
-7. The deterministic risk gate validates and constrains the proposal.
+6. The model returns a validated OPEN_LONG / OPEN_SHORT / HOLD / CLOSE proposal for BTC and/or ETH, with a stop-loss/take-profit percentage on any open.
+7. The deterministic risk gate validates and constrains the proposal — confidence, SL/TP placement, risk-derived size, exposure caps.
 8. Approved proposals are passed to the paper broker, which simulates fills with fees and slippage.
-9. Supabase stores the decision, input payload, execution result, positions, and NAV snapshot.
-10. The extension reads the latest state from Supabase and presents the decision and its reasoning to the user.
-11. User can pause/resume the agent or manually trigger a run through the server-side control endpoint.
+9. Independently, every 10 minutes, the position monitor polls prices for open positions and executes any SL/TP/collateral-exhaustion trigger through the same paper broker — see `context/specs/trading-domain-contract.md`.
+10. Supabase stores the decision, input payload, execution result, positions, and NAV snapshot.
+11. The extension reads the latest state from Supabase and presents the decision and its reasoning to the user.
+12. User can pause/resume the agent or manually trigger a run through the server-side control endpoint.
 
 ## Features
 
@@ -34,11 +35,12 @@ A Chrome extension that gives a single user a live window into an autonomous AI 
 - Server-side execution independent of whether Chrome is open.
 - BTC and ETH support in V0.
 - One LLM decision call covering both assets and the portfolio.
-- Structured BUY/SELL/HOLD output.
-- HOLD is the default posture; the model should trade only when evidence supports a change.
+- Structured OPEN_LONG / OPEN_SHORT / HOLD / CLOSE output, with mandatory stop-loss/take-profit percentages on every open.
+- HOLD is the default posture: trade only when the evidence crosses the decision threshold; otherwise HOLD.
+- Independent 10-minute position-monitor cycle executes SL/TP/collateral-exhaustion triggers, decoupled from the 3-hour decision cadence — see `context/specs/trading-domain-contract.md`.
 - Prompt version recorded with every decision.
 - Exact serialized model input stored with every decision.
-- All cycles, including HOLD and skipped cycles, are logged.
+- All cycles, including HOLD and skipped cycles, are logged — for both the decision cycle and the position-monitor cycle.
 
 ### Market and News Intelligence
 
@@ -62,13 +64,14 @@ A Chrome extension that gives a single user a live window into an autonomous AI 
 
 Each decision records:
 
-- action
+- action: OPEN_LONG / OPEN_SHORT / HOLD / CLOSE
 - asset
 - confidence
 - primary driver: NEWS / TECHNICAL / BOTH / NONE
-- proposed size percentage
+- proposed and computed stop-loss / take-profit (percentage and resulting absolute price)
+- risk-derived position size and which cap, if any, was applied (position size is not model-proposed — see Risk and Paper Execution below)
 - reasons with NEWS or TECHNICAL type and references
-- invalidation conditions
+- invalidation conditions — the human-readable thesis, kept separate from the executable stop-loss
 - decision horizon
 - model/prompt version
 - exact input payload
@@ -77,11 +80,15 @@ Each decision records:
 ### Risk and Paper Execution
 
 - Deterministic risk gate.
-- Maximum position size of 25% of portfolio value per asset in V0.
-- Long-or-flat only.
-- Exposure limits, minimum confidence, cooldown, and cash-floor checks.
-- Risk gate may reject a proposal; it must not silently transform a proposal without recording what happened.
-- Paper fills at the latest valid market price.
+- One net position per asset: FLAT / LONG / SHORT (no lots, no pyramiding, no partial exits).
+- Position size is risk-derived (from stop-loss distance and a risk budget), not a raw model-proposed percentage — then capped at a maximum 20% of NAV per trade and 35% of NAV per asset.
+- Every open position requires a valid stop-loss and take-profit; the risk gate validates their direction-dependent ordering (and, for shorts, that the stop stays below the collateral-exhaustion price) before accepting the open.
+- Minimum confidence gates OPEN_LONG/OPEN_SHORT only — CLOSE is never blocked by confidence, by the stop-out re-entry block, or by any exposure cap. Exits must always be actionable.
+- After a stop-loss exit, re-opening the same asset in the same direction is blocked for a configurable window (a deterministic proxy for "avoid the same failed thesis," not real thesis matching) — the opposite direction is unaffected.
+- Risk gate may reject or clamp a proposal; it must not silently transform a proposal without recording what happened and which check applied.
+- Shorts are 1x unleveraged synthetic paper positions: opening reserves collateral equal to notional. If price reaches the collateral-exhaustion level, the position is closed deterministically — never left open with its loss silently capped. No leverage, margin, funding, or exchange-style liquidation mechanics. Full detail: `context/specs/trading-domain-contract.md`.
+- SL/TP execution runs on an independent 10-minute position-monitor cycle against real price data, not the 3-hour decision cadence — explicitly documented as an approximation of a real stop order, not a claim of equivalence.
+- Paper fills at the latest valid market price (or, for a triggered SL/TP, the less-favorable of the trigger level and the observed price — models real fill risk rather than assuming a perfect fill).
 - Simulated taker fee: approximately 0.1% per side.
 - Simulated slippage: approximately 0.05% per side.
 - Position, cash, realized/unrealized P&L, and NAV are updated after fills.
@@ -90,7 +97,7 @@ Each decision records:
 
 - Decision feed as the primary screen.
 - Portfolio/NAV header.
-- Positions view.
+- Positions view — asset, direction (long/short), size, entry, current price, stop-loss/take-profit, unrealized P&L, hold duration.
 - Agent status and schedule.
 - Pause/resume.
 - Run-now.
@@ -113,8 +120,9 @@ Each decision records:
 - News ingestion.
 - Technical indicator calculation.
 - Gemini model integration behind a single model-call abstraction.
-- Deterministic risk gate.
-- Paper broker.
+- Deterministic risk gate, including SL/TP validation and risk-derived position sizing.
+- Paper broker, including 1x unleveraged synthetic short accounting.
+- Independent position-monitor cycle for SL/TP/collateral-exhaustion execution.
 - Portfolio/P&L tracking.
 - Decision history and inspection.
 - Server-side control actions.
@@ -126,12 +134,12 @@ Each decision records:
 - Exchange API credentials or exchange execution.
 - Testnet execution.
 - Autonomous financial transactions.
-- Shorts.
-- Leverage.
+- Real leverage, margin borrowing, or funding mechanics (shorts are in scope, but strictly as 1x unleveraged synthetic paper positions — `context/specs/trading-domain-contract.md`).
+- Exchange-style liquidation.
 - Futures/options/derivatives.
-- Stop-loss or take-profit orders.
 - Limit orders.
-- Event-driven/news-triggered execution.
+- Pyramiding, multi-leg positions, partial exits, trailing stops.
+- Event-driven/news-triggered execution on the decision cycle (the position monitor is a separate, deterministic exception for SL/TP execution only).
 - Streaming/WebSocket market feeds.
 - Backtesting infrastructure.
 - Multi-agent architecture.
@@ -158,3 +166,4 @@ Each decision records:
 8. Every cycle, including HOLD and skipped cycles, is visible in the history.
 9. The Chrome extension can display the latest portfolio and decision state after reopening.
 10. The project builds cleanly with no TypeScript errors or unhandled runtime errors.
+11. The position monitor correctly executes SL/TP/collateral-exhaustion triggers on its own 10-minute cycle, independent of whether a decision cycle has run, and the agent-vs-monitor concurrent-close race resolves to exactly one close every time (`context/specs/trading-domain-contract.md`).
