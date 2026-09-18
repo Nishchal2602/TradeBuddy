@@ -199,14 +199,12 @@ export const ACCOUNTING_SCENARIOS: AccountingScenario[] = [
   },
 ]
 
-/**
- * A short's collateral-exhaustion price. Pure function of entry only —
- * exists here so contract.test.ts and every later implementation compute
- * it identically rather than each hand-deriving "2x entry".
- */
-export function exhaustionPrice(entryPrice: number): number {
-  return entryPrice * 2
-}
+// exhaustionPrice used to be defined here (Step 0 predates any production
+// code to import). It now lives at src/shared/risk/sl-tp.ts (Step 3) —
+// contract.test.ts imports the real implementation directly, so these
+// fixtures are checked against production code, not a parallel copy that
+// could quietly drift from it. This file goes back to being pure data, as
+// its own module comment always said it should be.
 
 // --- 3. SL/TP ordering ----------------------------------------------------
 //

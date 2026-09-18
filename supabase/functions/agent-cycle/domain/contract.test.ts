@@ -15,10 +15,13 @@ import {
   SL_TP_ORDERING_CASES,
   PROVENANCE_CASES,
   CONCURRENT_CLOSE_RACE,
-  exhaustionPrice,
   type PositionState,
   type Action,
 } from './contract.fixtures.ts'
+// The real implementation (Step 3) — Step 0 predates it and had its own
+// copy; now that production code exists, this file checks against it
+// rather than a parallel reimplementation that could drift.
+import { exhaustionPrice } from '../../../../src/shared/risk/sl-tp.ts'
 
 // ============================================================================
 // 1. State-machine totality
@@ -161,6 +164,14 @@ Deno.test('exhaustionPrice is exactly 2x entry', () => {
 // 3. SL/TP ordering
 // ============================================================================
 
+// Deliberately still test-local, unlike exhaustionPrice above: this
+// operates directly on PRICES (matching SL_TP_ORDERING_CASES and the DB's
+// own positions_sl_tp_ordering_valid CHECK constraint, which validates
+// stop_loss_price/take_profit_price/entry_price columns). The production
+// validateStopLossTakeProfit (src/shared/risk/sl-tp.ts) operates on
+// PERCENTAGES instead — it validates a model's proposed distance-from-
+// entry, then converts to prices internally. Different input shape for a
+// different layer of the system, not a duplicate of the same function.
 function isValidSlTp(direction: 'long' | 'short', entry: number, stopLoss: number, takeProfit: number): boolean {
   if (direction === 'long') return stopLoss < entry && entry < takeProfit
 
