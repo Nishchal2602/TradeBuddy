@@ -1,0 +1,13 @@
+{
+  "imports": {
+    "zod": "npm:zod@^3.24.1",
+    "fast-xml-parser": "npm:fast-xml-parser@^5.11.1"
+  },
+  "compilerOptions": {
+    "strict": true
+  },
+  "fmt": {
+    "semiColons": false,
+    "singleQuote": true
+  }
+}

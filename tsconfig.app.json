@@ -1,0 +1,39 @@
+{
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
+    "target": "es2023",
+    "lib": ["ES2023", "DOM"],
+    "module": "esnext",
+    "types": ["vite/client", "chrome"],
+    "allowArbitraryExtensions": true,
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    /* Strict type-checking — code-standards.md § TypeScript */
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+
+    /* Linting */
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true,
+
+    /* Path alias for shadcn/ui + app imports.
+       No baseUrl: TS 6 resolves relative "paths" entries against the
+       tsconfig file's own location once baseUrl is absent (baseUrl itself
+       is deprecated, removed in TS 7). */
+    "paths": {
+      "@/lib/*": ["./lib/*"],
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": ["src", "extension", "lib"]
+}

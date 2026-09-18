@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Trader</title>
+    <!--
+      Inline background avoids a flash of unstyled (light/white) content
+      while the bundle loads — this is a popup, not a page navigation, so
+      there's no browser chrome to mask a flash.
+    -->
+    <style>
+      html,
+      body {
+        background-color: #09090b;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="../src/popup/main.tsx"></script>
+  </body>
+</html>

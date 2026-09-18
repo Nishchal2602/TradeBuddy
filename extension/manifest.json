@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Autonomous Crypto Paper-Trading Agent",
+  "short_name": "AI Trader",
+  "description": "A live window into a server-side AI agent that paper-trades BTC/ETH using market data, technical indicators, and recent news.",
+  "version": "0.0.1",
+  "action": {
+    "default_popup": "extension/popup.html",
+    "default_title": "AI Trader"
+  },
+  "permissions": ["storage"]
+}

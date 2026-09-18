@@ -1,0 +1,91 @@
+/*
+ * Design tokens — verbatim from context/ui-context.md § Colors, Typography,
+ * Border Radius. Dark only; no light mode in V0. Components must reference
+ * these variables (directly or via the Tailwind utilities mapped below) and
+ * must never hardcode hex values — code-standards.md § Styling.
+ */
+
+@import 'tailwindcss';
+
+:root {
+  /* Surfaces */
+  --bg-base: #09090b;
+  --bg-surface: #111113;
+  --bg-elevated: #18181b;
+
+  /* Text */
+  --text-primary: #f4f4f5;
+  --text-secondary: #a1a1aa;
+  --text-muted: #71717a;
+
+  /* Accent */
+  --accent-primary: #8b5cf6;
+  --accent-subtle: #2e1b4d;
+
+  /* Borders */
+  --border-default: #27272a;
+  --border-strong: #3f3f46;
+
+  /* Semantic state */
+  --state-success: #22c55e;
+  --state-success-subtle: #0d2a18;
+  --state-error: #ef4444;
+  --state-error-subtle: #2b1111;
+  --state-warning: #f59e0b;
+  --state-warning-subtle: #2a1e08;
+  --state-info: #38bdf8;
+  --state-neutral: #71717a;
+
+  /* Typography */
+  --font-sans:
+    'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono:
+    'JetBrains Mono', ui-monospace, 'SFMono-Regular', monospace;
+}
+
+/* Map tokens to Tailwind v4 theme so bg-base, text-primary, border-strong,
+   font-sans, etc. resolve as utilities without a tailwind.config.js. */
+@theme inline {
+  --color-bg-base: var(--bg-base);
+  --color-bg-surface: var(--bg-surface);
+  --color-bg-elevated: var(--bg-elevated);
+
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+
+  --color-accent-primary: var(--accent-primary);
+  --color-accent-subtle: var(--accent-subtle);
+
+  --color-border-default: var(--border-default);
+  --color-border-strong: var(--border-strong);
+
+  --color-state-success: var(--state-success);
+  --color-state-success-subtle: var(--state-success-subtle);
+  --color-state-error: var(--state-error);
+  --color-state-error-subtle: var(--state-error-subtle);
+  --color-state-warning: var(--state-warning);
+  --color-state-warning-subtle: var(--state-warning-subtle);
+  --color-state-info: var(--state-info);
+  --color-state-neutral: var(--state-neutral);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
+
+@layer base {
+  * {
+    border-color: var(--border-default);
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: var(--bg-base);
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+}
