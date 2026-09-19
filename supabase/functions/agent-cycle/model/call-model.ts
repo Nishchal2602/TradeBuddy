@@ -4,20 +4,32 @@ import { PROMPT_VERSION, SYSTEM_PROMPT, buildUserContent } from './prompt.ts'
 import type { ModelCallPayload } from './payload.ts'
 
 // The one callModel(payload) abstraction every model call goes through
-// (CLAUDE.md § AI-specific rules) — Gemini today, swappable to a
-// different provider or a single paid-tier key later behind this same
-// signature (progress-tracker.md Architecture Decisions), not a code
-// change at every call site.
-
-const MODEL_ID = 'gemini-2.5-flash'
+// (CLAUDE.md § AI-specific rules). apiKeys is a plain array specifically
+// so the key-rotation loop below degenerates correctly to a single
+// attempt with one key — moving to the paid tier (below) needed no
+// change to this loop, only to what gets passed in (agent-cycle/
+// index.ts) and this file's MODEL_ID.
+//
+// MODEL_ID history: started on gemini-2.5-flash (user, 2026-09-18).
+// Switched to gemini-3.6-flash (user, 2026-09-19) after live-testing
+// during Step 7 found gemini-2.5-flash actively failing in production —
+// 2 of 3 free-tier keys returned HTTP 503 and the third an explicit
+// HTTP 404 stating "gemini-2.5-flash is no longer available to new
+// users," recommending gemini-3.6-flash by name — even though
+// models.list still listed gemini-2.5-flash as available on all three
+// keys at the same moment (a listing-vs-invocation gap, not a fluke).
+// Confirmed gemini-3.6-flash live before switching: same responseSchema/
+// thinkingConfig mechanism, HTTP 200, correctly-shaped structured output.
+const MODEL_ID = 'gemini-3.6-flash'
 const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta'
 
 // maxOutputTokens covers thinking tokens AND the visible output combined
-// (confirmed live, 2026-09-19 — gemini-2.5-flash spent 100+ thinking
-// tokens on even a one-line trivial prompt). Sized well above the
-// superseded spec's original 4096 figure, which predates that finding and
-// would risk a silent MAX_TOKENS truncation on a real, much longer
-// prompt. Thinking is left at its default (not forced to a budget of 0)
+// (confirmed live, 2026-09-19 for both gemini-2.5-flash and
+// gemini-3.6-flash — the latter spent even more, 275-298 thinking tokens
+// on the same trivial one-line prompt). Sized well above the superseded
+// spec's original 4096 figure, which predates this finding and would
+// risk a silent MAX_TOKENS truncation on a real, much longer prompt.
+// Thinking is left at its default (not forced to a budget of 0)
 // deliberately — that's a reasoning-quality lever adjacent to the
 // NEWS/TECHNICAL methodology the user explicitly deferred, not a plumbing
 // concern this step should decide.

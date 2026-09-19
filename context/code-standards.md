@@ -59,7 +59,7 @@
 
 ## AI / Model Calls
 
-- All model calls must pass through one `callModel(payload)` seam — internally, it tries up to 3 rotating API keys on a key-specific failure (HTTP/network error), but a content-level failure (bad finish reason, invalid output shape) fails the call immediately rather than rotating, since a different key would hit the same problem.
+- All model calls must pass through one `callModel(payload)` seam — internally, it rotates across however many API keys it's given on a key-specific failure (HTTP/network error), but a content-level failure (bad finish reason, invalid output shape) fails the call immediately rather than rotating, since a different key would hit the same problem. V0 runs a single paid-tier key; the loop itself is unchanged from the original 3-key free-tier design, only the count passed in differs.
 - Keep prompt text versioned.
 - Stamp prompt/model versions on every decision.
 - Use structured output/schema validation.

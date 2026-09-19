@@ -3,7 +3,7 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import { fetchRecentPricePoints } from '../agent-cycle/providers/coingecko.ts'
 import { computeNav } from '../agent-cycle/broker/accounting.ts'
 import type { ClosePositionResult } from '../agent-cycle/broker/accounting.ts'
-import { Position } from '../../../src/shared/positions/types.ts'
+import { rowToPosition } from '../agent-cycle/db/row-mappers.ts'
 import type { AssetSymbol } from '../../../src/shared/market-data/types.ts'
 import type { PricePoint } from './triggers.ts'
 import { planMonitorActions } from './plan.ts'
@@ -14,40 +14,10 @@ import type { MonitorPlanResult } from './plan.ts'
 // hands already-shaped plain data to planMonitorActions, persists
 // whatever it decided. No accounting math and no trigger logic lives in
 // this file; see plan.ts / triggers.ts / accounting.ts for those, each
-// independently fixture-tested.
-
-// PostgREST serializes timestamptz as "...+00:00", not "...Z" — confirmed
-// live against agent_settings.created_at before writing this function,
-// not assumed. Zod's .string().datetime() (used by every domain schema in
-// src/shared/, matching CoinGecko's own Z-suffixed convention) rejects the
-// +00:00 form, so every timestamp read back from Postgres is normalized
-// here, at the DB-row boundary — keeping the schemas themselves uniformly
-// strict rather than loosening all of them to accept offsets they should
-// never see from any other source (e.g. CoinGecko already returns Z).
-function toIsoZ(pgTimestamp: string): string {
-  return new Date(pgTimestamp).toISOString()
-}
-
-function rowToPosition(row: Record<string, unknown>): Position {
-  return Position.parse({
-    id: row.id,
-    portfolioId: row.portfolio_id,
-    asset: row.asset,
-    direction: row.direction,
-    quantity: Number(row.quantity),
-    entryPrice: Number(row.entry_price),
-    costBasis: Number(row.cost_basis),
-    stopLossPrice: Number(row.stop_loss_price),
-    takeProfitPrice: Number(row.take_profit_price),
-    status: row.status,
-    openedAt: toIsoZ(row.opened_at as string),
-    closedAt: row.closed_at ? toIsoZ(row.closed_at as string) : null,
-    realizedPnl: row.realized_pnl === null ? null : Number(row.realized_pnl),
-    closeReason: row.close_reason,
-    openedByDecisionId: row.opened_by_decision_id,
-    closedByDecisionId: row.closed_by_decision_id,
-  })
-}
+// independently fixture-tested. rowToPosition (and its +00:00-vs-Z
+// timestamp normalization) moved to agent-cycle/db/row-mappers.ts in
+// Step 7, once the agent cycle needed the exact same DB-row mapping —
+// same behavior, shared location, not a redesign.
 
 function floorToIntervalIso(nowIso: string, intervalMinutes: number): string {
   const intervalMs = intervalMinutes * 60_000
