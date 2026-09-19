@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
 import { ArrowLeft, Brain, Newspaper, TrendingUp, Activity, Scale, Target, Link2, CalendarClock } from 'lucide-react'
+import { useNow } from '@/hooks/use-now'
 import { Card, Panel } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -8,7 +8,7 @@ import { SectionHeader } from '@/components/ui/section-header'
 import { LoadingState } from '@/components/states/loading-state'
 import { ErrorState } from '@/components/states/error-state'
 import { ACTION_LABEL, ACTION_BADGE_VARIANT, RISK_STATUS_LABEL, RISK_STATUS_BADGE_VARIANT } from '@/features/decisions/display'
-import { formatUsd, formatPct, formatAgo, unrealizedPnl } from '@/features/home/format'
+import { formatUsd, formatPct, formatAgo, unrealizedPnl } from '@/format'
 import { useDecisionDetail } from './use-decision-detail'
 import type { DecisionDetailViewModel } from './use-decision-detail'
 import type { TechnicalIndicators } from './queries'
@@ -21,16 +21,7 @@ export interface DecisionDetailScreenProps {
 
 export function DecisionDetailScreen({ decisionId, onBack }: DecisionDetailScreenProps) {
   const state = useDecisionDetail(decisionId)
-  // Same reasoning as home-screen.tsx: a controlled, periodically-updated
-  // value rather than calling Date.now() directly during render (impure —
-  // React may re-invoke a render function without an actual clock tick
-  // having occurred, which would make "time ago" labels inconsistent
-  // within what should be one logical render).
-  const [now, setNow] = useState(() => Date.now())
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 30_000)
-    return () => clearInterval(id)
-  }, [])
+  const now = useNow()
 
   return (
     <div className="flex flex-1 flex-col overflow-y-auto">

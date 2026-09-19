@@ -1,6 +1,10 @@
-/** Formatting helpers local to the Home screen — display-only, no
- * business logic. Kept tiny and dependency-free rather than reaching for
- * a formatting library for a handful of calls. */
+/** App-wide display formatting — no business logic. Originally written
+ * under features/home/ (UI Step 2), moved here (UI Step 6) once all five
+ * screens depended on it — matching src/supabase.ts's own precedent of a
+ * single top-level file for something every feature needs, rather than
+ * a directory-naming convention (utils/, lib/) invented just for this.
+ * Kept tiny and dependency-free rather than reaching for a formatting
+ * library for a handful of calls. */
 
 export function formatUsd(value: number): string {
   return value.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 2 })

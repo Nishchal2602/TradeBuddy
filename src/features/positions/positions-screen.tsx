@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
 import { TrendingUp, TrendingDown, ChevronRight } from 'lucide-react'
+import { useNow } from '@/hooks/use-now'
 import { Card, Panel } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -7,7 +7,7 @@ import { Stat, StatGrid } from '@/components/ui/stat'
 import { LoadingState } from '@/components/states/loading-state'
 import { ErrorState } from '@/components/states/error-state'
 import { CLOSE_REASON_LABEL, CLOSE_REASON_BADGE_VARIANT } from '@/features/decisions/display'
-import { formatUsd, formatPct, formatAgo, unrealizedPnl } from '@/features/home/format'
+import { formatUsd, formatPct, formatAgo, unrealizedPnl } from '@/format'
 import type { AssetSymbol } from '@/shared/market-data/types.ts'
 import { usePositionsData } from './use-positions-data'
 import type { PositionsViewModel } from './use-positions-data'
@@ -28,11 +28,7 @@ export function PositionsScreen({ onSelectDecision }: PositionsScreenProps) {
 }
 
 function PositionsContent({ data, onSelectDecision }: { data: PositionsViewModel; onSelectDecision?: (decisionId: string) => void }) {
-  const [now, setNow] = useState(() => Date.now())
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 30_000)
-    return () => clearInterval(id)
-  }, [])
+  const now = useNow()
 
   return (
     <div className="flex flex-col gap-2.5 p-3">

@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Brain, ShieldAlert, SkipForward, XCircle, ChevronRight } from 'lucide-react'
+import { useNow } from '@/hooks/use-now'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -8,7 +8,7 @@ import { LoadingState } from '@/components/states/loading-state'
 import { EmptyState } from '@/components/states/empty-state'
 import { ErrorState } from '@/components/states/error-state'
 import { ACTION_LABEL, ACTION_BADGE_VARIANT, RISK_STATUS_LABEL, RISK_STATUS_BADGE_VARIANT, CLOSE_REASON_LABEL, CLOSE_REASON_BADGE_VARIANT } from '@/features/decisions/display'
-import { formatUsd, formatAgo } from '@/features/home/format'
+import { formatUsd, formatAgo } from '@/format'
 import { useActivityData } from './use-activity-data'
 import type { ActivityEvent, DecisionEvent, AutomaticCloseEvent, RunIssueEvent } from './queries'
 
@@ -27,11 +27,7 @@ export function ActivityScreen({ onSelectDecision }: ActivityScreenProps) {
 }
 
 function ActivityContent({ events, onSelectDecision }: { events: ActivityEvent[]; onSelectDecision?: (decisionId: string) => void }) {
-  const [now, setNow] = useState(() => Date.now())
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 30_000)
-    return () => clearInterval(id)
-  }, [])
+  const now = useNow()
 
   return (
     <div className="flex flex-col gap-2 p-3">

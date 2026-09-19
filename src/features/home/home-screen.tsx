@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
 import { TrendingUp, TrendingDown, Play, Pause, Brain, Clock, ShieldAlert, CircleAlert, Newspaper, ChevronRight } from 'lucide-react'
+import { useNow } from '@/hooks/use-now'
 import { Card, CardHeader, CardTitle, Panel } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -13,7 +13,7 @@ import type { LatestMarketPrice } from '@/features/market-data/queries'
 import { useHomeData } from './use-home-data'
 import type { HomeViewModel } from './use-home-data'
 import type { OpenPositionSummary } from './queries'
-import { formatUsd, formatPct, formatRelativeMinutes, formatAgo, unrealizedPnl } from './format'
+import { formatUsd, formatPct, formatRelativeMinutes, formatAgo, unrealizedPnl } from '@/format'
 
 export interface HomeScreenProps {
   /** UI Step 3: tapping the latest decision pushes the Decision-detail
@@ -35,15 +35,12 @@ export function HomeScreen({ onSelectDecision }: HomeScreenProps) {
 }
 
 function HomeContent({ data, onSelectDecision }: { data: HomeViewModel; onSelectDecision?: (decisionId: string) => void }) {
-  // A single "now" per render rather than a per-second ticking clock — the
-  // 30s poll (use-home-data.ts) already keeps this reasonably current, and
-  // a live-ticking countdown would need its own interval for a cosmetic
-  // improvement nothing in the Step 2 brief asked for.
-  const [now, setNow] = useState(() => Date.now())
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 30_000)
-    return () => clearInterval(id)
-  }, [])
+  // A 30s-updated "now" rather than a per-second ticking clock — the same
+  // interval as the data poll itself (use-home-data.ts), which already
+  // keeps this reasonably current; a live-ticking countdown would need
+  // its own separate interval for a cosmetic improvement nothing in the
+  // brief asked for.
+  const now = useNow()
 
   return (
     <div className="flex flex-col gap-2.5 p-3">

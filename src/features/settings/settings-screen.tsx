@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
 import { ShieldCheck, Play, Pause, SlidersHorizontal, Coins, Server, Timer } from 'lucide-react'
+import { useNow } from '@/hooks/use-now'
 import { Card, Panel } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -7,7 +7,7 @@ import { Stat, StatGrid } from '@/components/ui/stat'
 import { SectionHeader } from '@/components/ui/section-header'
 import { LoadingState } from '@/components/states/loading-state'
 import { ErrorState } from '@/components/states/error-state'
-import { formatPct, formatAgo } from '@/features/home/format'
+import { formatPct, formatAgo } from '@/format'
 import { riskAppetiteThresholds } from '@/shared/risk/appetite-mapping.ts'
 import type { RiskAppetite } from '@/shared/risk/appetite-mapping.ts'
 import type { LatestRunSummary } from '@/features/system-status/queries'
@@ -31,11 +31,7 @@ export function SettingsScreen() {
 }
 
 function SettingsContent({ data }: { data: SettingsViewModel }) {
-  const [now, setNow] = useState(() => Date.now())
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 30_000)
-    return () => clearInterval(id)
-  }, [])
+  const now = useNow()
 
   const { settings } = data
   const appetite = riskAppetiteThresholds(settings.riskAppetite)
