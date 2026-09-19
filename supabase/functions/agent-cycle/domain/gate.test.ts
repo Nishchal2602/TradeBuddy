@@ -38,11 +38,41 @@ function openLongProposal(overrides: Partial<Record<string, unknown>> = {}): Mod
 }
 
 // --- HOLD ------------------------------------------------------------
+//
+// State-dependent invalidation requirement, added as a narrow corrective
+// fix after Step 6 (progress-tracker.md Open Questions): a HOLD while
+// FLAT has no open thesis to invalidate, so empty invalidation is valid.
+// A HOLD on an open LONG/SHORT is implicitly reaffirming an existing
+// thesis and must carry non-empty invalidation, or it's rejected rather
+// than silently treated as a valid not_applicable HOLD. This supersedes
+// the old blanket "HOLD is always not_applicable, regardless of state"
+// test, which asserted exactly the gap this fix closes.
 
-Deno.test('evaluateRiskGate: HOLD is always not_applicable, regardless of state', () => {
-  const hold: ModelDecisionProposal = { asset: 'BTC', action: 'HOLD', confidence: 0.5, horizonHours: null, reasons: [], invalidation: [] }
-  for (const state of ['FLAT', 'LONG', 'SHORT'] as const) {
-    const result = evaluateRiskGate(hold, baseContext({ currentState: state }))
+function hold(invalidation: ModelDecisionProposal['invalidation'] = []): ModelDecisionProposal {
+  return { asset: 'BTC', action: 'HOLD', confidence: 0.5, horizonHours: null, reasons: [], invalidation }
+}
+
+Deno.test('evaluateRiskGate: FLAT + HOLD + empty invalidation -> valid (not_applicable)', () => {
+  const result = evaluateRiskGate(hold(), baseContext({ currentState: 'FLAT' }))
+  assertEquals(result.riskStatus, 'not_applicable')
+  assertEquals(result.riskReason, null)
+})
+
+Deno.test('evaluateRiskGate: LONG + HOLD + empty invalidation -> rejected', () => {
+  const result = evaluateRiskGate(hold(), baseContext({ currentState: 'LONG' }))
+  assertEquals(result.riskStatus, 'rejected')
+  assertEquals(result.riskReason?.includes('invalidation'), true)
+})
+
+Deno.test('evaluateRiskGate: SHORT + HOLD + empty invalidation -> rejected', () => {
+  const result = evaluateRiskGate(hold(), baseContext({ currentState: 'SHORT' }))
+  assertEquals(result.riskStatus, 'rejected')
+  assertEquals(result.riskReason?.includes('invalidation'), true)
+})
+
+Deno.test('evaluateRiskGate: LONG/SHORT + HOLD + non-empty invalidation -> valid (not_applicable)', () => {
+  for (const state of ['LONG', 'SHORT'] as const) {
+    const result = evaluateRiskGate(hold([{ text: 'Price closes back below the 50-day EMA.' }]), baseContext({ currentState: state }))
     assertEquals(result.riskStatus, 'not_applicable')
     assertEquals(result.riskReason, null)
   }

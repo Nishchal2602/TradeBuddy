@@ -66,6 +66,18 @@ function rejected(reason: string): RiskGateResult {
 // why it's placed where it is.
 export function evaluateRiskGate(proposal: ModelDecisionProposal, context: RiskGateContext): RiskGateResult {
   if (proposal.action === 'HOLD') {
+    // State-dependent invalidation requirement (trading-domain-contract.md
+    // §1 / progress-tracker.md Open Questions, Step 6): a HOLD while FLAT
+    // has no open thesis to invalidate, so empty invalidation is fine. A
+    // HOLD on an open LONG/SHORT is implicitly reaffirming an existing
+    // thesis — the prompt asks the model to reaffirm or explicitly revise
+    // its invalidation conditions every such cycle, and until now nothing
+    // deterministically checked that it actually did. This does not (and
+    // cannot) verify the reaffirmed text is honest — only that the
+    // structurally-checkable part (a real, non-empty list) is present.
+    if (context.currentState !== 'FLAT' && proposal.invalidation.length === 0) {
+      return rejected('HOLD on an open position must reaffirm or revise invalidation conditions')
+    }
     return notApplicable()
   }
 
