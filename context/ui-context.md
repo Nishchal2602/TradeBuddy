@@ -117,13 +117,12 @@ Use Lucide React for icons.
 
 ### Header
 
-Compact top header containing:
+Compact top header (`src/components/shell/app-header.tsx`, UI Step 1) containing only:
 
 - Product/agent identity.
-- Agent status.
-- NAV.
-- Total P&L.
-- Next scheduled run.
+- Agent status (running/paused).
+
+NAV, total P&L, and next scheduled run live in the Home screen's Portfolio card instead (UI Step 2) — a 56px header has no room to make any of those three legible at this popup's width alongside identity and status, and Home is already the first thing the user sees.
 
 ### Decision Feed
 
