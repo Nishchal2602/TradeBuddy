@@ -2,7 +2,14 @@ import { assertEquals, assertRejects } from 'jsr:@std/assert@1'
 import { RssNewsProvider } from './rss-news.ts'
 import { ProviderFetchError } from '../../../../src/shared/providers/errors.ts'
 
-const NOW = new Date('2026-09-18T12:00:00.000Z')
+// Real wall-clock time, not a fixed historical anchor — rss-news.ts's own
+// lookback filter compares against real Date.now() (it has no injectable
+// clock), so a hardcoded NOW here silently rots as real time moves past it
+// and every hoursAgo() fixture falls outside the lookback window it's
+// meant to test. Found exactly that way (2026-09-19, unrelated to any
+// change that day) when a previously-hardcoded 2026-09-18 anchor finally
+// drifted far enough to fail 11 of 14 tests.
+const NOW = new Date()
 function hoursAgo(h: number): string {
   return new Date(NOW.getTime() - h * 60 * 60 * 1000).toUTCString()
 }
