@@ -1,6 +1,6 @@
 # Spec: Decision Agent Logic & Gemini Configuration
 
-Status: **draft — needs your confirmation before implementation starts.**
+Status: **SUPERSEDED (2026-09-18) — historical record only, not an active draft.** This spec predates the position-model pivot and describes a system that was never built as written: long-only BUY/SELL/HOLD (no shorts), `proposed_size_pct` (the model no longer proposes size), no mandatory stop-loss/take-profit, `gemini-2.5-flash` at `maxOutputTokens: 4096`, and a 3-key free-tier rotation. None of that reflects the live system. The current, load-bearing references are `context/specs/trading-domain-contract.md` (position model, risk gate, action vocabulary) and `supabase/functions/agent-cycle/model/call-model.ts` (the actual Gemini config: `gemini-3.6-flash`, `maxOutputTokens: 8192`, a single paid-tier key). Kept on disk as a record of the pre-pivot design, per `progress-tracker.md`'s Architecture Decisions — not deleted, not to be treated as pending.
 
 This covers exactly two things you asked for: the logic that decides BUY/SELL/HOLD, and the exact configuration of the AI agent itself. It does not cover indicator math (Unit 5, done), broker fill mechanics (Next Up #1, separate), or the scheduling loop (Next Up #4, separate) — those are already scoped elsewhere and referenced here, not redefined.
 
