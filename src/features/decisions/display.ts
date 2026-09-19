@@ -1,4 +1,5 @@
 import type { Action, RiskStatus } from '@/shared/decisions/types.ts'
+import type { CloseReason } from '@/shared/positions/types.ts'
 import type { BadgeProps } from '@/components/ui/badge'
 
 /** Shared Action -> badge/label mapping. Lives outside src/features/home/
@@ -32,4 +33,21 @@ export const RISK_STATUS_BADGE_VARIANT: Record<RiskStatus, NonNullable<BadgeProp
   clamped: 'warning',
   rejected: 'error',
   not_applicable: 'neutral',
+}
+
+/** Positions and Activity both render a position's close_reason /
+ * a trade's trigger_reason — same four-value vocabulary
+ * (trading-domain-contract.md §4), one mapping. */
+export const CLOSE_REASON_LABEL: Record<CloseReason, string> = {
+  agent_close: 'Agent close',
+  stop_loss: 'Stop loss',
+  take_profit: 'Take profit',
+  collateral_exhausted: 'Collateral exhausted',
+}
+
+export const CLOSE_REASON_BADGE_VARIANT: Record<CloseReason, NonNullable<BadgeProps['variant']>> = {
+  agent_close: 'neutral',
+  stop_loss: 'error',
+  take_profit: 'success',
+  collateral_exhausted: 'warning',
 }

@@ -1,16 +1,16 @@
 import { useEffect, useState } from 'react'
 import { AppShell } from '@/components/shell/app-shell'
 import type { TabId } from '@/components/shell/bottom-nav'
-import { EmptyState } from '@/components/states/empty-state'
-import { LoadingState } from '@/components/states/loading-state'
 import { ErrorState } from '@/components/states/error-state'
 import { HomeScreen } from '@/features/home/home-screen'
 import { fetchAgentSettings } from '@/features/home/queries'
 import { DecisionDetailScreen } from '@/features/decision-detail/decision-detail-screen'
+import { PositionsScreen } from '@/features/positions/positions-screen'
+import { ActivityScreen } from '@/features/activity/activity-screen'
 
 /**
- * UI Step 3: Home can push into Decision-detail. Positions, Activity, and
- * Settings remain Step 1's placeholders — Steps 4-5 replace each in turn.
+ * UI Step 4: Positions and Activity are real, Supabase-backed content.
+ * Settings remains Step 1's placeholder — Step 5 replaces it.
  */
 export function App() {
   const [tab, setTab] = useState<TabId>('home')
@@ -25,7 +25,8 @@ export function App() {
   // own back-arrow header and deliberately no bottom nav (matching the
   // reference designs' own detail screen), so it's tracked independently
   // of `tab` rather than as a TabId. Reset when the user navigates back;
-  // which tab was active underneath is untouched.
+  // which tab was active underneath is untouched. Both Positions and
+  // Activity (UI Step 4) can also push into it now, alongside Home.
   const [selectedDecisionId, setSelectedDecisionId] = useState<string | null>(null)
 
   useEffect(() => {
@@ -35,7 +36,7 @@ export function App() {
         if (!cancelled) setIsPaused(settings.isPaused)
       })
       .catch(() => {
-        // The header degrades to its fail-closed default; HomeScreen's
+        // The header degrades to its fail-closed default; each screen's
         // own ErrorState is where a real Supabase failure is surfaced.
       })
     return () => {
@@ -55,10 +56,8 @@ export function App() {
     <div className="h-[600px] w-[420px] overflow-hidden">
       <AppShell status={isPaused === false ? 'running' : 'paused'} active={tab} onChange={setTab}>
         {tab === 'home' ? <HomeScreen onSelectDecision={setSelectedDecisionId} /> : null}
-        {tab === 'positions' ? (
-          <EmptyState title="No open positions" description="BTC and ETH are both flat. Positions land here in Step 4." />
-        ) : null}
-        {tab === 'activity' ? <LoadingState message="Loading activity…" /> : null}
+        {tab === 'positions' ? <PositionsScreen onSelectDecision={setSelectedDecisionId} /> : null}
+        {tab === 'activity' ? <ActivityScreen onSelectDecision={setSelectedDecisionId} /> : null}
         {tab === 'settings' ? (
           <ErrorState
             title="Could not reach Supabase"

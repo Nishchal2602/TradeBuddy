@@ -156,17 +156,18 @@ Beyond what the card already shows, the detail screen additionally surfaces:
 
 ### Positions
 
-Compact table/list showing:
+One card per asset (`src/features/positions/`, UI Step 4), not a table — the popup is too narrow for tabular columns to stay legible at this density. Showing, for whichever asset is currently open:
 
-- Asset.
-- Direction (long/short).
-- Position size.
-- Entry price.
-- Current price.
-- Stop-loss / take-profit levels.
+- Asset, direction (long/short).
+- Position size (quantity and cost basis).
+- Entry price, current mark, stop-loss / take-profit levels.
 - Unrealized P&L.
 - Hold duration.
-- Invalidation state.
+- A link to the decision that opened it.
+
+Invalidation state is deliberately not shown inline here — it lives on the *decision*, not the position, and is one tap away via that link rather than a second query per card just to duplicate what Decision-detail already shows in full.
+
+When an asset is flat, its card shows the current price and, if the asset has any history, its most recently closed position — close reason, realized P&L, and a link to whichever decision is more informative (the one that closed it if agent-initiated, otherwise the one that opened it, since an automatic stop-loss/take-profit/collateral-exhaustion exit has no closing decision of its own).
 
 ### Controls
 
