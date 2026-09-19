@@ -2,8 +2,10 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { AssetSymbol } from '@/shared/market-data/types.ts'
 import { fetchLatestMarketPrices, fetchNewsHeadlines } from '@/features/market-data/queries'
 import type { LatestMarketPrice, NewsHeadline } from '@/features/market-data/queries'
-import { fetchAgentSettings, fetchPortfolio, fetchLatestNav, fetchOpenPositions, fetchLatestDecision, fetchLatestDecisionRun } from './queries'
-import type { AgentSettingsSummary, PortfolioSummary, LatestNav, OpenPositionSummary, LatestDecision, LatestRunSummary } from './queries'
+import { fetchLatestRun } from '@/features/system-status/queries'
+import type { LatestRunSummary } from '@/features/system-status/queries'
+import { fetchAgentSettings, fetchPortfolio, fetchLatestNav, fetchOpenPositions, fetchLatestDecision } from './queries'
+import type { AgentSettingsSummary, PortfolioSummary, LatestNav, OpenPositionSummary, LatestDecision } from './queries'
 
 export interface HomeViewModel {
   settings: AgentSettingsSummary
@@ -27,7 +29,7 @@ async function loadHomeData(): Promise<HomeViewModel> {
     fetchOpenPositions(portfolio.id),
     fetchLatestMarketPrices(settings.assets),
     fetchLatestDecision(portfolio.id),
-    fetchLatestDecisionRun(portfolio.id),
+    fetchLatestRun(portfolio.id, 'decision'),
   ])
 
   const newsIds = latestDecision?.reasons.filter((r) => r.type === 'NEWS').map((r) => r.newsId) ?? []

@@ -152,34 +152,3 @@ export async function fetchLatestDecision(portfolioId: string): Promise<LatestDe
   }
 }
 
-export interface LatestRunSummary {
-  kind: 'decision' | 'monitor'
-  status: 'running' | 'completed' | 'skipped' | 'failed'
-  startedAt: string
-  skipReason: string | null
-  errorDetail: string | null
-}
-
-/** Most recent decision-kind run (any status) — drives both "next cycle"
- * timing and the system/data-freshness read: a `failed`/`skipped` latest
- * run must be visible, not silently indistinguishable from a healthy one
- * (ui-context.md: "never hide system failures behind an empty UI"). */
-export async function fetchLatestDecisionRun(portfolioId: string): Promise<LatestRunSummary | null> {
-  const { data, error } = await supabase
-    .from('agent_runs')
-    .select('kind, status, started_at, skip_reason, error_detail')
-    .eq('portfolio_id', portfolioId)
-    .eq('kind', 'decision')
-    .order('started_at', { ascending: false })
-    .limit(1)
-    .maybeSingle()
-  if (error) throw new Error(`could not load the latest run: ${error.message}`)
-  if (!data) return null
-  return {
-    kind: data.kind,
-    status: data.status,
-    startedAt: data.started_at,
-    skipReason: data.skip_reason,
-    errorDetail: data.error_detail,
-  }
-}

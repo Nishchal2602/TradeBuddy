@@ -1,16 +1,19 @@
 import { useEffect, useState } from 'react'
 import { AppShell } from '@/components/shell/app-shell'
 import type { TabId } from '@/components/shell/bottom-nav'
-import { ErrorState } from '@/components/states/error-state'
 import { HomeScreen } from '@/features/home/home-screen'
 import { fetchAgentSettings } from '@/features/home/queries'
 import { DecisionDetailScreen } from '@/features/decision-detail/decision-detail-screen'
 import { PositionsScreen } from '@/features/positions/positions-screen'
 import { ActivityScreen } from '@/features/activity/activity-screen'
+import { SettingsScreen } from '@/features/settings/settings-screen'
 
 /**
- * UI Step 4: Positions and Activity are real, Supabase-backed content.
- * Settings remains Step 1's placeholder — Step 5 replaces it.
+ * UI Step 5: Settings is real, Supabase-backed content — the last tab.
+ * Pause/resume/run-now remain presentation-only throughout the app (see
+ * settings-screen.tsx's own comment): no control Edge Function exists to
+ * wire them to safely, and building one is backend work a UI step has no
+ * business doing on its own initiative.
  */
 export function App() {
   const [tab, setTab] = useState<TabId>('home')
@@ -58,13 +61,7 @@ export function App() {
         {tab === 'home' ? <HomeScreen onSelectDecision={setSelectedDecisionId} /> : null}
         {tab === 'positions' ? <PositionsScreen onSelectDecision={setSelectedDecisionId} /> : null}
         {tab === 'activity' ? <ActivityScreen onSelectDecision={setSelectedDecisionId} /> : null}
-        {tab === 'settings' ? (
-          <ErrorState
-            title="Could not reach Supabase"
-            description="Settings and risk controls land in Step 5 — this placeholder demonstrates the error state."
-            onRetry={() => {}}
-          />
-        ) : null}
+        {tab === 'settings' ? <SettingsScreen /> : null}
       </AppShell>
     </div>
   )

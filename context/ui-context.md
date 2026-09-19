@@ -173,6 +173,8 @@ When an asset is flat, its card shows the current price and, if the asset has an
 
 Pause/resume and run-now should be obvious but not visually dominant. Risk controls should communicate that they affect the deterministic risk gate.
 
+**Presentation only as of UI Step 5** (`src/features/settings/settings-screen.tsx`) — no control Edge Function exists yet to safely mutate `agent_settings` from the extension (the anon key is read-only by RLS design), so pause/resume, run-now, and the risk-appetite selector all display real current state correctly but have no functional effect when interacted with. The risk-appetite segmented control specifically is deliberately not click-interactive at all (unlike pause/resume/run-now, which are clickable but inert): letting a click visually highlight a different appetite without persisting it would revert on the next poll and read as a bug, not a preview. Wiring any of these for real requires a new backend endpoint, which is out of scope for a UI-only step.
+
 ### States
 
 Explicitly design:
