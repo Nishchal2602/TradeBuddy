@@ -31,28 +31,79 @@ Use semantic CSS custom properties everywhere. Components must not hardcode hex 
 | Warning | `--state-warning` | `#F59E0B` |
 | Warning subtle | `--state-warning-subtle` | `#2A1E08` |
 | Info | `--state-info` | `#38BDF8` |
+| Info subtle | `--state-info-subtle` | `#0C2A3D` |
 | Neutral | `--state-neutral` | `#71717A` |
+| Neutral subtle | `--state-neutral-subtle` | `#1F1F23` |
 
 Positive/negative colors are semantic state colors only. Do not use green/red decoratively.
 
+Every state has a solid/subtle pair. The subtle variant is the tinted-badge background (paired with the solid variant as its text color) used throughout the Decision Card and Positions vocabulary — e.g. `bg-state-success-subtle text-state-success` for a LONG badge. `--accent-subtle` follows the same pattern for non-semantic accent badges.
+
 ## Typography
+
+Three families, one job each (UI Step 1, adapted from the Stitch reference designs — see `progress-tracker.md`'s UI Step 1 entry for the full reconciliation with this file's own color/depth strategy, which was kept as-is). All three are vendored locally as variable woff2 (`@fontsource-variable/*`), not loaded from a CDN — MV3's default CSP blocks remote fonts, and the pre-UI-Step-1 `--font-sans`/`--font-mono` values were never actually loaded (V0 rendered on system-font fallbacks until this step).
 
 | Role | Font | Variable |
 |---|---|---|
-| UI text | Inter | `--font-sans` |
-| Numbers / data / code | JetBrains Mono | `--font-mono` |
+| Headlines, section titles, asset symbols | Space Grotesk | `--font-display` |
+| Body text, reasoning prose, descriptions | Geist | `--font-sans` |
+| Numbers, prices, and ALL-CAPS micro-labels | JetBrains Mono | `--font-mono` |
 
-Use a strong numeric hierarchy. Prices, percentages, confidence, NAV, and P&L should use the mono font where appropriate.
+Note the third row: uppercase tracked labels (`NET ASSET VALUE`, `ENTRY`, `STOP LOSS`) are mono, not sans — this is deliberate and is what gives the interface its dense, technical character, not an inconsistency.
+
+Use a strong numeric hierarchy. Prices, percentages, confidence, NAV, and P&L always use the mono font.
+
+### Type scale
+
+Eleven fixed roles, each a single class bundling family + size + weight + line-height + tracking (`src/styles/theme.css`'s `.type-*` classes under `@layer components`) — size and family are never chosen independently. `label-*` classes are uppercase by definition; every other class leaves casing to its content. `data-*`/`label-*` use tabular figures (`font-feature-settings: 'tnum' 1, 'zero' 1`) so live-updating prices don't shift width digit-to-digit.
+
+| Class | Family | Size / line-height | Weight |
+|---|---|---|---|
+| `.type-headline-lg` | Space Grotesk | 22 / 28 | 700 |
+| `.type-headline-md` | Space Grotesk | 18 / 24 | 600 |
+| `.type-headline-sm` | Space Grotesk | 15 / 20 | 600 |
+| `.type-body-lg` | Geist | 14 / 20 | 400 |
+| `.type-body-md` | Geist | 13 / 18 | 400 |
+| `.type-body-sm` | Geist | 12 / 16 | 400 |
+| `.type-data-lg` | JetBrains Mono | 16 / 20 | 600 |
+| `.type-data-md` | JetBrains Mono | 13 / 16 | 500 |
+| `.type-data-sm` | JetBrains Mono | 11 / 14 | 500 |
+| `.type-label-md` | JetBrains Mono | 11 / 14, uppercase | 600 |
+| `.type-label-xs` | JetBrains Mono | 9 / 12, uppercase | 600 |
+
+None of these set `color` — combine with a text-color utility (`.type-label-xs.text-state-error`).
 
 ## Border Radius
 
-| Context | Class |
-|---|---|
-| Inline / small UI | `rounded-md` |
-| Cards / panels | `rounded-lg` |
-| Modals / overlays | `rounded-xl` |
+| Context | Class | Value |
+|---|---|---|
+| Inline / small UI | `rounded-md` | 4px |
+| Cards / panels | `rounded-lg` | 6px |
+| Modals / overlays | `rounded-xl` | 8px |
 
 Avoid excessive pill-shaped containers. Pills are reserved for compact status/action labels.
+
+## Spacing
+
+No fixed spacing scale beyond Tailwind's default numeric one — the reference designs' density comes from consistent, disciplined *use* of a few values, not a bespoke scale:
+
+| Context | Typical value |
+|---|---|
+| Page/screen horizontal padding | `px-3` (12px) |
+| Card padding | `p-2.5` (10px) |
+| Nested panel padding | `p-1.5` (6px) |
+| Micro-tile padding | `p-1` (4px) |
+| Inline icon/label gaps | `gap-1` to `gap-1.5` (4-6px) |
+| Section stack spacing | `gap-2.5` (10px) |
+
+## Dimensions
+
+| Element | Value |
+|---|---|
+| Popup frame | 420 × 600px |
+| Header height | 56px (`h-14`) |
+| Bottom nav height | 56px (`h-14`) |
+| Minimum touch target | 44 × 44px |
 
 ## Component Library
 

@@ -1,11 +1,30 @@
 /*
  * Design tokens — verbatim from context/ui-context.md § Colors, Typography,
- * Border Radius. Dark only; no light mode in V0. Components must reference
- * these variables (directly or via the Tailwind utilities mapped below) and
- * must never hardcode hex values — code-standards.md § Styling.
+ * Border Radius, Spacing. Dark only; no light mode in V0. Components must
+ * reference these variables (directly or via the Tailwind utilities mapped
+ * below) and must never hardcode hex values — code-standards.md § Styling.
+ *
+ * UI Step 1 (2026-09-19) layered the Stitch reference designs' typography,
+ * density, and component structure onto this file's existing violet
+ * palette — the palette itself was a deliberate keep, not a port. See
+ * progress-tracker.md's UI Step 1 entry for the reconciliation: colour and
+ * depth strategy (borders + surface contrast, per this file's original
+ * design) stay as they were; the 11-step type scale, the two added
+ * `-subtle` tokens, and the tightened radius scale come from the designs.
  */
 
 @import 'tailwindcss';
+
+/* Vendored variable fonts — MV3's default CSP blocks the Google Fonts CDN
+   the reference designs load from, so these are bundled from the
+   extension's own origin instead. Importing from CSS puts them in Vite's
+   module graph, so the emitted woff2 files land in dist/assets/
+   automatically; scripts/copy-extension-assets.mjs (which only handles
+   manifest.json, precisely because manifest is NOT in the module graph)
+   needs no change. */
+@import '@fontsource-variable/geist';
+@import '@fontsource-variable/space-grotesk';
+@import '@fontsource-variable/jetbrains-mono';
 
 :root {
   /* Surfaces */
@@ -26,7 +45,9 @@
   --border-default: #27272a;
   --border-strong: #3f3f46;
 
-  /* Semantic state */
+  /* Semantic state — every state has a solid/subtle pair. info/neutral's
+     -subtle tokens were added in UI Step 1 (the other four already had
+     them); the four original solid values are untouched. */
   --state-success: #22c55e;
   --state-success-subtle: #0d2a18;
   --state-error: #ef4444;
@@ -34,17 +55,37 @@
   --state-warning: #f59e0b;
   --state-warning-subtle: #2a1e08;
   --state-info: #38bdf8;
+  --state-info-subtle: #0c2a3d;
   --state-neutral: #71717a;
+  --state-neutral-subtle: #1f1f23;
 
-  /* Typography */
+  /* Typography — three families, one job each (UI Step 1). Fallback
+     stacks keep the previous system-font behavior if a vendored file
+     ever fails to load. */
   --font-sans:
-    'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+    'Geist Variable', 'Geist', ui-sans-serif, system-ui, -apple-system,
+    sans-serif;
+  --font-display:
+    'Space Grotesk Variable', 'Space Grotesk', ui-sans-serif, system-ui,
+    sans-serif;
   --font-mono:
-    'JetBrains Mono', ui-monospace, 'SFMono-Regular', monospace;
+    'JetBrains Mono Variable', 'JetBrains Mono', ui-monospace,
+    'SFMono-Regular', monospace;
+
+  /* Border radius — ui-context.md's three-tier mapping (rounded-md
+     inline / rounded-lg cards / rounded-xl modals) is kept exactly;
+     these values are tightened from Tailwind's stock 6/8/12px toward the
+     reference designs' density without going as far as their borderless
+     2/4/8px (this system keeps borders, which read better with a little
+     more room than a borderless design needs). */
+  --radius-md: 0.25rem; /* 4px */
+  --radius-lg: 0.375rem; /* 6px */
+  --radius-xl: 0.5rem; /* 8px */
 }
 
 /* Map tokens to Tailwind v4 theme so bg-base, text-primary, border-strong,
-   font-sans, etc. resolve as utilities without a tailwind.config.js. */
+   font-sans, rounded-lg, etc. resolve as utilities without a
+   tailwind.config.js. */
 @theme inline {
   --color-bg-base: var(--bg-base);
   --color-bg-surface: var(--bg-surface);
@@ -67,10 +108,17 @@
   --color-state-warning: var(--state-warning);
   --color-state-warning-subtle: var(--state-warning-subtle);
   --color-state-info: var(--state-info);
+  --color-state-info-subtle: var(--state-info-subtle);
   --color-state-neutral: var(--state-neutral);
+  --color-state-neutral-subtle: var(--state-neutral-subtle);
 
   --font-sans: var(--font-sans);
+  --font-display: var(--font-display);
   --font-mono: var(--font-mono);
+
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+  --radius-xl: var(--radius-xl);
 }
 
 @layer base {
@@ -87,5 +135,102 @@
     color: var(--text-primary);
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
+  }
+}
+
+/* The 11-step type scale (UI Step 1, adapted from the Stitch reference
+   designs' Tailwind config). Each class bundles family + size + weight +
+   line-height + tracking as one unit rather than letting family and size
+   be applied separately — the source designs pair a font-* class with a
+   text-* class by hand everywhere, which is easy to get wrong the first
+   time it's copied. None of these set `color`; combine with a color
+   utility (e.g. `type-label-xs text-state-error`) as needed.
+   font-feature-settings 'tnum'/'zero' on the data/label steps: the
+   reference designs' own DESIGN.md calls for tabular figures on every
+   numeral but never actually implements it — for live-updating prices,
+   digits shifting width on every tick genuinely matters. label-* also
+   includes uppercase directly: all uses of these two steps in the
+   reference designs are uppercase, with no counterexample. */
+@layer components {
+  .type-headline-lg {
+    font-family: var(--font-display);
+    font-size: 22px;
+    line-height: 28px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+  .type-headline-md {
+    font-family: var(--font-display);
+    font-size: 18px;
+    line-height: 24px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .type-headline-sm {
+    font-family: var(--font-display);
+    font-size: 15px;
+    line-height: 20px;
+    font-weight: 600;
+  }
+
+  .type-body-lg {
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 400;
+  }
+  .type-body-md {
+    font-family: var(--font-sans);
+    font-size: 13px;
+    line-height: 18px;
+    font-weight: 400;
+  }
+  .type-body-sm {
+    font-family: var(--font-sans);
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 400;
+  }
+
+  .type-data-lg {
+    font-family: var(--font-mono);
+    font-size: 16px;
+    line-height: 20px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    font-feature-settings: 'tnum' 1, 'zero' 1;
+  }
+  .type-data-md {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 16px;
+    font-weight: 500;
+    font-feature-settings: 'tnum' 1, 'zero' 1;
+  }
+  .type-data-sm {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 14px;
+    font-weight: 500;
+    font-feature-settings: 'tnum' 1, 'zero' 1;
+  }
+
+  .type-label-md {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 14px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    font-feature-settings: 'tnum' 1, 'zero' 1;
+  }
+  .type-label-xs {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    line-height: 12px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-feature-settings: 'tnum' 1, 'zero' 1;
   }
 }
