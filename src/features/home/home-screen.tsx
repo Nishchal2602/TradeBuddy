@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { TrendingUp, TrendingDown, Play, Pause, Brain, Clock, ShieldAlert, CircleAlert, Newspaper } from 'lucide-react'
+import { TrendingUp, TrendingDown, Play, Pause, Brain, Clock, ShieldAlert, CircleAlert, Newspaper, ChevronRight } from 'lucide-react'
 import { Card, CardHeader, CardTitle, Panel } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -9,12 +9,21 @@ import { LoadingState } from '@/components/states/loading-state'
 import { ErrorState } from '@/components/states/error-state'
 import { ACTION_LABEL, ACTION_BADGE_VARIANT, RISK_STATUS_LABEL, RISK_STATUS_BADGE_VARIANT } from '@/features/decisions/display'
 import type { AssetSymbol } from '@/shared/market-data/types.ts'
+import type { LatestMarketPrice } from '@/features/market-data/queries'
 import { useHomeData } from './use-home-data'
 import type { HomeViewModel } from './use-home-data'
-import type { OpenPositionSummary, LatestMarketPrice } from './queries'
+import type { OpenPositionSummary } from './queries'
 import { formatUsd, formatPct, formatRelativeMinutes, formatAgo, unrealizedPnl } from './format'
 
-export function HomeScreen() {
+export interface HomeScreenProps {
+  /** UI Step 3: tapping the latest decision pushes the Decision-detail
+   * screen. Home has no navigation state of its own — App.tsx owns it,
+   * same reasoning as lifting is_paused: Home doesn't need to know what
+   * happens after selection, only that it did. */
+  onSelectDecision?: (decisionId: string) => void
+}
+
+export function HomeScreen({ onSelectDecision }: HomeScreenProps) {
   const state = useHomeData()
 
   if (state.status === 'loading') return <LoadingState message="Loading portfolio…" />
@@ -22,10 +31,10 @@ export function HomeScreen() {
     return <ErrorState title="Could not load portfolio" description={state.message} onRetry={state.refresh} />
   }
 
-  return <HomeContent data={state.data} />
+  return <HomeContent data={state.data} onSelectDecision={onSelectDecision} />
 }
 
-function HomeContent({ data }: { data: HomeViewModel }) {
+function HomeContent({ data, onSelectDecision }: { data: HomeViewModel; onSelectDecision?: (decisionId: string) => void }) {
   // A single "now" per render rather than a per-second ticking clock — the
   // 30s poll (use-home-data.ts) already keeps this reasonably current, and
   // a live-ticking countdown would need its own interval for a cosmetic
@@ -41,7 +50,7 @@ function HomeContent({ data }: { data: HomeViewModel }) {
       <PortfolioCard data={data} now={now} />
       <RunStatusBanner run={data.latestRun} />
       <PositionsCard data={data} now={now} />
-      <LatestDecisionCard data={data} now={now} />
+      <LatestDecisionCard data={data} now={now} onSelectDecision={onSelectDecision} />
     </div>
   )
 }
@@ -215,7 +224,7 @@ function FlatAssetRow({ asset, price }: { asset: AssetSymbol; price: LatestMarke
 
 // --- Latest decision -----------------------------------------------------
 
-function LatestDecisionCard({ data, now }: { data: HomeViewModel; now: number }) {
+function LatestDecisionCard({ data, now, onSelectDecision }: { data: HomeViewModel; now: number; onSelectDecision?: (decisionId: string) => void }) {
   const decision = data.latestDecision
   if (!decision) {
     return (
@@ -293,6 +302,13 @@ function LatestDecisionCard({ data, now }: { data: HomeViewModel; now: number })
             {decision.riskReason ? <span className="type-body-sm text-text-secondary">{decision.riskReason}</span> : null}
           </div>
         </div>
+      ) : null}
+
+      {onSelectDecision ? (
+        <Button variant="ghost" size="sm" className="justify-between" onClick={() => onSelectDecision(decision.id)}>
+          View full detail
+          <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />
+        </Button>
       ) : null}
     </Card>
   )

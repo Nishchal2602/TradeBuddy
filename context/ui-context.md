@@ -142,6 +142,18 @@ Each card should visually prioritize:
 
 The feed should not resemble a generic chat interface.
 
+### Decision Detail
+
+Item 9 above ("expandable details") is a full-screen push (`src/features/decision-detail/`, UI Step 3), not an inline accordion — the popup's height leaves no room to expand a card in place once the detail content is this rich. No bottom nav on this screen; a back arrow returns to whichever tab was active.
+
+Beyond what the card already shows, the detail screen additionally surfaces:
+
+- Technical evidence — the actual indicator values the model reasoned over (RSI, EMA20/50, MACD histogram, ATR%, volume ratio, distance from the 7-day high/low), not just the reason text derived from them.
+- News evidence — every news item available to the model for that asset, not only the ones a reason happened to cite.
+- The full risk-gate outcome, unconditionally (the card only surfaces this on rejection/clamp) — effective confidence threshold, risk budget, and both exposure caps, plus the approved size and which cap (if any) bound it.
+- Position linkage — if the decision opened, closed, or is tracking a position, that position's current state: live unrealized P&L and SL/TP if still open, or the close reason and realized P&L if closed.
+- Metadata: decided-at, model version, prompt version, run id.
+
 ### Positions
 
 Compact table/list showing:

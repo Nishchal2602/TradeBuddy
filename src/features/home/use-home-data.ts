@@ -1,24 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { AssetSymbol } from '@/shared/market-data/types.ts'
-import {
-  fetchAgentSettings,
-  fetchPortfolio,
-  fetchLatestNav,
-  fetchOpenPositions,
-  fetchLatestMarketPrices,
-  fetchLatestDecision,
-  fetchNewsHeadlines,
-  fetchLatestDecisionRun,
-} from './queries'
-import type {
-  AgentSettingsSummary,
-  PortfolioSummary,
-  LatestNav,
-  OpenPositionSummary,
-  LatestMarketPrice,
-  LatestDecision,
-  LatestRunSummary,
-} from './queries'
+import { fetchLatestMarketPrices, fetchNewsHeadlines } from '@/features/market-data/queries'
+import type { LatestMarketPrice, NewsHeadline } from '@/features/market-data/queries'
+import { fetchAgentSettings, fetchPortfolio, fetchLatestNav, fetchOpenPositions, fetchLatestDecision, fetchLatestDecisionRun } from './queries'
+import type { AgentSettingsSummary, PortfolioSummary, LatestNav, OpenPositionSummary, LatestDecision, LatestRunSummary } from './queries'
 
 export interface HomeViewModel {
   settings: AgentSettingsSummary
@@ -27,7 +12,7 @@ export interface HomeViewModel {
   positions: OpenPositionSummary[]
   prices: Map<AssetSymbol, LatestMarketPrice>
   latestDecision: LatestDecision | null
-  citedNews: Map<string, { headline: string; source: string; url: string | null }>
+  citedNews: Map<string, NewsHeadline>
   latestRun: LatestRunSummary | null
 }
 

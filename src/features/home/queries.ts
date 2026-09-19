@@ -101,42 +101,8 @@ export async function fetchOpenPositions(portfolioId: string): Promise<OpenPosit
   }))
 }
 
-export interface LatestMarketPrice {
-  asset: AssetSymbol
-  price: number
-  change24hPct: number | null
-  dataAsOf: string
-}
-
-/** Latest known price per asset, from the most recent decision cycle's
- * market_snapshots — not a live/streaming quote (architecture.md
- * explicitly excludes streaming market feeds; the extension shows what
- * the last cycle actually saw, same figure the risk gate used). Fetches
- * a small recent window and keeps the first (most recent) row per asset
- * in application code — simpler and just as correct as a per-asset
- * "latest" query for a 2-asset universe. */
-export async function fetchLatestMarketPrices(assets: AssetSymbol[]): Promise<Map<AssetSymbol, LatestMarketPrice>> {
-  const { data, error } = await supabase
-    .from('market_snapshots')
-    .select('asset, price, change_24h_pct, data_as_of')
-    .order('data_as_of', { ascending: false })
-    .limit(assets.length * 5)
-  if (error) throw new Error(`could not load market prices: ${error.message}`)
-
-  const byAsset = new Map<AssetSymbol, LatestMarketPrice>()
-  for (const row of data ?? []) {
-    if (byAsset.has(row.asset)) continue
-    byAsset.set(row.asset, {
-      asset: row.asset,
-      price: Number(row.price),
-      change24hPct: row.change_24h_pct === null ? null : Number(row.change_24h_pct),
-      dataAsOf: row.data_as_of,
-    })
-  }
-  return byAsset
-}
-
 export interface LatestDecision {
+  id: string
   asset: AssetSymbol
   action: Action
   confidence: number
@@ -154,12 +120,13 @@ export interface LatestDecision {
 
 /** The single most recent decision across both assets — "latest agent
  * decision" is one card, not one per asset (that's what the Activity tab,
- * Step 4, is for). */
+ * Step 4, is for). Carries its own `id` so Home's card can link into
+ * Decision-detail (UI Step 3) without a second round-trip. */
 export async function fetchLatestDecision(portfolioId: string): Promise<LatestDecision | null> {
   const { data, error } = await supabase
     .from('agent_decisions')
     .select(
-      'asset, action, confidence, primary_driver, reasons, invalidation, risk_status, risk_reason, proposed_stop_loss_pct, proposed_take_profit_pct, computed_stop_loss_price, computed_take_profit_price, decided_at',
+      'id, asset, action, confidence, primary_driver, reasons, invalidation, risk_status, risk_reason, proposed_stop_loss_pct, proposed_take_profit_pct, computed_stop_loss_price, computed_take_profit_price, decided_at',
     )
     .eq('portfolio_id', portfolioId)
     .order('decided_at', { ascending: false })
@@ -168,6 +135,7 @@ export async function fetchLatestDecision(portfolioId: string): Promise<LatestDe
   if (error) throw new Error(`could not load the latest decision: ${error.message}`)
   if (!data) return null
   return {
+    id: data.id,
     asset: data.asset,
     action: data.action,
     confidence: Number(data.confidence),
@@ -182,19 +150,6 @@ export async function fetchLatestDecision(portfolioId: string): Promise<LatestDe
     computedTakeProfitPrice: data.computed_take_profit_price === null ? null : Number(data.computed_take_profit_price),
     decidedAt: data.decided_at,
   }
-}
-
-/** Resolves NEWS-type reasons' newsId references to their real headline —
- * ui-context.md "render only persisted decision reasons and references,"
- * and the raw reason text sometimes only embeds the bare UUID (a live,
- * observed model-output quirk, not something this file works around by
- * rewriting the model's own text — this is additive evidence display,
- * not a correction). */
-export async function fetchNewsHeadlines(newsIds: string[]): Promise<Map<string, { headline: string; source: string; url: string | null }>> {
-  if (newsIds.length === 0) return new Map()
-  const { data, error } = await supabase.from('news_items').select('id, headline, source, url').in('id', newsIds)
-  if (error) throw new Error(`could not load cited news: ${error.message}`)
-  return new Map((data ?? []).map((row) => [row.id, { headline: row.headline, source: row.source, url: row.url }]))
 }
 
 export interface LatestRunSummary {
