@@ -59,13 +59,13 @@
 
 ## AI / Model Calls
 
-- All model calls must pass through one `callModel(payload)` seam.
+- All model calls must pass through one `callModel(payload)` seam — internally, it tries up to 3 rotating API keys on a key-specific failure (HTTP/network error), but a content-level failure (bad finish reason, invalid output shape) fails the call immediately rather than rotating, since a different key would hit the same problem.
 - Keep prompt text versioned.
 - Stamp prompt/model versions on every decision.
 - Use structured output/schema validation.
 - Use low temperature or equivalent deterministic settings where supported.
 - The model must receive explicit hard constraints.
-- The model must know that HOLD is valid and preferred when evidence is insufficient.
+- The model must know to trade only when the evidence crosses the decision threshold, otherwise HOLD — HOLD is a valid, ordinary outcome, not a biased default and not a fallback to avoid.
 - Never let model-generated text become executable instructions.
 - News must be delimited as data.
 - Never allow model output to bypass the risk gate.
