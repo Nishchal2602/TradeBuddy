@@ -1,0 +1,26 @@
+-- ============================================================================
+-- V0 execution mode: manual-only (user decision, 2026-09-19).
+--
+-- The decision cycle (agent-cycle) now runs exclusively from an explicit
+-- user click ("Run agent") in the Chrome extension -- never on an automatic
+-- schedule. No pg_cron job is created for it, here or anywhere else; the
+-- only cron job in this project remains `position-monitor-10min`
+-- (20260918124421_position_monitor_rpc.sql), which is unrelated and
+-- unaffected -- SL/TP/collateral-exhaustion monitoring stays automatic.
+--
+-- agent_settings.is_paused previously defaulted to true (seed_v0_config.sql)
+-- specifically so the agent would not start trading the instant a future
+-- cron schedule was wired up. Since no such schedule exists, or is being
+-- added now, is_paused's only remaining effect is gating whether an
+-- explicit manual invocation actually runs the pipeline --
+-- agent-cycle/index.ts's runAgentCycle checks it first and returns
+-- {status: 'skipped'} otherwise. It must be false for the manual "Run
+-- agent" button to do anything at all.
+--
+-- decision_interval_minutes (180) is deliberately untouched: it remains
+-- configured, just unused for now, for a future autonomous mode -- see
+-- context/progress-tracker.md's Architecture Decisions for the full
+-- reasoning.
+-- ============================================================================
+
+update public.agent_settings set is_paused = false;

@@ -509,7 +509,28 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
   }
 }
 
-Deno.serve(async (_req) => {
+// V0 execution mode: manual-only (2026-09-19) — this function is invoked
+// directly by the Chrome extension's own "Run agent" button (the anon key
+// as bearer token, same trust model as its existing read-only queries; no
+// separate `control` wrapper — see progress-tracker.md's Architecture
+// Decisions). That makes this the first request this function ever
+// receives from an actual browser origin rather than a server-to-server
+// caller (a cron job, or this session's own direct-invocation live
+// checks) — none of which are subject to CORS, a browser-only
+// enforcement mechanism. Supabase does not add CORS headers to Edge
+// Function responses on its own; without handling it here, every
+// extension-triggered call would fail in the browser before this code
+// ever ran.
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+}
+
+Deno.serve(async (req) => {
+  if (req.method === 'OPTIONS') {
+    return new Response(null, { headers: corsHeaders })
+  }
+
   const supabase = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!)
   // Single paid-tier key (user, 2026-09-19) — the free-tier 3-key
   // rotation is retired; callModel's own loop still generalizes to N
@@ -517,5 +538,5 @@ Deno.serve(async (_req) => {
   // needed to change to make that switch.
   const apiKeys = [Deno.env.get('GEMINI_API_KEY_1')].filter((k): k is string => !!k)
   const summary = await runAgentCycle({ supabase, apiKeys, nowIso: new Date().toISOString() })
-  return new Response(JSON.stringify(summary), { headers: { 'content-type': 'application/json' } })
+  return new Response(JSON.stringify(summary), { headers: { ...corsHeaders, 'content-type': 'application/json' } })
 })

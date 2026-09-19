@@ -120,9 +120,9 @@ Use Lucide React for icons.
 Compact top header (`src/components/shell/app-header.tsx`, UI Step 1) containing only:
 
 - Product/agent identity.
-- Agent status (running/paused).
+- Agent mode — a static "MANUAL" badge (V0 execution mode, 2026-09-19 — see progress-tracker.md's Architecture Decisions). Not derived from `agent_settings.is_paused`, and not a live/pulsing indicator: nothing about it changes at runtime, so it carries no `StatusDot` pulse (reserved for a genuinely live state).
 
-NAV, total P&L, and next scheduled run live in the Home screen's Portfolio card instead (UI Step 2) — a 56px header has no room to make any of those three legible at this popup's width alongside identity and status, and Home is already the first thing the user sees.
+NAV and total P&L live in the Home screen's Portfolio card instead (UI Step 2) — a 56px header has no room to make either legible at this popup's width alongside identity and mode, and Home is already the first thing the user sees. Home's own Agent card (added with the manual-only execution mode, 2026-09-19) is where "last agent run" and the Run Agent control live — not the header.
 
 ### Decision Feed
 
@@ -173,7 +173,9 @@ When an asset is flat, its card shows the current price and, if the asset has an
 
 Pause/resume and run-now should be obvious but not visually dominant. Risk controls should communicate that they affect the deterministic risk gate.
 
-**Presentation only as of UI Step 5** (`src/features/settings/settings-screen.tsx`) — no control Edge Function exists yet to safely mutate `agent_settings` from the extension (the anon key is read-only by RLS design), so pause/resume, run-now, and the risk-appetite selector all display real current state correctly but have no functional effect when interacted with. The risk-appetite segmented control specifically is deliberately not click-interactive at all (unlike pause/resume/run-now, which are clickable but inert): letting a click visually highlight a different appetite without persisting it would revert on the next poll and read as a bug, not a preview. Wiring any of these for real requires a new backend endpoint, which is out of scope for a UI-only step.
+**Home's "Run agent" is real, as of V0 execution mode (2026-09-19)** — it's the one functional control action in the extension. It invokes the deployed `agent-cycle` Edge Function directly (`src/features/home/run-agent.ts`, anon key as bearer token; no separate `control` wrapper), runs the full pipeline, and refreshes Home's data on completion. This did **not** require a new privileged write endpoint — invoking an Edge Function is a different trust boundary than a direct table write (RLS is irrelevant to it; the function's own service-role client does the actual mutation).
+
+**Everything in Settings remains presentation only** (`src/features/settings/settings-screen.tsx`, unchanged by the above) — no control Edge Function exists to safely mutate `agent_settings` directly from the extension (the anon key is read-only by RLS design there), so Settings' pause/resume, run-now, and the risk-appetite selector all display real current state correctly but have no functional effect when interacted with. The risk-appetite segmented control specifically is deliberately not click-interactive at all (unlike pause/resume/run-now, which are clickable but inert): letting a click visually highlight a different appetite without persisting it would revert on the next poll and read as a bug, not a preview. Wiring any of these for real requires a new backend endpoint, which remains out of scope.
 
 ### States
 
@@ -181,9 +183,8 @@ Explicitly design:
 
 - Loading.
 - Empty/no decisions.
-- Agent paused.
-- Scheduled run pending.
-- Running.
+- Agent idle, awaiting a manual run (V0 execution mode, 2026-09-19 — there is no scheduled run to be "pending," so this replaces that state).
+- Running (a manual invocation in flight).
 - Cycle skipped.
 - Provider error.
 - Stale data.

@@ -197,7 +197,7 @@ V0 assets:
 
 V0 cadence:
 
-- 3 hours, configurable
+- 3 hours, configurable — **but not currently scheduled**. V0 execution mode is manual-only (2026-09-19, explicit user decision, see `context/progress-tracker.md`): the decision cycle runs only when the user clicks "Run agent" in the extension; no `pg_cron` schedule exists for it. `decision_interval_minutes` stays configured, unused, for a future autonomous mode. The position monitor is unaffected and remains fully automatic on its own 10-minute schedule.
 
 V0 execution:
 

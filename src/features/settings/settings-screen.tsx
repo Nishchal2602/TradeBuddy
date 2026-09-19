@@ -51,7 +51,12 @@ function SettingsContent({ data }: { data: SettingsViewModel }) {
       <Card>
         <SectionHeader icon={<Server className="h-4 w-4 text-accent-primary" aria-hidden="true" />} title="Agent runtime" />
         <div className="flex items-center justify-between">
-          <Badge variant={settings.isPaused ? 'neutral' : 'success'}>{settings.isPaused ? 'PAUSED' : 'RUNNING'}</Badge>
+          {/* V0 execution mode: manual-only (2026-09-19) — is_paused no
+              longer reflects an autonomous running/paused state (nothing
+              schedules this cycle), so this is a static badge now rather
+              than derived from it. The buttons below are untouched:
+              still presentation-only, per the same reasoning as before. */}
+          <Badge variant="accent">MANUAL</Badge>
           <div className="flex gap-1.5">
             {settings.isPaused ? (
               <Button variant="primary" size="sm" title="Presentation only — control actions require a server-side endpoint not yet built.">

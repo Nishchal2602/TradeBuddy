@@ -2,7 +2,9 @@
 
 ## Overview
 
-A Chrome extension that gives a single user a live window into an autonomous AI crypto paper-trading agent. The agent runs server-side on a fixed 3-hour cadence, monitors BTC and ETH using recent market data, technical indicators, and relevant recent news, then makes a structured OPEN_LONG / OPEN_SHORT / HOLD / CLOSE decision, with a mandatory stop-loss and take-profit on every open. A deterministic risk gate validates the model proposal — confidence, SL/TP placement, risk-derived position size, exposure caps — before a paper broker executes the simulated trade with fees and slippage. SL/TP execution itself runs on an independent 10-minute position-monitor cycle, not gated by the 3-hour decision cycle. Supabase stores the complete history so every decision can be inspected, including the exact inputs, reasons, and invalidation conditions that produced it. V0 is explicitly a paper-trading experiment; it must not use real funds, real leverage, or exchange credentials — shorts are 1x unleveraged synthetic paper positions only (`context/specs/trading-domain-contract.md`).
+A Chrome extension that gives a single user a live window into an AI crypto paper-trading agent. The agent monitors BTC and ETH using recent market data, technical indicators, and relevant recent news, then makes a structured OPEN_LONG / OPEN_SHORT / HOLD / CLOSE decision, with a mandatory stop-loss and take-profit on every open. A deterministic risk gate validates the model proposal — confidence, SL/TP placement, risk-derived position size, exposure caps — before a paper broker executes the simulated trade with fees and slippage. SL/TP execution itself runs automatically on an independent 10-minute position-monitor cycle. Supabase stores the complete history so every decision can be inspected, including the exact inputs, reasons, and invalidation conditions that produced it. V0 is explicitly a paper-trading experiment; it must not use real funds, real leverage, or exchange credentials — shorts are 1x unleveraged synthetic paper positions only (`context/specs/trading-domain-contract.md`).
+
+**V0 execution mode: manual-only (2026-09-19, explicit user decision — see `context/progress-tracker.md`'s Architecture Decisions).** The decision cycle described below and throughout this document as running on "a fixed 3-hour cadence" is the target autonomous design, not V0's current behavior: it runs exclusively when the user clicks "Run agent" in the extension, never on a schedule. `decision_interval_minutes` stays configured for when autonomous scheduling is deliberately switched on later. The position monitor is a separate, already-automatic process, unaffected by this — it keeps running independently on its own schedule regardless of whether the decision cycle has ever been triggered.
 
 ## Goals
 
@@ -25,7 +27,7 @@ A Chrome extension that gives a single user a live window into an autonomous AI 
 9. Independently, every 10 minutes, the position monitor polls prices for open positions and executes any SL/TP/collateral-exhaustion trigger through the same paper broker — see `context/specs/trading-domain-contract.md`.
 10. Supabase stores the decision, input payload, execution result, positions, and NAV snapshot.
 11. The extension reads the latest state from Supabase and presents the decision and its reasoning to the user.
-12. User can pause/resume the agent or manually trigger a run through the server-side control endpoint.
+12. User manually triggers a decision cycle by clicking "Run agent" in the extension, which invokes the decision-cycle Edge Function directly (V0 execution mode: manual-only, 2026-09-19 — no separate control endpoint exists or is needed for this specific action).
 
 ## Features
 

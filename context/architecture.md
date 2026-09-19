@@ -158,6 +158,8 @@ Two independent `pg_cron` jobs — not one job with two responsibilities:
 
 Both intervals are configuration, not hardcoded. V0 uses fixed scheduling only for both — event-driven triggers on the *decision* cycle are explicitly deferred; the position monitor's price-triggered execution is a distinct, deliberate exception that exists specifically for SL/TP, not a general event-driven mechanism.
 
+**V0 execution mode: manual-only (2026-09-19).** The description above is the target design; V0's actual current behavior is narrower for the decision cycle specifically. No `pg_cron` schedule exists for `agent-cycle`, and none is created in V0 — it runs exclusively when the user clicks "Run agent" in the Chrome extension, which invokes the deployed function directly (anon key as bearer token, same trust model as every other extension read; no separate `control` wrapper). `decision_interval_minutes` stays configured and unused, reserved for switching this on deliberately later. The position monitor is unaffected by this and keeps running exactly as scheduled above — this section's design remains fully current for it.
+
 Both cycles must be idempotent so retries cannot create duplicate trades. The two cycles can race on the same position (one closes it while the other is mid-decision) — resolved deterministically via a conditional `UPDATE ... WHERE status = 'open'` inside the fill transaction; see `context/specs/trading-domain-contract.md` §6.
 
 ## Invariants

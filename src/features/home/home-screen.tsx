@@ -1,8 +1,10 @@
-import { TrendingUp, TrendingDown, Play, Pause, Brain, Clock, ShieldAlert, CircleAlert, Newspaper, ChevronRight } from 'lucide-react'
+import { useState } from 'react'
+import { TrendingUp, TrendingDown, Play, Bot, Brain, Clock, ShieldAlert, CircleAlert, Newspaper, ChevronRight } from 'lucide-react'
 import { useNow } from '@/hooks/use-now'
 import { Card, CardHeader, CardTitle, Panel } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { StatusDot } from '@/components/ui/status-dot'
 import { Stat, StatGrid } from '@/components/ui/stat'
 import { SectionHeader } from '@/components/ui/section-header'
 import { LoadingState } from '@/components/states/loading-state'
@@ -13,7 +15,9 @@ import type { LatestMarketPrice } from '@/features/market-data/queries'
 import { useHomeData } from './use-home-data'
 import type { HomeViewModel } from './use-home-data'
 import type { OpenPositionSummary } from './queries'
-import { formatUsd, formatPct, formatRelativeMinutes, formatAgo, unrealizedPnl } from '@/format'
+import { invokeAgentCycle } from './run-agent'
+import type { AgentCycleRunResult } from './run-agent'
+import { formatUsd, formatPct, formatAgo, unrealizedPnl } from '@/format'
 
 export interface HomeScreenProps {
   /** UI Step 3: tapping the latest decision pushes the Decision-detail
@@ -31,10 +35,18 @@ export function HomeScreen({ onSelectDecision }: HomeScreenProps) {
     return <ErrorState title="Could not load portfolio" description={state.message} onRetry={state.refresh} />
   }
 
-  return <HomeContent data={state.data} onSelectDecision={onSelectDecision} />
+  return <HomeContent data={state.data} onSelectDecision={onSelectDecision} onRan={state.refresh} />
 }
 
-function HomeContent({ data, onSelectDecision }: { data: HomeViewModel; onSelectDecision?: (decisionId: string) => void }) {
+function HomeContent({
+  data,
+  onSelectDecision,
+  onRan,
+}: {
+  data: HomeViewModel
+  onSelectDecision?: (decisionId: string) => void
+  onRan: () => void
+}) {
   // A 30s-updated "now" rather than a per-second ticking clock — the same
   // interval as the data poll itself (use-home-data.ts), which already
   // keeps this reasonably current; a live-ticking countdown would need
@@ -45,6 +57,7 @@ function HomeContent({ data, onSelectDecision }: { data: HomeViewModel; onSelect
   return (
     <div className="flex flex-col gap-2.5 p-3">
       <PortfolioCard data={data} now={now} />
+      <AgentCard data={data} now={now} onRan={onRan} />
       <RunStatusBanner run={data.latestRun} />
       <PositionsCard data={data} now={now} />
       <LatestDecisionCard data={data} now={now} onSelectDecision={onSelectDecision} />
@@ -55,16 +68,8 @@ function HomeContent({ data, onSelectDecision }: { data: HomeViewModel; onSelect
 // --- Portfolio ---------------------------------------------------------
 
 function PortfolioCard({ data, now }: { data: HomeViewModel; now: number }) {
-  const { nav, settings, latestRun } = data
-  const isPaused = settings.isPaused
+  const { nav } = data
   const pnl = nav?.unrealizedPnl ?? 0
-
-  const nextCycle = (() => {
-    if (isPaused) return 'Paused'
-    if (!latestRun) return 'Pending first run'
-    const nextAt = new Date(new Date(latestRun.startedAt).getTime() + settings.decisionIntervalMinutes * 60_000).toISOString()
-    return formatRelativeMinutes(nextAt, now)
-  })()
 
   return (
     <Card>
@@ -73,27 +78,10 @@ function PortfolioCard({ data, now }: { data: HomeViewModel; now: number }) {
           <TrendingUp className="h-4 w-4 text-accent-primary" aria-hidden="true" />
           Portfolio
         </CardTitle>
-        <div className="flex gap-1.5">
-          {isPaused ? (
-            <Button variant="primary" size="sm" title="Presentation only — control actions land in a later step.">
-              <Play className="h-3.5 w-3.5" aria-hidden="true" />
-              Resume
-            </Button>
-          ) : (
-            <>
-              <Button variant="primary" size="sm" title="Presentation only — control actions land in a later step.">
-                Run now
-              </Button>
-              <Button variant="secondary" size="sm" title="Presentation only — control actions land in a later step.">
-                <Pause className="h-3.5 w-3.5" aria-hidden="true" />
-              </Button>
-            </>
-          )}
-        </div>
       </CardHeader>
 
       {nav ? (
-        <StatGrid columns={3}>
+        <StatGrid columns={2}>
           <Stat label="NAV" value={formatUsd(nav.nav)} variant="accent" />
           <Stat
             label="Unrealized P&L"
@@ -101,7 +89,6 @@ function PortfolioCard({ data, now }: { data: HomeViewModel; now: number }) {
             sublabel={formatPct((pnl / data.portfolio.startingCapital) * 100, { signed: true })}
             variant={pnl > 0 ? 'success' : pnl < 0 ? 'error' : 'default'}
           />
-          <Stat label="Next cycle" value={nextCycle} />
         </StatGrid>
       ) : (
         <p className="type-body-sm text-text-muted">No cycles have run yet — NAV appears after the first one.</p>
@@ -117,6 +104,85 @@ function PortfolioCard({ data, now }: { data: HomeViewModel; now: number }) {
             {formatAgo(nav.capturedAt, now)}
           </span>
         ) : null}
+      </div>
+    </Card>
+  )
+}
+
+// --- Agent control --------------------------------------------------------
+
+type RunFeedback = { tone: 'success' | 'info' | 'error'; message: string }
+
+function describeRunResult(result: AgentCycleRunResult): RunFeedback {
+  switch (result.status) {
+    case 'completed': {
+      const count = result.decisions.length
+      return { tone: 'success', message: `Cycle complete — ${count} decision${count === 1 ? '' : 's'} made.` }
+    }
+    case 'duplicate_tick':
+      // agent-cycle's idempotency key floors to the configured 3-hour
+      // decision_interval_minutes bucket regardless of trigger source —
+      // a second manual click inside the same window is a real, expected
+      // no-op (23505 unique-violation path), not a failure to explain
+      // away as an error.
+      return { tone: 'info', message: 'Already ran for the current window — try again once it rolls over.' }
+    case 'skipped':
+      return { tone: 'info', message: result.detail ?? 'Cycle skipped.' }
+    case 'failed':
+      return { tone: 'error', message: result.detail ?? 'The cycle failed.' }
+  }
+}
+
+function AgentCard({ data, now, onRan }: { data: HomeViewModel; now: number; onRan: () => void }) {
+  const [running, setRunning] = useState(false)
+  const [feedback, setFeedback] = useState<RunFeedback | null>(null)
+
+  const handleRun = async () => {
+    setRunning(true)
+    setFeedback(null)
+    try {
+      const result = await invokeAgentCycle()
+      setFeedback(describeRunResult(result))
+    } catch (error) {
+      setFeedback({ tone: 'error', message: error instanceof Error ? error.message : String(error) })
+    } finally {
+      setRunning(false)
+      onRan()
+    }
+  }
+
+  const feedbackClass =
+    feedback?.tone === 'error' ? 'type-body-sm text-state-error' : feedback?.tone === 'success' ? 'type-body-sm text-state-success' : 'type-body-sm text-text-secondary'
+
+  return (
+    <Card>
+      <SectionHeader icon={<Bot className="h-4 w-4 text-accent-primary" aria-hidden="true" />} title="Agent" />
+
+      <StatGrid columns={2}>
+        <Stat label="AGENT MODE" value="Manual" />
+        <Stat label="LAST AGENT RUN" value={data.latestRun ? formatAgo(data.latestRun.startedAt, now) : 'Never run yet'} />
+      </StatGrid>
+
+      <Button variant="primary" size="md" className="w-full" onClick={handleRun} disabled={running}>
+        <Play className="h-3.5 w-3.5" aria-hidden="true" />
+        {running ? 'Running…' : 'Run agent'}
+      </Button>
+
+      {feedback ? (
+        <p className={feedbackClass}>{feedback.message}</p>
+      ) : (
+        <p className="type-body-sm text-text-muted">The agent only decides when you run it — it never trades on its own.</p>
+      )}
+
+      <div className="flex items-center justify-between border-t border-border-default pt-2">
+        <div className="flex items-center gap-1.5">
+          <StatusDot variant="success" pulse />
+          <span className="type-label-xs text-text-muted">POSITION MONITOR</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          {data.latestMonitorRun ? <span className="type-label-xs text-text-muted">{formatAgo(data.latestMonitorRun.startedAt, now)}</span> : null}
+          <Badge variant="success">ACTIVE</Badge>
+        </div>
       </div>
     </Card>
   )

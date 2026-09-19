@@ -16,6 +16,7 @@ export interface HomeViewModel {
   latestDecision: LatestDecision | null
   citedNews: Map<string, NewsHeadline>
   latestRun: LatestRunSummary | null
+  latestMonitorRun: LatestRunSummary | null
 }
 
 export type HomeDataState = { status: 'loading' } | { status: 'error'; message: string } | { status: 'ready'; data: HomeViewModel }
@@ -24,18 +25,19 @@ async function loadHomeData(): Promise<HomeViewModel> {
   const settings = await fetchAgentSettings()
   const portfolio = await fetchPortfolio()
 
-  const [nav, positions, prices, latestDecision, latestRun] = await Promise.all([
+  const [nav, positions, prices, latestDecision, latestRun, latestMonitorRun] = await Promise.all([
     fetchLatestNav(portfolio.id),
     fetchOpenPositions(portfolio.id),
     fetchLatestMarketPrices(settings.assets),
     fetchLatestDecision(portfolio.id),
     fetchLatestRun(portfolio.id, 'decision'),
+    fetchLatestRun(portfolio.id, 'monitor'),
   ])
 
   const newsIds = latestDecision?.reasons.filter((r) => r.type === 'NEWS').map((r) => r.newsId) ?? []
   const citedNews = await fetchNewsHeadlines(newsIds)
 
-  return { settings, portfolio, nav, positions, prices, latestDecision, citedNews, latestRun }
+  return { settings, portfolio, nav, positions, prices, latestDecision, citedNews, latestRun, latestMonitorRun }
 }
 
 // Polled, not subscribed — Supabase Realtime would work but is genuinely
