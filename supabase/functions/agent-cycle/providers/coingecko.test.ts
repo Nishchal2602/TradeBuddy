@@ -1,5 +1,5 @@
 import { assertEquals, assertRejects } from 'jsr:@std/assert@1'
-import { CoinGeckoMarketDataProvider } from './coingecko.ts'
+import { CoinGeckoMarketDataProvider, fetchRecentPricePoints } from './coingecko.ts'
 import {
   ProviderFetchError,
   ProviderRateLimitError,
@@ -166,4 +166,72 @@ Deno.test('getMarketData: network failure throws ProviderFetchError', async () =
     throw new TypeError('fetch failed')
   }) as unknown as typeof fetch)
   await assertRejects(() => provider.getMarketData(['BTC']), ProviderFetchError)
+})
+
+// --- fetchRecentPricePoints (Step 5 — position monitor's 5-minute feed) ---
+
+const FIVE_MIN_CHART_FIXTURE = {
+  prices: [
+    [1787058000000, 76800.5],
+    [1787058300000, 76812.1], // +5 min
+    [1787058600000, 76790.0], // +5 min
+  ],
+  total_volumes: [
+    [1787058000000, 1000],
+    [1787058300000, 1010],
+    [1787058600000, 990],
+  ],
+}
+
+Deno.test('fetchRecentPricePoints: parses days=1 market_chart into {timestamp, price} points, dropping volume', () => {
+  const fetchImpl = ((url: string) => {
+    if (!url.includes('days=1')) throw new Error(`expected a days=1 request, got ${url}`)
+    return Promise.resolve(jsonResponse(FIVE_MIN_CHART_FIXTURE))
+  }) as unknown as typeof fetch
+
+  return fetchRecentPricePoints(['BTC'], fetchImpl).then((result) => {
+    const btc = result.BTC!
+    assertEquals(btc.length, 3)
+    assertEquals(btc[0], { timestamp: '2026-08-18T13:00:00.000Z', price: 76800.5 })
+    assertEquals(btc[1], { timestamp: '2026-08-18T13:05:00.000Z', price: 76812.1 })
+    // no `volume` field leaks through — this function is price-only
+    assertEquals(Object.keys(btc[0]!).sort(), ['price', 'timestamp'])
+  })
+})
+
+Deno.test('fetchRecentPricePoints: empty asset list makes zero requests and returns {}', async () => {
+  const calls: string[] = []
+  const fetchImpl = ((url: string) => {
+    calls.push(url)
+    throw new Error('should never be called')
+  }) as unknown as typeof fetch
+
+  const result = await fetchRecentPricePoints([], fetchImpl)
+  assertEquals(result, {})
+  assertEquals(calls.length, 0)
+})
+
+Deno.test('fetchRecentPricePoints: both assets fetched concurrently, each keyed correctly', async () => {
+  const fetchImpl = ((url: string) => {
+    const isEth = url.includes('/coins/ethereum/')
+    return Promise.resolve(jsonResponse(isEth
+      ? { prices: [[1787058000000, 2500]], total_volumes: [[1787058000000, 500]] }
+      : FIVE_MIN_CHART_FIXTURE))
+  }) as unknown as typeof fetch
+
+  const result = await fetchRecentPricePoints(['BTC', 'ETH'], fetchImpl)
+  assertEquals(result.BTC!.length, 3)
+  assertEquals(result.ETH!.length, 1)
+  assertEquals(result.ETH![0]!.price, 2500)
+})
+
+Deno.test('fetchRecentPricePoints: HTTP failure on one asset throws (fail-closed, not a partial result)', async () => {
+  const fetchImpl = ((url: string) => {
+    if (url.includes('/coins/ethereum/')) {
+      return Promise.resolve(new Response('error', { status: 500 }))
+    }
+    return Promise.resolve(jsonResponse(FIVE_MIN_CHART_FIXTURE))
+  }) as unknown as typeof fetch
+
+  await assertRejects(() => fetchRecentPricePoints(['BTC', 'ETH'], fetchImpl), ProviderFetchError)
 })

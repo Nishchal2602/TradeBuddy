@@ -7,6 +7,12 @@ import {
   ProviderRateLimitError,
   ProviderValidationError,
 } from '../../../../src/shared/providers/errors.ts'
+// Returned directly by fetchRecentPricePoints below rather than a locally
+// redefined (and structurally identical) type — the shape is "owned" by
+// the trigger-detection logic that consumes it (position-monitor/
+// triggers.ts), matching how NormalizedMarketData is owned by
+// src/shared/market-data/types.ts and merely produced here.
+import type { PricePoint } from '../../position-monitor/triggers.ts'
 
 // CoinGecko coin ids for the V0 asset universe. Entirely internal to this
 // file — nothing outside ever sees the string "bitcoin"/"ethereum". This is
@@ -197,4 +203,42 @@ export class CoinGeckoMarketDataProvider implements MarketDataProvider {
       })),
     }
   }
+}
+
+// --- Position-monitor price feed --------------------------------------
+//
+// days=1 -> 5-minute granularity on the free tier (confirmed live,
+// 2026-09-18 — trading-domain-contract.md §5), genuinely finer than the
+// hourly closeSeries getMarketData above uses (days=30). Standalone
+// rather than a method on CoinGeckoMarketDataProvider: it doesn't return
+// NormalizedMarketData and doesn't implement MarketDataProvider, so
+// attaching it to that class would misrepresent what the class's own
+// interface promises. Only the position monitor calls this; the decision
+// cycle never does.
+
+export async function fetchRecentPricePoints(
+  assets: AssetSymbol[],
+  fetchImpl: typeof fetch = fetch,
+  baseUrl: string = BASE_URL,
+): Promise<Partial<Record<AssetSymbol, PricePoint[]>>> {
+  // Promise.all fails fast on any single rejection (matching
+  // getMarketData's own "throw rather than partial" convention above), so
+  // every requested asset is genuinely guaranteed present whenever this
+  // resolves at all — Partial<> here is a TypeScript limitation
+  // (Object.fromEntries can't statically prove a Record's key coverage
+  // from its input array), not a real possibility of a partial result.
+  if (assets.length === 0) return {}
+
+  const entries = await Promise.all(
+    assets.map(async (asset): Promise<[AssetSymbol, PricePoint[]]> => {
+      const coinId = COIN_ID[asset]
+      const url = `${baseUrl}/coins/${coinId}/market_chart?vs_currency=usd&days=1`
+      const raw = await fetchJson(url, fetchImpl)
+      const chart = parseOrThrow(CoinGeckoMarketChartResponse, raw, `/coins/${coinId}/market_chart?days=1`)
+      const points = chart.prices.map(([ts, price]) => ({ timestamp: msToIso(ts), price }))
+      return [asset, points]
+    }),
+  )
+
+  return Object.fromEntries(entries)
 }
