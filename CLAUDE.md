@@ -25,6 +25,8 @@ The product is V0 paper trading only.
 
 **Never introduce real-money trading, exchange execution, exchange API keys, real leverage, derivatives, or real financial transactions.** V0 simulates 1x unleveraged synthetic short positions in paper only — no borrowing, no margin, no liquidation, no funding mechanics. Full detail: `context/specs/trading-domain-contract.md`.
 
+**NEWS/TECHNICAL decision methodology, prompt content, and indicator interpretation** — the areas `trading-domain-contract.md:7` explicitly parks for separate review — are specified in `context/specs/trading-strategy-v1.md` (2026-09-20, **PROPOSED, not implemented**). It is evidence-led, not preference-led: read its §0 executive assessment before touching indicator logic, the Gemini prompt, or risk-appetite calibration. It also documents two live defects (partial-bar indicator computation; a 7-day-range calculation that mixes live spot against historical candles) that must be fixed before any of its rules are implemented.
+
 ## Non-negotiable architecture rules
 
 - The Chrome extension is the UI/control surface, not the autonomous engine.
