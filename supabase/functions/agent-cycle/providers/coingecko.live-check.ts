@@ -20,6 +20,7 @@ for (const asset of result) {
   console.log(`  candles: ${asset.candles.length} (4h-spaced)`)
   console.log(`  closeSeries: ${asset.closeSeries.length} (1h-spaced)`)
   console.log(`  volumeSeries: ${asset.volumeSeries.length}`)
+  console.log(`  dailyCloseSeries: ${asset.dailyCloseSeries.length} (24h-spaced, closed-bar-filtered)`)
   const firstCandle = asset.candles[0]
   const lastCandle = asset.candles.at(-1)
   if (firstCandle && lastCandle) {

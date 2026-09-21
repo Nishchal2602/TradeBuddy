@@ -66,7 +66,11 @@ export type RiskStatus = z.infer<typeof RiskStatus>
 // (trading-domain-contract.md §4 / the position-model plan's worked
 // example — the single-trade cap binds before the asset-exposure cap in
 // V0, since one net position per asset makes them the same number).
-export const SizeCapApplied = z.enum(['single_trade', 'asset_exposure', 'cash'])
+// `portfolio_risk`/`total_notional` added by trading-strategy-v1.md §17 —
+// genuinely new cross-asset controls, not a repair of asset_exposure
+// (which stays structurally inert in V0/V1 for the same one-position-
+// per-asset reason as single_trade; see sizing.ts's own comment).
+export const SizeCapApplied = z.enum(['single_trade', 'asset_exposure', 'cash', 'portfolio_risk', 'total_notional'])
 export type SizeCapApplied = z.infer<typeof SizeCapApplied>
 
 // --- What the model proposes ------------------------------------------
@@ -184,6 +188,14 @@ export const AgentDecision = z.object({
   effectiveRiskBudgetPct: z.number().min(0).max(1),
   effectiveSingleTradeCapPct: z.number().min(0).max(1),
   effectiveAssetExposureCapPct: z.number().min(0).max(1),
+  // trading-strategy-v1.md §17 — the two new portfolio-level sizing
+  // candidates, denormalized on the same terms as the four above (NOT
+  // NULL, every row regardless of outcome). Historical pre-V1 rows
+  // backfill to 0, a value no real computation ever legitimately
+  // produces (the ceiling multiplier defaults to 1.5, never 0) — an
+  // honest "this concept did not exist yet" marker, not a real 0 ceiling.
+  effectivePortfolioRiskCeilingPct: z.number().nonnegative(),
+  effectiveMaxTotalNotionalPct: z.number().min(0).max(1),
 
   // Replay (invariant 8) — genuinely unknown shape at this layer
   // deliberately: over-specifying this now would presume methodology
@@ -192,6 +204,13 @@ export const AgentDecision = z.object({
   outputPayload: z.unknown(),
   promptVersion: z.string().min(1),
   modelVersion: z.string().min(1),
+  // trading-strategy-v1.md §23 — makes the H4/H5 falsification hierarchy
+  // directly queryable. strategyVersion: 'v0-gemini-originated' for the
+  // pre-V1 rows Gemini originated outright, a real V1 value from here on.
+  // modelVetoed: null means no model call happened this cycle (a HOLD
+  // candidate never reaches the veto step, §11) — never a false default.
+  strategyVersion: z.string().min(1),
+  modelVetoed: z.boolean().nullable(),
 
   decidedAt: z.string().datetime(),
 })

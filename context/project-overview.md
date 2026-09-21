@@ -33,12 +33,11 @@ A Chrome extension that gives a single user a live window into an AI crypto pape
 
 ### Autonomous Agent
 
-- Fixed 3-hour scheduled decision cycle.
+- Fixed 3-hour scheduled decision cycle (currently manual-only in V0 — see Architecture Decisions in `progress-tracker.md`).
 - Server-side execution independent of whether Chrome is open.
 - BTC and ETH support in V0.
-- One LLM decision call covering both assets and the portfolio.
-- Structured OPEN_LONG / OPEN_SHORT / HOLD / CLOSE output, with mandatory stop-loss/take-profit percentages on every open.
-- HOLD is the default posture: trade only when the evidence crosses the decision threshold; otherwise HOLD.
+- **Trading Strategy V1 (2026-09-21, implemented):** a deterministic daily-trend regime rule originates every proposal (OPEN_LONG / HOLD / CLOSE — never OPEN_SHORT), with mandatory stop-loss/take-profit on every open. The LLM makes at most one batched call per cycle, only to veto an OPEN_LONG candidate on a known exogenous confound — zero candidates means zero calls. Full detail: `context/specs/trading-strategy-v1.md`.
+- HOLD is the default posture: trade only when the deterministic regime rule signals eligibility and the veto (if any) doesn't block it; otherwise HOLD.
 - Independent 10-minute position-monitor cycle executes SL/TP/collateral-exhaustion triggers, decoupled from the 3-hour decision cadence — see `context/specs/trading-domain-contract.md`.
 - Prompt version recorded with every decision.
 - Exact serialized model input stored with every decision.

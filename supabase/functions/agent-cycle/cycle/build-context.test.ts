@@ -1,5 +1,6 @@
 import { assertAlmostEquals, assertEquals } from 'jsr:@std/assert@1'
 import {
+  aggregateOtherOpenPositionsRisk,
   buildAssetInput,
   buildOpenPositionInput,
   buildPortfolioConstraints,
@@ -10,8 +11,14 @@ import {
 } from './build-context.ts'
 import type { NormalizedMarketData, OhlcCandle, VolumePoint } from '../../../../src/shared/market-data/types.ts'
 import type { Position } from '../../../../src/shared/positions/types.ts'
+import type { RegimeResult } from '../../../../src/shared/strategy/types.ts'
 
 const NOW = '2026-09-19T12:00:00.000Z'
+
+// buildAssetInput just threads regime straight onto AssetInput.regime —
+// evaluateTrendRegime's own correctness is regime.test.ts's job, not
+// this module's. A single static fixture is enough here.
+const FIXTURE_REGIME: RegimeResult = { regime: 'UP', dailyClose: 105, dailyMa: 100, barsUsed: 50 }
 
 // A minimal indicator-computable fixture — not testing indicator
 // correctness here (calculate.test.ts already does exhaustively), just
@@ -23,6 +30,13 @@ function marketData(overrides: Partial<NormalizedMarketData> = {}): NormalizedMa
     const ts = new Date(new Date(NOW).getTime() - (44 - i) * ((7 * 24 * 3_600_000) / 45)).toISOString()
     return { timestamp: ts, open: 100, high: 102, low: 98, close: 100 }
   })
+  // 60 closed daily bars by default — comfortably over TREND_MA_LOOKBACK_
+  // DAYS (50) so the sufficiency check in checkMarketDataFreshness passes
+  // unless a test deliberately overrides this to exercise it.
+  const dailyCloseSeries = Array.from({ length: 60 }, (_, i) => ({
+    timestamp: new Date(new Date(NOW).getTime() - (59 - i) * 86_400_000).toISOString(),
+    close: 100 + Math.sin(i / 10) * 5,
+  }))
   return {
     asset: 'BTC',
     provider: 'test-fixture',
@@ -35,6 +49,7 @@ function marketData(overrides: Partial<NormalizedMarketData> = {}): NormalizedMa
     candles,
     closeSeries,
     volumeSeries,
+    dailyCloseSeries,
     ...overrides,
   }
 }
@@ -78,6 +93,22 @@ Deno.test('checkMarketDataFreshness: one stale asset among several fails the who
 
 Deno.test('checkMarketDataFreshness: exactly at the staleness threshold is still fresh (boundary inclusive)', () => {
   const result = checkMarketDataFreshness([marketData({ dataAsOf: '2026-09-19T11:30:00.000Z' })], 30, NOW)
+  assertEquals(result.fresh, true)
+})
+
+Deno.test('checkMarketDataFreshness: fewer than TREND_MA_LOOKBACK_DAYS closed daily bars fails closed, even when dataAsOf is fresh', () => {
+  const short = marketData({ dailyCloseSeries: Array.from({ length: 49 }, (_, i) => ({ timestamp: NOW, close: 100 + i })) })
+  const result = checkMarketDataFreshness([short], 30, NOW)
+  assertEquals(result.fresh, false)
+  if (!result.fresh) {
+    assertEquals(result.reason.includes('49'), true)
+    assertEquals(result.reason.includes('50'), true)
+  }
+})
+
+Deno.test('checkMarketDataFreshness: exactly TREND_MA_LOOKBACK_DAYS closed daily bars passes (boundary inclusive)', () => {
+  const exact = marketData({ dailyCloseSeries: Array.from({ length: 50 }, (_, i) => ({ timestamp: NOW, close: 100 + i })) })
+  const result = checkMarketDataFreshness([exact], 30, NOW)
   assertEquals(result.fresh, true)
 })
 
@@ -130,6 +161,7 @@ Deno.test('buildAssetInput: FLAT asset (no position) -> state FLAT, position nul
     recentStopLossClose: null,
     stopOutReentryBlockMinutes: 360,
     nowIso: NOW,
+    regime: FIXTURE_REGIME,
   })
   assertEquals(result.state, 'FLAT')
   assertEquals(result.position, null)
@@ -137,6 +169,7 @@ Deno.test('buildAssetInput: FLAT asset (no position) -> state FLAT, position nul
   assertEquals(result.news[0]!.id, 'n1')
   assertEquals(result.blockedDirections, [])
   assertEquals(typeof result.market.indicators.rsi14, 'number')
+  assertEquals(result.regime, FIXTURE_REGIME)
 })
 
 Deno.test('buildAssetInput: LONG asset -> state LONG, position populated with SL/TP and invalidation', () => {
@@ -150,6 +183,7 @@ Deno.test('buildAssetInput: LONG asset -> state LONG, position populated with SL
     recentStopLossClose: null,
     stopOutReentryBlockMinutes: 360,
     nowIso: NOW,
+    regime: FIXTURE_REGIME,
   })
   assertEquals(result.state, 'LONG')
   assertEquals(result.position?.stopLossPrice, 95)
@@ -177,8 +211,81 @@ Deno.test('buildRiskGateContext: currentAssetExposureUsd is always 0 (V0 has no 
     stopOutReentryBlockMinutes: 360,
     recentStopLossClose: null,
     nowIso: NOW,
+    portfolioRiskCeilingUsd: 75,
+    otherOpenPositionsRiskAtStopUsd: 20,
+    maxTotalNotionalUsd: 3000,
+    otherSameDirectionNotionalUsd: 1500,
+    peakNav: 10_000,
+    drawdownBreakerFloorPct: 0.90,
   })
   assertEquals(ctx.currentState, 'LONG')
   assertEquals(ctx.currentAssetExposureUsd, 0)
   assertEquals(ctx.effectiveMinConfidence, 0.65)
+})
+
+Deno.test('buildRiskGateContext: threads every trading-strategy-v1.md §17 portfolio-risk field through unchanged', () => {
+  const ctx = buildRiskGateContext({
+    asset: 'BTC',
+    entryPrice: 100,
+    nav: 10_000,
+    cash: 10_000,
+    openPosition: null,
+    appetite: { minConfidence: 0, riskBudgetPct: 0.005 },
+    maxSingleTradePct: 0.2,
+    maxAssetExposurePct: 0.35,
+    slTpBounds: { minStopLossPct: 0.005, maxStopLossPct: 0.15, minTakeProfitPct: 0.005, maxTakeProfitPct: 0.9 },
+    stopOutReentryBlockMinutes: 360,
+    recentStopLossClose: null,
+    nowIso: NOW,
+    portfolioRiskCeilingUsd: 75,
+    otherOpenPositionsRiskAtStopUsd: 20,
+    maxTotalNotionalUsd: 3000,
+    otherSameDirectionNotionalUsd: 1500,
+    peakNav: 12_000,
+    drawdownBreakerFloorPct: 0.90,
+  })
+  assertEquals(ctx.portfolioRiskCeilingUsd, 75)
+  assertEquals(ctx.otherOpenPositionsRiskAtStopUsd, 20)
+  assertEquals(ctx.maxTotalNotionalUsd, 3000)
+  assertEquals(ctx.otherSameDirectionNotionalUsd, 1500)
+  assertEquals(ctx.peakNav, 12_000)
+  assertEquals(ctx.drawdownBreakerFloorPct, 0.90)
+})
+
+// --- aggregateOtherOpenPositionsRisk ---------------------------------------
+
+Deno.test('aggregateOtherOpenPositionsRisk: excludes the candidate asset itself', () => {
+  const btc = position({ asset: 'BTC', quantity: 1, entryPrice: 100, stopLossPrice: 95 })
+  const result = aggregateOtherOpenPositionsRisk([btc], 'BTC', new Map())
+  assertEquals(result, { otherOpenPositionsRiskAtStopUsd: 0, otherSameDirectionNotionalUsd: 0 })
+})
+
+Deno.test('aggregateOtherOpenPositionsRisk: risk-at-stop is quantity x the stop distance from entry, not notional x a re-derived pct', () => {
+  const eth = position({ asset: 'ETH', quantity: 2, entryPrice: 3_000, stopLossPrice: 2_940 }) // 2 x 60 = 120
+  const result = aggregateOtherOpenPositionsRisk([eth], 'BTC', new Map([['ETH', 3_050]]))
+  assertAlmostEquals(result.otherOpenPositionsRiskAtStopUsd, 120, 1e-9)
+})
+
+Deno.test('aggregateOtherOpenPositionsRisk: same-direction notional values at the LIVE price, not entry price', () => {
+  const eth = position({ asset: 'ETH', direction: 'long', quantity: 2, entryPrice: 3_000, stopLossPrice: 2_940 })
+  const result = aggregateOtherOpenPositionsRisk([eth], 'BTC', new Map([['ETH', 3_100]]))
+  assertAlmostEquals(result.otherSameDirectionNotionalUsd, 6_200, 1e-9) // 2 x 3100, not 2 x 3000
+})
+
+Deno.test('aggregateOtherOpenPositionsRisk: falls back to entryPrice when the asset is missing from latestPriceByAsset', () => {
+  const eth = position({ asset: 'ETH', direction: 'long', quantity: 2, entryPrice: 3_000, stopLossPrice: 2_940 })
+  const result = aggregateOtherOpenPositionsRisk([eth], 'BTC', new Map())
+  assertAlmostEquals(result.otherSameDirectionNotionalUsd, 6_000, 1e-9) // 2 x 3000 (entryPrice fallback)
+})
+
+Deno.test('aggregateOtherOpenPositionsRisk: a short position counts toward risk-at-stop but NOT same-direction notional (V1 is long-only)', () => {
+  const legacyShort = position({ asset: 'ETH', direction: 'short', quantity: 1, entryPrice: 3_000, stopLossPrice: 3_060 })
+  const result = aggregateOtherOpenPositionsRisk([legacyShort], 'BTC', new Map([['ETH', 3_000]]))
+  assertAlmostEquals(result.otherOpenPositionsRiskAtStopUsd, 60, 1e-9)
+  assertEquals(result.otherSameDirectionNotionalUsd, 0)
+})
+
+Deno.test('aggregateOtherOpenPositionsRisk: no other open positions -> both aggregates zero', () => {
+  const result = aggregateOtherOpenPositionsRisk([], 'BTC', new Map())
+  assertEquals(result, { otherOpenPositionsRiskAtStopUsd: 0, otherSameDirectionNotionalUsd: 0 })
 })

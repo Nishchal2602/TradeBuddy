@@ -1,7 +1,7 @@
 import type { Direction, PositionState } from '../positions/types.ts'
 import type { ModelDecisionProposal, RiskStatus, SizeCapApplied } from '../decisions/types.ts'
 import { computeStopLossTakeProfitPrices, validateStopLossTakeProfit, type SlTpBounds } from './sl-tp.ts'
-import { applySizingCaps, deriveRiskBasedNotional, type SizingCaps } from './sizing.ts'
+import { applySizingCaps, deriveRiskBasedNotional, type SizingCaps, type PortfolioRiskInputs } from './sizing.ts'
 
 export interface RecentStopLossClose {
   direction: Direction
@@ -38,6 +38,21 @@ export interface RiskGateContext {
   // different thesis, not the failed one.
   recentStopLossClose: RecentStopLossClose | null
   nowIso: string
+
+  // trading-strategy-v1.md §17 — cross-asset portfolio risk, resolved by
+  // the caller the same way effectiveSingleTradeCapPct etc. already are
+  // (multiplier/pct x nav computed once in build-context.ts, not here).
+  portfolioRiskCeilingUsd: number
+  otherOpenPositionsRiskAtStopUsd: number
+  maxTotalNotionalUsd: number
+  otherSameDirectionNotionalUsd: number
+
+  // §17.3 — blocks new OPENs only (never CLOSE, checked below in the same
+  // place as every other open-only gate). peakNav is the portfolio's own
+  // highest-ever NAV (max(nav_snapshots.nav) — stateless, no new table);
+  // nav above is the CURRENT value already on this context.
+  peakNav: number
+  drawdownBreakerFloorPct: number
 }
 
 export interface RiskGateResult {
@@ -113,11 +128,28 @@ export function evaluateRiskGate(proposal: ModelDecisionProposal, context: RiskG
     return rejected(`stop-out re-entry block active for ${direction} ${proposal.asset} — ${context.stopOutReentryBlockMinutes - minutesBetween(stopOut.closedAt, context.nowIso)} minutes remaining`)
   }
 
+  // trading-strategy-v1.md §17.3 — blocks OPENs only; CLOSE is handled in
+  // its own branch above and never reaches here. A drawdown breaker, not
+  // a consecutive-loss breaker (§2.4/§17.4: a streak breaker would fire
+  // on ordinary variance at realistic hit rates — this measures NAV
+  // magnitude instead).
+  if (context.peakNav > 0 && context.nav < context.peakNav * context.drawdownBreakerFloorPct) {
+    const drawdownPct = (1 - context.nav / context.peakNav) * 100
+    return rejected(`drawdown breaker active: NAV is ${drawdownPct.toFixed(1)}% below its peak of ${context.peakNav}, floor is ${((1 - context.drawdownBreakerFloorPct) * 100).toFixed(1)}%`)
+  }
+
   const { stopLossPrice, takeProfitPrice } = computeStopLossTakeProfitPrices(direction, context.entryPrice, proposal.stopLossPct, proposal.takeProfitPct)
 
   const riskBasedNotional = deriveRiskBasedNotional(context.nav, context.effectiveRiskBudgetPct, context.entryPrice, stopLossPrice)
   const caps: SizingCaps = { maxSingleTradePct: context.effectiveSingleTradeCapPct, maxAssetExposurePct: context.effectiveAssetExposureCapPct }
-  const sizing = applySizingCaps(riskBasedNotional, context.nav, caps, context.currentAssetExposureUsd, context.cash)
+  const portfolioRisk: PortfolioRiskInputs = {
+    stopLossPct: proposal.stopLossPct,
+    portfolioRiskCeilingUsd: context.portfolioRiskCeilingUsd,
+    otherOpenPositionsRiskAtStopUsd: context.otherOpenPositionsRiskAtStopUsd,
+    maxTotalNotionalUsd: context.maxTotalNotionalUsd,
+    otherSameDirectionNotionalUsd: context.otherSameDirectionNotionalUsd,
+  }
+  const sizing = applySizingCaps(riskBasedNotional, context.nav, caps, context.currentAssetExposureUsd, context.cash, portfolioRisk)
 
   // A cap (most often affordable cash) can legitimately drive the sizeable
   // notional to zero or below — that's not a small approved trade, it's no

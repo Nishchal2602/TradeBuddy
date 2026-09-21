@@ -6,13 +6,17 @@ import {
   type SlTpBounds,
 } from '../../../../src/shared/risk/sl-tp.ts'
 
-// The provisional bounds actually seeded in agent_settings (Step 1
-// migration) — using the real values here, not arbitrary test numbers.
+// The bounds actually seeded in agent_settings — using the real values
+// here, not arbitrary test numbers. maxTakeProfitPct raised 0.50 -> 0.90
+// by the Trading Strategy V1 migration (blocker B4 in the implementation
+// plan): a ~6x-stop take-profit exceeds 50% whenever atrPct > ~4.17%,
+// which would otherwise silently reject opens in exactly the volatile
+// conditions where the strategy needs to trade.
 const SEEDED_BOUNDS: SlTpBounds = {
   minStopLossPct: 0.005,
   maxStopLossPct: 0.15,
   minTakeProfitPct: 0.005,
-  maxTakeProfitPct: 0.50,
+  maxTakeProfitPct: 0.90,
 }
 
 // --- computeStopLossTakeProfitPrices ---------------------------------
@@ -58,7 +62,18 @@ Deno.test('validateStopLossTakeProfit: stop-loss above the configured maximum is
 
 Deno.test('validateStopLossTakeProfit: take-profit outside configured bounds is rejected', () => {
   assertEquals(validateStopLossTakeProfit('long', 76851, 0.03, 0.001, SEEDED_BOUNDS).valid, false)
-  assertEquals(validateStopLossTakeProfit('long', 76851, 0.03, 0.60, SEEDED_BOUNDS).valid, false)
+  assertEquals(validateStopLossTakeProfit('long', 76851, 0.03, 0.95, SEEDED_BOUNDS).valid, false)
+})
+
+Deno.test('validateStopLossTakeProfit: a 6R take-profit at the strategy floor stop (2.5%, -> 15% TP) passes comfortably within bounds', () => {
+  // trading-strategy-v1.md §15's own worked shape: stop 2.5%, TP 6x = 15%.
+  const result = validateStopLossTakeProfit('long', 76851, 0.025, 0.15, SEEDED_BOUNDS)
+  assertEquals(result.valid, true)
+})
+
+Deno.test('validateStopLossTakeProfit: a 6R take-profit at a high-volatility stop (atrPct=4%, stop=8%, TP=48%) still passes under the raised 90% max', () => {
+  const result = validateStopLossTakeProfit('long', 76851, 0.08, 0.48, SEEDED_BOUNDS)
+  assertEquals(result.valid, true)
 })
 
 Deno.test('validateStopLossTakeProfit: a short stop at exactly 100% distance is rejected by the exhaustion ceiling EVEN when bounds would allow it', () => {

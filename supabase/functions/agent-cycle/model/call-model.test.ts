@@ -1,43 +1,41 @@
 import { assertEquals, assertRejects } from 'jsr:@std/assert@1'
 import { callModel, ModelCallError } from './call-model.ts'
 import { ModelOutputShapeError } from './gemini-schema.ts'
-import type { ModelCallPayload } from './payload.ts'
+import type { VetoCallPayload } from './payload.ts'
 
-const PAYLOAD: ModelCallPayload = {
-  portfolio: { cash: 10_000, nav: 10_000, constraints: { minConfidence: 0.65, minStopLossPct: 0.005, maxStopLossPct: 0.15, minTakeProfitPct: 0.005, maxTakeProfitPct: 0.5 } },
-  assets: [
+const PAYLOAD: VetoCallPayload = {
+  candidates: [
     {
       asset: 'BTC',
-      state: 'FLAT',
-      market: { price: 80_000, change1hPct: 0, change24hPct: 1, change7dPct: -2, indicators: { rsi14: 50, ema20: 80_000, ema50: 79_000, macdHistogram: 0, atrPct: 2, volumeRatio: 1, distanceFromSevenDayHighPct: -1, distanceFromSevenDayLowPct: 3 }, recentCloses: [] },
+      regime: { dailyClose: 82_000, dailyMa: 78_000 },
+      stopLossPct: 0.025,
+      takeProfitPct: 0.15,
       news: [],
-      position: null,
-      recentDecisions: [],
-      blockedDirections: [],
     },
   ],
 }
 
-function stopResponse(text: string, modelVersion = 'gemini-2.5-flash') {
+function stopResponse(text: string, modelVersion = 'gemini-3.6-flash') {
   return new Response(JSON.stringify({ candidates: [{ finishReason: 'STOP', content: { parts: [{ text }] } }], modelVersion }), { status: 200 })
 }
 
-const VALID_HOLD_JSON = JSON.stringify({
-  decisions: [{ asset: 'BTC', action: 'HOLD', confidence: 0.4, stopLossPct: null, takeProfitPct: null, horizonHours: null, reasons: [{ type: 'TECHNICAL', text: 'RSI neutral', newsId: null }], invalidation: [] }],
+const VALID_VERDICT_JSON = JSON.stringify({
+  verdicts: [{ asset: 'BTC', veto: false, rationale: 'no news provided' }],
 })
 
 Deno.test('callModel: succeeds on the first key, records keyIndexUsed = 0', async () => {
   let calls = 0
   const fetchImpl = (() => {
     calls++
-    return Promise.resolve(stopResponse(VALID_HOLD_JSON))
+    return Promise.resolve(stopResponse(VALID_VERDICT_JSON))
   }) as unknown as typeof fetch
 
   const result = await callModel(PAYLOAD, ['key1'], fetchImpl)
   assertEquals(calls, 1)
   assertEquals(result.keyIndexUsed, 0)
-  assertEquals(result.decisions[0]!.action, 'HOLD')
-  assertEquals(result.modelVersion, 'gemini-2.5-flash')
+  assertEquals(result.verdicts[0]!.asset, 'BTC')
+  assertEquals(result.verdicts[0]!.veto, false)
+  assertEquals(result.modelVersion, 'gemini-3.6-flash')
 })
 
 Deno.test('callModel: first key gets HTTP 429, rotates to and succeeds on the second', async () => {
@@ -46,7 +44,7 @@ Deno.test('callModel: first key gets HTTP 429, rotates to and succeeds on the se
     const key = new URL(url).searchParams.get('key')!
     seenKeys.push(key)
     if (key === 'key1') return Promise.resolve(new Response(JSON.stringify({ error: { message: 'quota exceeded' } }), { status: 429 }))
-    return Promise.resolve(stopResponse(VALID_HOLD_JSON))
+    return Promise.resolve(stopResponse(VALID_VERDICT_JSON))
   }) as unknown as typeof fetch
 
   const result = await callModel(PAYLOAD, ['key1', 'key2'], fetchImpl)
@@ -61,7 +59,7 @@ Deno.test('callModel: first key throws a network error, rotates to the third (sk
     seenKeys.push(key)
     if (key === 'key1') return Promise.reject(new TypeError('fetch failed'))
     if (key === 'key2') return Promise.resolve(new Response('server error', { status: 500 }))
-    return Promise.resolve(stopResponse(VALID_HOLD_JSON))
+    return Promise.resolve(stopResponse(VALID_VERDICT_JSON))
   }) as unknown as typeof fetch
 
   const result = await callModel(PAYLOAD, ['key1', 'key2', 'key3'], fetchImpl)
@@ -85,7 +83,7 @@ Deno.test('callModel: zero keys throws immediately without calling fetch', async
   let called = false
   const fetchImpl = (() => {
     called = true
-    return Promise.resolve(stopResponse(VALID_HOLD_JSON))
+    return Promise.resolve(stopResponse(VALID_VERDICT_JSON))
   }) as unknown as typeof fetch
   await assertRejects(() => callModel(PAYLOAD, [], fetchImpl), ModelCallError)
   assertEquals(called, false)
@@ -116,7 +114,7 @@ Deno.test('callModel: non-JSON text in an otherwise-STOP response fails immediat
 Deno.test('callModel: a schema-shape failure (ModelOutputShapeError) propagates untouched and does not rotate', async () => {
   let calls = 0
   const wrongAssetJson = JSON.stringify({
-    decisions: [{ asset: 'ETH', action: 'HOLD', confidence: 0.4, stopLossPct: null, takeProfitPct: null, horizonHours: null, reasons: [], invalidation: [] }],
+    verdicts: [{ asset: 'ETH', veto: false, rationale: 'no news provided' }],
   })
   const fetchImpl = (() => {
     calls++
@@ -125,4 +123,28 @@ Deno.test('callModel: a schema-shape failure (ModelOutputShapeError) propagates 
 
   await assertRejects(() => callModel(PAYLOAD, ['key1', 'key2'], fetchImpl), ModelOutputShapeError)
   assertEquals(calls, 1)
+})
+
+Deno.test('callModel: a batched call with multiple candidates sends exactly one request, not one per candidate', async () => {
+  let calls = 0
+  const twoCandidatePayload: VetoCallPayload = {
+    candidates: [
+      { asset: 'BTC', regime: { dailyClose: 82_000, dailyMa: 78_000 }, stopLossPct: 0.025, takeProfitPct: 0.15, news: [] },
+      { asset: 'ETH', regime: { dailyClose: 2_500, dailyMa: 2_400 }, stopLossPct: 0.03, takeProfitPct: 0.18, news: [] },
+    ],
+  }
+  const bothVerdicts = JSON.stringify({
+    verdicts: [
+      { asset: 'BTC', veto: false, rationale: 'no news provided' },
+      { asset: 'ETH', veto: true, rationale: 'exchange hack reported' },
+    ],
+  })
+  const fetchImpl = (() => {
+    calls++
+    return Promise.resolve(stopResponse(bothVerdicts))
+  }) as unknown as typeof fetch
+
+  const result = await callModel(twoCandidatePayload, ['key1'], fetchImpl)
+  assertEquals(calls, 1)
+  assertEquals(result.verdicts.length, 2)
 })

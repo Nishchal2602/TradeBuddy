@@ -1,203 +1,81 @@
 import { z } from 'zod'
 import { AssetSymbol } from '../../../../src/shared/market-data/types.ts'
-import { Action, ModelDecisionProposal } from '../../../../src/shared/decisions/types.ts'
 
 // Gemini's responseSchema dialect: an OpenAPI 3.0 Schema subset with
 // UPPERCASE type names — confirmed live against the real API (2026-09-19),
-// not assumed from docs, including that `nullable: true` is honored for an
-// optional field inside a required object.
+// not assumed from docs.
 //
-// This describes ONE FLAT shape (every field always present; SL/TP
-// nullable) rather than attempting to express "OPEN requires SL/TP,
-// HOLD/CLOSE must not have them" as a conditional/oneOf schema — kept
-// deliberately simple rather than betting correctness on how well a
-// schema-constrained generation feature supports conditional shapes.
-// GEMINI_RESPONSE_SCHEMA gets the model to emit consistently-shaped JSON;
-// mapRawDecisionToProposal below is what actually enforces the
-// discriminated-union guarantee (ModelDecisionProposal's own .strict()
-// branches), the same "loose wire shape -> strict domain parse" split
-// used for every external boundary in this codebase.
-export const GEMINI_RESPONSE_SCHEMA = {
+// Trading Strategy V1 (2026-09-21) replaces the old decision-originating
+// schema entirely — Gemini no longer proposes action/confidence/SL/TP/
+// invalidation (agent-cycle/strategy/rules.ts synthesizes those
+// deterministically now). This is a genuine replacement, not an addition:
+// nothing in the rewired agent-cycle/index.ts calls the old schema or
+// GEMINI_RESPONSE_SCHEMA anymore, so keeping them around would be dead
+// code pretending to be live.
+export const GEMINI_VETO_RESPONSE_SCHEMA = {
   type: 'OBJECT',
   properties: {
-    decisions: {
+    verdicts: {
       type: 'ARRAY',
       items: {
         type: 'OBJECT',
         properties: {
           asset: { type: 'STRING', enum: ['BTC', 'ETH'] },
-          action: { type: 'STRING', enum: ['OPEN_LONG', 'OPEN_SHORT', 'HOLD', 'CLOSE'] },
-          confidence: { type: 'NUMBER' },
-          stopLossPct: { type: 'NUMBER', nullable: true },
-          takeProfitPct: { type: 'NUMBER', nullable: true },
-          horizonHours: { type: 'INTEGER', nullable: true },
-          reasons: {
-            type: 'ARRAY',
-            items: {
-              type: 'OBJECT',
-              properties: {
-                type: { type: 'STRING', enum: ['NEWS', 'TECHNICAL'] },
-                text: { type: 'STRING' },
-                newsId: { type: 'STRING', nullable: true },
-              },
-              required: ['type', 'text'],
-            },
-          },
-          invalidation: {
-            type: 'ARRAY',
-            items: {
-              type: 'OBJECT',
-              properties: { text: { type: 'STRING' } },
-              required: ['text'],
-            },
-          },
+          veto: { type: 'BOOLEAN' },
+          rationale: { type: 'STRING' },
         },
-        required: ['asset', 'action', 'confidence', 'reasons', 'invalidation'],
+        required: ['asset', 'veto', 'rationale'],
       },
     },
   },
-  required: ['decisions'],
+  required: ['verdicts'],
 } as const
 
-// The loose Zod counterpart to the schema above — validates that Gemini's
-// JSON actually came back shaped the way the responseSchema asked (a
-// schema-constrained model can still fail to honor its own schema; this
-// is not assumed, it's checked), before the stricter per-action mapping
-// below. Not .strict(): reasons[].newsId being present-but-null on a
-// TECHNICAL reason, or SL/TP present-but-null on a HOLD, are both
-// expected shapes here — rejecting extra/inconsistent combinations is
-// ModelDecisionProposal's job, not this one's.
-const RawReason = z.object({
-  type: z.enum(['NEWS', 'TECHNICAL']),
-  text: z.string(),
-  newsId: z.string().nullable().optional(),
-})
-
-const RawInvalidation = z.object({ text: z.string() })
-
-const RawDecision = z.object({
+const RawVetoVerdict = z.object({
   asset: AssetSymbol,
-  action: Action,
-  confidence: z.number(),
-  stopLossPct: z.number().nullable().optional(),
-  takeProfitPct: z.number().nullable().optional(),
-  horizonHours: z.number().int().nullable().optional(),
-  reasons: z.array(RawReason),
-  invalidation: z.array(RawInvalidation),
+  veto: z.boolean(),
+  rationale: z.string(),
 })
 
-export const RawGeminiResponse = z.object({
-  decisions: z.array(RawDecision),
+const RawVetoResponse = z.object({
+  verdicts: z.array(RawVetoVerdict),
 })
-export type RawDecision = z.infer<typeof RawDecision>
+
+export interface VetoVerdict {
+  asset: z.infer<typeof AssetSymbol>
+  veto: boolean
+  rationale: string
+}
 
 export class ModelOutputShapeError extends Error {
   readonly asset: string | undefined
-  readonly action: string | undefined
 
-  constructor(message: string, asset?: string, action?: string) {
+  constructor(message: string, asset?: string) {
     super(message)
     this.name = 'ModelOutputShapeError'
     this.asset = asset
-    this.action = action
   }
-}
-
-// Builds the per-branch object ModelDecisionProposal's discriminated union
-// actually expects — conditionally including stopLossPct/takeProfitPct
-// only for OPEN_LONG/OPEN_SHORT, and never for HOLD/CLOSE, regardless of
-// what (possibly null) values the raw decision carried for those fields.
-// Passing a key through unconditionally would fail HOLD/CLOSE's .strict()
-// branches even when the value is null, since .strict() rejects unknown
-// keys outright, not just unexpected non-null values.
-function mapRawDecisionToProposal(raw: RawDecision): ModelDecisionProposal {
-  const base = {
-    asset: raw.asset,
-    confidence: raw.confidence,
-    horizonHours: raw.horizonHours ?? null,
-    reasons: raw.reasons.map((r) =>
-      r.type === 'NEWS'
-        ? { type: 'NEWS' as const, text: r.text, newsId: requireNewsId(r, raw) }
-        : { type: 'TECHNICAL' as const, text: r.text }
-    ),
-    invalidation: raw.invalidation,
-  }
-
-  if (raw.action === 'OPEN_LONG' || raw.action === 'OPEN_SHORT') {
-    if (raw.stopLossPct == null || raw.takeProfitPct == null) {
-      throw new ModelOutputShapeError(
-        `${raw.action} for ${raw.asset} is missing stopLossPct/takeProfitPct — mandatory on every open`,
-        raw.asset,
-        raw.action,
-      )
-    }
-    const result = ModelDecisionProposal.safeParse({
-      ...base,
-      action: raw.action,
-      stopLossPct: raw.stopLossPct,
-      takeProfitPct: raw.takeProfitPct,
-    })
-    if (!result.success) {
-      throw new ModelOutputShapeError(
-        `${raw.action} for ${raw.asset} failed validation: ${result.error.message}`,
-        raw.asset,
-        raw.action,
-      )
-    }
-    return result.data
-  }
-
-  // HOLD / CLOSE — stopLossPct/takeProfitPct must be null/absent here. A
-  // real value would mean the model is contradicting its own action (it
-  // thinks it's proposing a stop for a decision that structurally can't
-  // carry one) — that's flagged as a shape error, not silently dropped.
-  // Silently omitting the key here would quietly defeat the exact
-  // .strict() guarantee ModelDecisionProposal exists to enforce (same
-  // failure mode its own module comment warns about for strip-mode
-  // parsing), just one layer earlier.
-  if (raw.stopLossPct != null || raw.takeProfitPct != null) {
-    throw new ModelOutputShapeError(
-      `${raw.action} for ${raw.asset} carries a stopLossPct/takeProfitPct value — only valid on an OPEN`,
-      raw.asset,
-      raw.action,
-    )
-  }
-
-  const result = ModelDecisionProposal.safeParse({ ...base, action: raw.action })
-  if (!result.success) {
-    throw new ModelOutputShapeError(`${raw.action} for ${raw.asset} failed validation: ${result.error.message}`, raw.asset, raw.action)
-  }
-  return result.data
-}
-
-function requireNewsId(reason: z.infer<typeof RawReason>, raw: RawDecision): string {
-  if (!reason.newsId) {
-    throw new ModelOutputShapeError(
-      `a NEWS-tagged reason for ${raw.asset} is missing newsId`,
-      raw.asset,
-      raw.action,
-    )
-  }
-  return reason.newsId
 }
 
 // Entry point: raw Gemini JSON (already JSON.parse'd) -> validated
-// ModelDecisionProposal[], asserting exactly one decision per requested
-// asset — a response covering only one of BTC/ETH, or repeating one
+// VetoVerdict[], asserting exactly one verdict per candidate asset — a
+// response covering only one of several candidates, or repeating one
 // asset twice, is a shape failure, not something to silently tolerate.
-export function parseModelOutput(rawJson: unknown, expectedAssets: readonly string[]): ModelDecisionProposal[] {
-  const parsed = RawGeminiResponse.safeParse(rawJson)
+// Same "loose wire shape -> strict domain parse, exact cardinality
+// checked" discipline as the decision-schema parser this replaces.
+export function parseVetoOutput(rawJson: unknown, expectedAssets: readonly string[]): VetoVerdict[] {
+  const parsed = RawVetoResponse.safeParse(rawJson)
   if (!parsed.success) {
-    throw new ModelOutputShapeError(`response did not match the expected schema: ${parsed.error.message}`)
+    throw new ModelOutputShapeError(`veto response did not match the expected schema: ${parsed.error.message}`)
   }
 
-  const proposals = parsed.data.decisions.map(mapRawDecisionToProposal)
+  const verdicts = parsed.data.verdicts
 
-  const gotAssets = proposals.map((p) => p.asset).sort()
+  const gotAssets = verdicts.map((v) => v.asset).sort()
   const wantAssets = [...expectedAssets].sort()
   if (JSON.stringify(gotAssets) !== JSON.stringify(wantAssets)) {
-    throw new ModelOutputShapeError(`expected exactly one decision per asset ${JSON.stringify(wantAssets)}, got ${JSON.stringify(gotAssets)}`)
+    throw new ModelOutputShapeError(`expected exactly one veto verdict per candidate asset ${JSON.stringify(wantAssets)}, got ${JSON.stringify(gotAssets)}`)
   }
 
-  return proposals
+  return verdicts
 }

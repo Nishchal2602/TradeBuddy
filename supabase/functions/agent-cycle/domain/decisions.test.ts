@@ -165,11 +165,15 @@ function validAgentDecision(overrides: Partial<Record<string, unknown>> = {}): u
     effectiveRiskBudgetPct: 0.01,
     effectiveSingleTradeCapPct: 0.2,
     effectiveAssetExposureCapPct: 0.35,
+    effectivePortfolioRiskCeilingPct: 0.0075,
+    effectiveMaxTotalNotionalPct: 0.3,
 
     inputPayload: { note: 'arbitrary shape at this layer, deliberately' },
     outputPayload: { note: 'arbitrary shape at this layer, deliberately' },
     promptVersion: 'v1',
     modelVersion: 'gemini-2.5-flash',
+    strategyVersion: 'v1-regime',
+    modelVetoed: false,
 
     decidedAt: '2026-09-18T12:00:00.000Z',
     ...overrides,

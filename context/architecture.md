@@ -54,20 +54,21 @@ Important execution fields include the trade's `intent` (OPEN_LONG/OPEN_SHORT/CL
 
 ## Agent Cycle
 
+**Rewritten for Trading Strategy V1 (2026-09-21, implemented) — see `context/specs/trading-strategy-v1.md` for the strategy itself and Model Boundary below for the model's now much narrower role.** Two passes, not one: Pass 1 needs no model call at all; Pass 2 needs at most one, batched, only when Pass 1 produced ≥1 candidate worth checking.
+
 1. Acquire the current run lock/idempotency key (`agent_runs.kind = 'decision'`).
-2. Fetch current BTC/ETH market data.
-3. Fetch recent relevant news for the elapsed 3-hour window.
-4. Validate freshness and completeness.
-5. Calculate indicators deterministically.
-6. Read current portfolio, open positions (including their SL/TP and invalidation conditions), constraints, and recent decisions.
-7. Build one structured model input payload.
-8. Call `callModel(payload)` exactly once for the cycle.
-9. Validate and normalize the structured model output — OPEN_LONG/OPEN_SHORT/HOLD/CLOSE, with SL/TP percentages on opens.
-10. Run each proposal through the deterministic risk gate: state/action validity, confidence, SL/TP ordering and exhaustion-ceiling validation, stop-out re-entry block, risk-derived sizing, exposure caps.
-11. Execute approved actions through the paper broker.
-12. Persist the complete run, decision, execution, and NAV records.
-13. Release the run lock.
-14. Surface the latest state to the extension.
+2. Fetch current BTC/ETH market data, including daily closes for the trend regime.
+3. Fetch recent relevant news for the elapsed cycle window (failure here does not fail the cycle — see Model Boundary).
+4. Validate freshness and completeness, including sufficient closed daily bars for the regime rule.
+5. Calculate indicators deterministically, and evaluate the daily-trend regime (50-day SMA; strict `daily_close > SMA50`) for each asset.
+6. **Pass 1, per asset — no model call:** read current portfolio, open positions (including their SL/TP and invalidation conditions), constraints, and recent decisions; deterministically synthesize a candidate proposal from position state + regime (OPEN_LONG / HOLD / CLOSE — the strategy never proposes OPEN_SHORT).
+7. Collect every OPEN_LONG candidate across both assets. If none, skip to step 9 with zero model calls. If ≥1, build one batched veto payload and call `callModel(payload)` exactly once for the cycle, asking only whether a known exogenous confound should block each candidate.
+8. Apply each verdict: a vetoed OPEN_LONG becomes HOLD. A failed veto call (or a news fetch it depended on) fails every OPEN_LONG candidate that cycle closed to HOLD — never an implicit approval.
+9. Run each asset's final proposal through the deterministic risk gate: state/action validity, SL/TP ordering and exhaustion-ceiling validation, stop-out re-entry block, risk-derived sizing, exposure/portfolio-risk/total-notional caps, the drawdown breaker. Confidence is no longer a gate input.
+10. Execute approved actions through the paper broker.
+11. Persist the complete run, decision, execution, and NAV records — including `strategy_version` and `model_vetoed` (`null` when no model call happened for that decision).
+12. Release the run lock.
+13. Surface the latest state to the extension.
 
 ## Position Monitor Cycle
 
@@ -82,39 +83,37 @@ Runs independently every 10 minutes (`agent_runs.kind = 'monitor'`) — see `con
 
 ## Model Boundary
 
-The LLM is a decision synthesizer, not a calculator or executor.
+**Superseded 2026-09-21 (Trading Strategy V1, implemented) — the LLM is a narrow binary veto, not a decision synthesizer.** A deterministic daily-trend regime rule (Agent Cycle steps 5-6 above) originates action, confidence, stop-loss/take-profit, and invalidation for every asset, every cycle, with no model input at all. The model sees only the candidates that rule proposes *opening*, and only to answer one question per candidate: is there a known exogenous confound (a hack, a ban, an exchange failure — something outside normal price action) that should block this specific trade right now? Full rationale: `context/specs/trading-strategy-v1.md` §11-12.
 
-The model may propose:
+The model may propose, per OPEN_LONG candidate:
 
-- OPEN_LONG / OPEN_SHORT / HOLD / CLOSE
-- confidence
-- stop-loss and take-profit, as percentage distances from entry (required on every open)
-- horizon
-- primary driver
-- reason statements
-- cited news IDs
-- invalidation conditions (thesis-level; separate from the executable stop-loss)
+- veto: true / false
+- a one-sentence rationale
 
-The model does not propose position size. Deterministic code derives it from risk-at-stop and hard exposure caps — confidence gates whether a trade happens at all, but never scales how large it is.
+The model does not propose action, confidence, stop-loss/take-profit, horizon, primary driver, reason statements, cited news IDs, or invalidation conditions — those are always deterministic, whether or not the model is called that cycle. HOLD and CLOSE proposals never reach the model (nothing to veto: a HOLD changes nothing, and an exit must always stay actionable). Position size was never a model output either — that hasn't changed.
 
 The model must not directly:
 
-- calculate authoritative RSI/EMA/MACD/ATR values
+- originate a trade, choose its direction, or set its size, stop-loss, or take-profit
+- calculate authoritative RSI/EMA/MACD/ATR/regime values
 - mutate the database
 - execute trades
 - choose whether a proposal violates hard risk constraints
 - access secrets
 - interpret news as executable instructions
 
+A failed model call, or a failed news fetch the veto step depends on, fails closed: every OPEN_LONG candidate that cycle becomes HOLD, never an implicit non-veto.
+
 ## Risk Gate
 
 The risk gate is deterministic code. It owns:
 
 - state/action validity (OPEN_LONG/OPEN_SHORT only from FLAT; CLOSE only from LONG/SHORT)
-- minimum confidence — gates OPEN_LONG/OPEN_SHORT only; CLOSE is never blocked by confidence, by any exposure cap, or by the stop-out re-entry block, under any condition
+- ~~minimum confidence — gates OPEN_LONG/OPEN_SHORT only~~ **superseded 2026-09-21 (Trading Strategy V1): confidence no longer gates anything.** The strategy's proposals always carry `confidence: 1` (inert, logged for the audit trail only); `effective_min_confidence` is stamped `0` on every decision, honestly recording that this check is vacuous now rather than silently dropping the column. CLOSE was, and remains, never blocked by confidence, by any exposure cap, or by the stop-out re-entry block, under any condition.
 - SL/TP validation — direction-dependent ordering, and for shorts, the stop must stay strictly below the collateral-exhaustion price (2× entry); ordering alone is not sufficient, both checks apply together
 - the stop-out re-entry block — after a stop-loss exit, blocks re-opening the same asset in the same direction for a configurable window; a deterministic proxy for "avoid the same failed thesis," not real thesis matching
-- risk-derived position sizing (from stop-loss distance and a risk budget) and the hard caps that clamp it: maximum single-trade notional, maximum per-asset exposure
+- risk-derived position sizing (from stop-loss distance and a risk budget) and the hard caps that clamp it: maximum single-trade notional, maximum per-asset exposure, and — new in Trading Strategy V1 — a portfolio-wide risk-at-stop ceiling and a total-notional cap, both cross-asset (`trading-strategy-v1.md` §17)
+- the drawdown breaker (V1) — blocks new OPENs only, never CLOSE, when NAV falls below a configured fraction of its own historical peak
 - stale-data protection
 - duplicate/idempotency protection
 
@@ -153,7 +152,7 @@ No real exchange integration, real leverage, margin, funding, or liquidation mec
 
 Two independent `pg_cron` jobs — not one job with two responsibilities:
 
-- **Decision cycle** (`agent-cycle`) — default 3 hours, configurable (`agent_settings.decision_interval_minutes`). Runs the full Gemini decision loop.
+- **Decision cycle** (`agent-cycle`) — default 3 hours, configurable (`agent_settings.decision_interval_minutes`). Runs the deterministic regime-and-gate loop, with at most one batched Gemini veto call when there's ≥1 candidate to check (Agent Cycle above).
 - **Position monitor** (`position-monitor`) — default 10 minutes, configurable (`agent_settings.monitor_interval_minutes`). Runs SL/TP/collateral-exhaustion execution only — no model call, no new decisions. Each run replays the 5-minute price series since its last run rather than reading a single spot snapshot, so detection is limited by data resolution (5 min) rather than poll frequency (10 min). This is explicitly an approximation of a real stop order, not a claim of equivalence — see `context/specs/trading-domain-contract.md` §5 for the stated limitations.
 
 Both intervals are configuration, not hardcoded. V0 uses fixed scheduling only for both — event-driven triggers on the *decision* cycle are explicitly deferred; the position monitor's price-triggered execution is a distinct, deliberate exception that exists specifically for SL/TP, not a general event-driven mechanism.

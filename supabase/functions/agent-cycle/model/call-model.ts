@@ -1,14 +1,19 @@
-import type { ModelDecisionProposal } from '../../../../src/shared/decisions/types.ts'
-import { GEMINI_RESPONSE_SCHEMA, parseModelOutput } from './gemini-schema.ts'
-import { PROMPT_VERSION, SYSTEM_PROMPT, buildUserContent } from './prompt.ts'
-import type { ModelCallPayload } from './payload.ts'
+import { GEMINI_VETO_RESPONSE_SCHEMA, parseVetoOutput, type VetoVerdict } from './gemini-schema.ts'
+import { VETO_PROMPT_VERSION, VETO_SYSTEM_PROMPT, buildVetoUserContent } from './prompt.ts'
+import type { VetoCallPayload } from './payload.ts'
 
 // The one callModel(payload) abstraction every model call goes through
 // (CLAUDE.md § AI-specific rules). apiKeys is a plain array specifically
 // so the key-rotation loop below degenerates correctly to a single
-// attempt with one key — moving to the paid tier (below) needed no
-// change to this loop, only to what gets passed in (agent-cycle/
-// index.ts) and this file's MODEL_ID.
+// attempt with one key.
+//
+// Trading Strategy V1 (2026-09-21): callModel's INPUT/OUTPUT types
+// changed (VetoCallPayload in, VetoVerdict[] out — Gemini no longer
+// originates decisions, §12) but the rotation loop's own logic below is
+// completely unchanged from the seam this replaces — it never cared what
+// shape the payload/response were, only whether a given key attempt
+// failed at the transport/content level. Same "config change behind the
+// same seam" precedent as the 3-key-to-1-key retune before it.
 //
 // MODEL_ID history: started on gemini-2.5-flash (user, 2026-09-18).
 // Switched to gemini-3.6-flash (user, 2026-09-19) after live-testing
@@ -26,13 +31,11 @@ const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta'
 // maxOutputTokens covers thinking tokens AND the visible output combined
 // (confirmed live, 2026-09-19 for both gemini-2.5-flash and
 // gemini-3.6-flash — the latter spent even more, 275-298 thinking tokens
-// on the same trivial one-line prompt). Sized well above the superseded
-// spec's original 4096 figure, which predates this finding and would
-// risk a silent MAX_TOKENS truncation on a real, much longer prompt.
-// Thinking is left at its default (not forced to a budget of 0)
-// deliberately — that's a reasoning-quality lever adjacent to the
-// NEWS/TECHNICAL methodology the user explicitly deferred, not a plumbing
-// concern this step should decide.
+// on the same trivial one-line prompt). The veto response itself is far
+// smaller than the old full-decision one, but this budget is kept as-is
+// rather than shrunk speculatively — thinking-token consumption doesn't
+// scale down just because the visible output shape got smaller, and
+// there's no live measurement yet for the new narrower prompt.
 const GENERATION_CONFIG = {
   temperature: 0.2,
   maxOutputTokens: 8192,
@@ -49,7 +52,7 @@ export class ModelCallError extends Error {
 }
 
 export interface CallModelResult {
-  decisions: ModelDecisionProposal[]
+  verdicts: VetoVerdict[]
   // Exact raw JSON returned by the model, for agent_decisions.output_payload
   // (invariant 8 — replayability).
   rawOutputPayload: unknown
@@ -73,7 +76,7 @@ interface KeyFailure {
 // problem regardless of which key sent it, so rotating keys for it would
 // just burn quota on all three for no chance of a different outcome.
 export async function callModel(
-  payload: ModelCallPayload,
+  payload: VetoCallPayload,
   apiKeys: string[],
   fetchImpl: typeof fetch = fetch,
 ): Promise<CallModelResult> {
@@ -81,7 +84,7 @@ export async function callModel(
     throw new ModelCallError('callModel: no API keys configured')
   }
 
-  const expectedAssets = payload.assets.map((a) => a.asset)
+  const expectedAssets = payload.candidates.map((c) => c.asset)
   const failures: KeyFailure[] = []
 
   for (let i = 0; i < apiKeys.length; i++) {
@@ -92,12 +95,12 @@ export async function callModel(
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-          contents: [{ role: 'user', parts: [{ text: buildUserContent(payload) }] }],
+          systemInstruction: { parts: [{ text: VETO_SYSTEM_PROMPT }] },
+          contents: [{ role: 'user', parts: [{ text: buildVetoUserContent(payload) }] }],
           generationConfig: {
             ...GENERATION_CONFIG,
             responseMimeType: 'application/json',
-            responseSchema: GEMINI_RESPONSE_SCHEMA,
+            responseSchema: GEMINI_VETO_RESPONSE_SCHEMA,
           },
         }),
       })
@@ -142,13 +145,13 @@ export async function callModel(
     // not caught here. A malformed response is a content problem, same
     // category as a bad finishReason above: it propagates as this call's
     // failure rather than being wrapped or retried against another key.
-    const decisions = parseModelOutput(rawJson, expectedAssets)
+    const verdicts = parseVetoOutput(rawJson, expectedAssets)
 
     return {
-      decisions,
+      verdicts,
       rawOutputPayload: rawJson,
       modelVersion: typeof body.modelVersion === 'string' ? body.modelVersion : MODEL_ID,
-      promptVersion: PROMPT_VERSION,
+      promptVersion: VETO_PROMPT_VERSION,
       keyIndexUsed: i,
     }
   }

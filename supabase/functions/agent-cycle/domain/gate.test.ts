@@ -2,7 +2,9 @@ import { assertAlmostEquals, assertEquals } from 'jsr:@std/assert@1'
 import { evaluateRiskGate, type RiskGateContext } from '../../../../src/shared/risk/gate.ts'
 import type { ModelDecisionProposal } from '../../../../src/shared/decisions/types.ts'
 
-const SEEDED_BOUNDS = { minStopLossPct: 0.005, maxStopLossPct: 0.15, minTakeProfitPct: 0.005, maxTakeProfitPct: 0.50 }
+// maxTakeProfitPct 0.90 — raised from 0.50 by the Trading Strategy V1
+// migration (sl-tp.test.ts's SEEDED_BOUNDS has the full rationale).
+const SEEDED_BOUNDS = { minStopLossPct: 0.005, maxStopLossPct: 0.15, minTakeProfitPct: 0.005, maxTakeProfitPct: 0.90 }
 
 function baseContext(overrides: Partial<RiskGateContext> = {}): RiskGateContext {
   return {
@@ -19,6 +21,17 @@ function baseContext(overrides: Partial<RiskGateContext> = {}): RiskGateContext 
     stopOutReentryBlockMinutes: 360,
     recentStopLossClose: null,
     nowIso: '2026-09-18T12:00:00.000Z',
+    // Generous, non-binding defaults for the trading-strategy-v1.md §17
+    // portfolio-risk fields — large enough that no pre-existing test in
+    // this file accidentally trips a new cap/breaker; the dedicated
+    // "Portfolio risk" and "Drawdown breaker" test blocks below override
+    // these explicitly to exercise each one.
+    portfolioRiskCeilingUsd: 10_000,
+    otherOpenPositionsRiskAtStopUsd: 0,
+    maxTotalNotionalUsd: 10_000,
+    otherSameDirectionNotionalUsd: 0,
+    peakNav: 10_000, // == the default nav above -> zero drawdown by default
+    drawdownBreakerFloorPct: 0.90,
     ...overrides,
   }
 }
@@ -188,6 +201,78 @@ Deno.test('evaluateRiskGate: zero available cash results in outright rejection, 
 })
 
 // --- Short direction, end-to-end -----------------------------------------
+
+// --- Portfolio risk (trading-strategy-v1.md §17) --------------------------
+
+Deno.test('evaluateRiskGate: the portfolio risk ceiling clamps tighter than the single-trade cap', () => {
+  // stopLossPct=0.03, risk-based notional = 10000*0.01/0.03 = 3333.33,
+  // single_trade cap = 2000 — both bigger than the portfolio ceiling
+  // below, so portfolio_risk must be the one that actually binds.
+  // Remaining ceiling = 50 - 20 = 30; 30 / 0.03 = exactly 1000.
+  const result = evaluateRiskGate(
+    openLongProposal({ stopLossPct: 0.03 }),
+    baseContext({ portfolioRiskCeilingUsd: 50, otherOpenPositionsRiskAtStopUsd: 20 }),
+  )
+  assertEquals(result.riskStatus, 'clamped')
+  assertEquals(result.sizeCapApplied, 'portfolio_risk')
+  assertAlmostEquals(result.approvedSizePct!, 0.10, 1e-9) // 1000 / 10000
+})
+
+Deno.test('evaluateRiskGate: a fully-consumed portfolio risk ceiling rejects outright, not a clamp to zero', () => {
+  const result = evaluateRiskGate(
+    openLongProposal({ stopLossPct: 0.03 }),
+    baseContext({ portfolioRiskCeilingUsd: 50, otherOpenPositionsRiskAtStopUsd: 50 }),
+  )
+  assertEquals(result.riskStatus, 'rejected')
+  assertEquals(result.riskReason?.includes('portfolio_risk'), true)
+})
+
+Deno.test('evaluateRiskGate: the total notional cap clamps independently of the risk-at-stop ceiling', () => {
+  // Remaining notional = 3000 - 1500 = 1500, below both the 2000
+  // single-trade cap and the 3333.33 risk-based figure.
+  const result = evaluateRiskGate(
+    openLongProposal({ stopLossPct: 0.03 }),
+    baseContext({ maxTotalNotionalUsd: 3000, otherSameDirectionNotionalUsd: 1500 }),
+  )
+  assertEquals(result.riskStatus, 'clamped')
+  assertEquals(result.sizeCapApplied, 'total_notional')
+  assertAlmostEquals(result.approvedSizePct!, 0.15, 1e-9) // 1500 / 10000
+})
+
+// --- Drawdown breaker (§17.3) ----------------------------------------------
+
+Deno.test('evaluateRiskGate: OPEN_LONG is rejected while NAV sits below the drawdown floor', () => {
+  // peakNav 10000, floor 0.90 -> floor NAV 9000; current nav 8000 is
+  // below it.
+  const result = evaluateRiskGate(
+    openLongProposal(),
+    baseContext({ nav: 8000, peakNav: 10_000, drawdownBreakerFloorPct: 0.90 }),
+  )
+  assertEquals(result.riskStatus, 'rejected')
+  assertEquals(result.riskReason?.includes('drawdown'), true)
+})
+
+Deno.test('evaluateRiskGate: exactly at the drawdown floor is NOT blocked (boundary inclusive)', () => {
+  const result = evaluateRiskGate(
+    openLongProposal(),
+    baseContext({ nav: 9000, peakNav: 10_000, drawdownBreakerFloorPct: 0.90 }),
+  )
+  assertEquals(result.riskStatus === 'rejected', false)
+})
+
+Deno.test('evaluateRiskGate: CLOSE is approved even deep in a drawdown — the breaker never blocks exits', () => {
+  const proposal: ModelDecisionProposal = { asset: 'BTC', action: 'CLOSE', confidence: 0.5, horizonHours: null, reasons: [], invalidation: [] }
+  const result = evaluateRiskGate(
+    proposal,
+    baseContext({ currentState: 'LONG', nav: 5000, peakNav: 10_000, drawdownBreakerFloorPct: 0.90 }),
+  )
+  assertEquals(result.riskStatus, 'approved')
+})
+
+Deno.test('evaluateRiskGate: a peakNav of 0 (no NAV history yet) never triggers the breaker', () => {
+  const result = evaluateRiskGate(openLongProposal(), baseContext({ nav: 10_000, peakNav: 0 }))
+  assertEquals(result.riskStatus === 'rejected', false)
+})
 
 Deno.test('evaluateRiskGate: OPEN_SHORT computes correctly-ordered SL/TP prices (SL above entry, TP below)', () => {
   const proposal = openLongProposal({ asset: 'BTC', action: 'OPEN_SHORT', stopLossPct: 0.03, takeProfitPct: 0.10 })

@@ -127,6 +127,10 @@ function buildNormalizedMarketData(): NormalizedMarketData {
     close: 100 + Math.sin(i / 5) * 5,
   }))
   const volumeSeries: VolumePoint[] = closeSeries.map((p) => ({ timestamp: p.timestamp, volume: 1000 + (p.close - 100) * 10 }))
+  // Not read by calculateIndicators (the regime rule is a separate pure
+  // module, agent-cycle/strategy/regime.ts) — only present to satisfy
+  // NormalizedMarketData's shape for this orchestration test.
+  const dailyCloseSeries = new Array(60).fill(0).map((_, i) => ({ timestamp: iso(59 - i), close: 100 + Math.sin(i / 10) * 5 }))
   // Plain epoch-ms arithmetic here, not the iso() day/hour field-setter
   // helper — this needs sub-day spacing (45 candles over 7 days), and
   // Date's setUTCDate/setUTCHours rollover semantics for non-integer input
@@ -151,6 +155,7 @@ function buildNormalizedMarketData(): NormalizedMarketData {
     candles,
     closeSeries,
     volumeSeries,
+    dailyCloseSeries,
   }
 }
 

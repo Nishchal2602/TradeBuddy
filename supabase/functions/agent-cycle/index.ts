@@ -3,8 +3,12 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import { CoinGeckoMarketDataProvider } from './providers/coingecko.ts'
 import { RssNewsProvider } from './providers/rss-news.ts'
 import { callModel } from './model/call-model.ts'
-import { buildPortfolioConstraints, buildAssetInput, buildRiskGateContext, checkMarketDataFreshness } from './cycle/build-context.ts'
+import { VETO_PROMPT_VERSION } from './model/prompt.ts'
+import type { VetoVerdict } from './model/gemini-schema.ts'
+import { buildPortfolioConstraints, buildAssetInput, buildRiskGateContext, checkMarketDataFreshness, aggregateOtherOpenPositionsRisk } from './cycle/build-context.ts'
 import type { PersistedNewsItem } from './cycle/build-context.ts'
+import { evaluateTrendRegime } from './strategy/regime.ts'
+import { buildCandidateProposal, vetoedHoldProposal } from './strategy/rules.ts'
 import { planDecisionExecution } from './cycle/plan-decision.ts'
 import { derivePrimaryDriver, citedNewsIds } from './cycle/decision-record.ts'
 import { computeNav } from './broker/accounting.ts'
@@ -14,10 +18,11 @@ import type { RiskAppetite } from '../../../src/shared/risk/appetite-mapping.ts'
 import type { SlTpBounds } from '../../../src/shared/risk/sl-tp.ts'
 import type { RecentStopLossClose } from '../../../src/shared/risk/gate.ts'
 import { evaluateRiskGate } from '../../../src/shared/risk/gate.ts'
-import type { AssetSymbol } from '../../../src/shared/market-data/types.ts'
+import type { AssetSymbol, NormalizedMarketData } from '../../../src/shared/market-data/types.ts'
 import type { Position } from '../../../src/shared/positions/types.ts'
-import type { InvalidationCondition, Action } from '../../../src/shared/decisions/types.ts'
-import type { AssetInput, ModelCallPayload, RecentDecisionInput } from './model/payload.ts'
+import type { InvalidationCondition, Action, ModelDecisionProposal } from '../../../src/shared/decisions/types.ts'
+import type { RegimeResult } from '../../../src/shared/strategy/types.ts'
+import type { AssetInput, ModelCallPayload, RecentDecisionInput, VetoCandidateInput } from './model/payload.ts'
 import type { NormalizedNewsItem } from '../../../src/shared/news/types.ts'
 
 // The thin I/O shell around the pure decision core (cycle/build-context.ts,
@@ -47,6 +52,14 @@ interface Settings {
   maxAssetExposurePct: number
   stopOutReentryBlockMinutes: number
   slTpBounds: SlTpBounds
+  // trading-strategy-v1.md §17 / §10 — resolved once per cycle, same as
+  // every other setting above; portfolioRiskCeilingUsd/maxTotalNotionalUsd
+  // themselves are NAV-dependent and computed fresh per asset below, not
+  // stored here.
+  portfolioRiskCeilingMultiplier: number
+  maxTotalNotionalPct: number
+  drawdownBreakerFloorPct: number
+  newsVetoEnabled: boolean
 }
 
 async function readSettings(supabase: SupabaseClient): Promise<Settings> {
@@ -70,6 +83,10 @@ async function readSettings(supabase: SupabaseClient): Promise<Settings> {
       minTakeProfitPct: Number(data.min_take_profit_pct),
       maxTakeProfitPct: Number(data.max_take_profit_pct),
     },
+    portfolioRiskCeilingMultiplier: Number(data.portfolio_risk_ceiling_multiplier),
+    maxTotalNotionalPct: Number(data.max_total_notional_pct),
+    drawdownBreakerFloorPct: Number(data.drawdown_breaker_floor_pct),
+    newsVetoEnabled: data.news_veto_enabled,
   }
 }
 
@@ -132,6 +149,26 @@ async function readRecentStopLossClose(supabase: SupabaseClient, portfolioId: st
     .maybeSingle()
   if (error) throw new Error(`could not read recent stop-loss close for ${asset}: ${error.message}`)
   return data ? { direction: data.direction, closedAt: toIsoZ(data.closed_at) } : null
+}
+
+// trading-strategy-v1.md §17.3 — the portfolio's own highest-ever NAV.
+// Stateless (max(nav_snapshots.nav), no new table); read once at the top
+// of the cycle, not re-read as this run's own nav moves, since a
+// snapshot for THIS run isn't written until the very end (see the
+// bottom of runAgentCycle) — "peak" here means the peak as of the start
+// of this cycle, exactly what the drawdown breaker is meant to compare
+// against. A portfolio with no snapshots yet (its very first cycle)
+// returns 0, matching gate.ts's own `peakNav > 0` guard for that case.
+async function readPeakNav(supabase: SupabaseClient, portfolioId: string): Promise<number> {
+  const { data, error } = await supabase
+    .from('nav_snapshots')
+    .select('nav')
+    .eq('portfolio_id', portfolioId)
+    .order('nav', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  if (error) throw new Error(`could not read peak NAV: ${error.message}`)
+  return data ? Number(data.nav) : 0
 }
 
 // The most recent non-empty invalidation recorded against this position —
@@ -236,10 +273,23 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
     }
 
     const lookbackMinutes = settings.decisionIntervalMinutes + settings.newsLookbackOverlapMinutes
-    const rawNews = await newsProvider.getRecentNews(settings.assets, lookbackMinutes)
+    // A news-provider failure does NOT fail the whole cycle (trading-
+    // strategy-v1.md §12 Failure semantics) — V1's entry decision itself
+    // (strategy/regime.ts) never reads news at all, and CLOSE must always
+    // stay actionable regardless. An empty rawNews here only feeds
+    // through to the veto step below, which fails closed on its own when
+    // this happened and veto is actually enabled (see vetoCallFailedReason).
+    let rawNews: NormalizedNewsItem[] = []
+    let newsProviderFailedReason: string | null = null
+    try {
+      rawNews = await newsProvider.getRecentNews(settings.assets, lookbackMinutes)
+    } catch (error) {
+      newsProviderFailedReason = error instanceof Error ? error.message : String(error)
+    }
     const persistedByExternalId = await persistNews(supabase, rawNews)
 
     const appetite = riskAppetiteThresholds(settings.riskAppetite)
+    const peakNav = await readPeakNav(supabase, portfolio.id)
 
     // Live view of open positions across the whole cycle, refreshed as
     // each asset's own action executes — later assets in this same loop
@@ -268,6 +318,23 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
 
     const decisions: { asset: AssetSymbol; action: string; riskStatus: string }[] = []
 
+    // --- Pass 1: per-asset regime evaluation + deterministic candidate
+    // synthesis (trading-strategy-v1.md §7 / §14-15 / §20). No model
+    // call, no gate, no execution — purely reading market/DB state and
+    // deriving what EACH asset would do in isolation. Nav/cash are
+    // untouched here, so there is no ordering dependency between assets
+    // in this pass (unlike Pass 2 below).
+    interface PassOneResult {
+      asset: AssetSymbol
+      assetMarketData: NormalizedMarketData
+      assetInput: AssetInput
+      regime: RegimeResult
+      candidate: ModelDecisionProposal
+      openPosition: Position | null
+      recentStopLossClose: RecentStopLossClose | null
+    }
+
+    const passOneResults: PassOneResult[] = []
     for (const asset of settings.assets) {
       const assetMarketData = marketData.find((m) => m.asset === asset)
       if (!assetMarketData) throw new Error(`no market data returned for ${asset} despite passing freshness check — should be unreachable`)
@@ -282,6 +349,8 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         .map((n) => persistedByExternalId.get(n.externalId))
         .filter((n): n is PersistedNewsItem => !!n)
 
+      const regime = evaluateTrendRegime(assetMarketData.dailyCloseSeries)
+
       const assetInput: AssetInput = buildAssetInput({
         asset,
         marketData: assetMarketData,
@@ -292,6 +361,7 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         recentStopLossClose,
         stopOutReentryBlockMinutes: settings.stopOutReentryBlockMinutes,
         nowIso,
+        regime,
       })
 
       await supabase.from('market_snapshots').insert({
@@ -307,14 +377,109 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         data_as_of: assetMarketData.dataAsOf,
       })
 
+      const candidate = buildCandidateProposal({
+        asset,
+        currentState: assetInput.state,
+        regime,
+        atrPct: assetInput.market.indicators.atrPct,
+      })
+
+      passOneResults.push({ asset, assetMarketData, assetInput, regime, candidate, openPosition, recentStopLossClose })
+    }
+
+    // --- Batched veto call (trading-strategy-v1.md §11-12) ------------------
+    // At most ONE model call this cycle — CLAUDE.md "exactly one model call
+    // per scheduled V0 cycle," now "at most one": zero OPEN_LONG candidates
+    // (or news_veto_enabled = false) means zero calls; one or more means
+    // exactly one batched call covering all of them.
+    const vetoCandidates: VetoCandidateInput[] = []
+    for (const r of passOneResults) {
+      if (r.candidate.action !== 'OPEN_LONG') continue
+      vetoCandidates.push({
+        asset: r.asset,
+        regime: { dailyClose: r.regime.dailyClose, dailyMa: r.regime.dailyMa },
+        stopLossPct: r.candidate.stopLossPct,
+        takeProfitPct: r.candidate.takeProfitPct,
+        news: r.assetInput.news,
+      })
+    }
+
+    const verdictByAsset = new Map<AssetSymbol, VetoVerdict>()
+    // Seeded from a news-provider failure, but only when veto is actually
+    // on — disabling veto means news stops mattering at all, so a feed
+    // outage shouldn't block trading in that mode. Fails every OPEN_LONG
+    // candidate closed to HOLD below without spending an API call on a
+    // request we already know is missing its news context.
+    let vetoCallFailedReason: string | null =
+      settings.newsVetoEnabled && newsProviderFailedReason
+        ? `news retrieval failed, blocking new opens this cycle: ${newsProviderFailedReason}`
+        : null
+    let vetoModelVersion: string | null = null
+    let vetoRawOutputPayload: unknown = null
+
+    if (settings.newsVetoEnabled && vetoCandidates.length > 0 && vetoCallFailedReason === null) {
+      try {
+        const vetoResult = await callModel({ candidates: vetoCandidates }, apiKeys, fetchImpl)
+        for (const v of vetoResult.verdicts) verdictByAsset.set(v.asset, v)
+        vetoModelVersion = vetoResult.modelVersion
+        vetoRawOutputPayload = vetoResult.rawOutputPayload
+      } catch (error) {
+        vetoCallFailedReason = error instanceof Error ? error.message : String(error)
+      }
+    }
+
+    // --- Pass 2: apply the veto (if any), then proceed through the
+    // EXISTING, UNCHANGED gate -> planDecisionExecution -> atomic RPCs ->
+    // persistence, per asset, in order — later assets in this pass DO see
+    // earlier ones' executed effects on cash/openPositionsByAsset, same as
+    // the single-pass loop this replaces.
+    for (const r of passOneResults) {
+      const { asset, assetMarketData, assetInput, candidate, openPosition, recentStopLossClose } = r
+
+      let finalProposal: ModelDecisionProposal = candidate
+      let modelVetoedValue: boolean | null = null
+      let modelVersionForRow = 'not-called'
+      let outputPayloadForRow: unknown = null
+
+      if (candidate.action === 'OPEN_LONG') {
+        if (vetoCallFailedReason !== null) {
+          modelVersionForRow = 'call-failed'
+          outputPayloadForRow = { error: vetoCallFailedReason }
+          finalProposal = vetoedHoldProposal(asset, `veto call failed, failing closed: ${vetoCallFailedReason}`)
+          // modelVetoedValue stays null — no completed model verdict this
+          // cycle (AgentDecision.modelVetoed's own doc comment); the
+          // failure itself is fully captured in the proposal's reasons
+          // text and in outputPayloadForRow above instead.
+        } else {
+          const verdict = verdictByAsset.get(asset)
+          if (verdict) {
+            // vetoModelVersion/vetoRawOutputPayload are always set
+            // together with verdictByAsset entries (the same successful-
+            // call branch above) — never null here by construction.
+            modelVersionForRow = vetoModelVersion!
+            outputPayloadForRow = vetoRawOutputPayload
+            modelVetoedValue = verdict.veto
+            if (verdict.veto) finalProposal = vetoedHoldProposal(asset, verdict.rationale)
+          }
+          // else: news_veto_enabled is false — no call was ever attempted
+          // for this candidate; it proceeds unvetoed, and the row
+          // correctly records "not-called" / null.
+        }
+      }
+
       const nav = currentNav()
       const payload: ModelCallPayload = {
         portfolio: { cash: runningCash, nav, constraints: buildPortfolioConstraints(appetite.minConfidence, settings.slTpBounds) },
         assets: [assetInput],
       }
 
-      const modelResult = await callModel(payload, apiKeys, fetchImpl)
-      const proposal = modelResult.decisions[0]!
+      const { otherOpenPositionsRiskAtStopUsd, otherSameDirectionNotionalUsd } = aggregateOtherOpenPositionsRisk(
+        [...openPositionsByAsset.values()],
+        asset,
+        latestPriceByAsset,
+      )
+      const portfolioRiskCeilingUsd = settings.portfolioRiskCeilingMultiplier * appetite.riskBudgetPct * nav
+      const maxTotalNotionalUsd = settings.maxTotalNotionalPct * nav
 
       const gateContext = buildRiskGateContext({
         asset,
@@ -329,14 +494,20 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         stopOutReentryBlockMinutes: settings.stopOutReentryBlockMinutes,
         recentStopLossClose,
         nowIso,
+        portfolioRiskCeilingUsd,
+        otherOpenPositionsRiskAtStopUsd,
+        maxTotalNotionalUsd,
+        otherSameDirectionNotionalUsd,
+        peakNav,
+        drawdownBreakerFloorPct: settings.drawdownBreakerFloorPct,
       })
-      const gateResult = evaluateRiskGate(proposal, gateContext)
+      const gateResult = evaluateRiskGate(finalProposal, gateContext)
 
       const decisionId = crypto.randomUUID()
       const plan = planDecisionExecution({
         asset,
         portfolioId: portfolio.id,
-        proposal,
+        proposal: finalProposal,
         gateResult,
         openPosition,
         nav,
@@ -364,15 +535,15 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         portfolio_id: portfolio.id,
         asset,
         position_id: initialPositionId,
-        action: proposal.action,
-        confidence: proposal.confidence,
-        primary_driver: derivePrimaryDriver(proposal.reasons),
-        proposed_stop_loss_pct: proposal.action === 'OPEN_LONG' || proposal.action === 'OPEN_SHORT' ? proposal.stopLossPct : null,
-        proposed_take_profit_pct: proposal.action === 'OPEN_LONG' || proposal.action === 'OPEN_SHORT' ? proposal.takeProfitPct : null,
-        horizon_hours: proposal.horizonHours,
-        reasons: proposal.reasons,
-        invalidation: proposal.invalidation,
-        cited_news_ids: citedNewsIds(proposal.reasons),
+        action: finalProposal.action,
+        confidence: finalProposal.confidence,
+        primary_driver: derivePrimaryDriver(finalProposal.reasons),
+        proposed_stop_loss_pct: finalProposal.action === 'OPEN_LONG' || finalProposal.action === 'OPEN_SHORT' ? finalProposal.stopLossPct : null,
+        proposed_take_profit_pct: finalProposal.action === 'OPEN_LONG' || finalProposal.action === 'OPEN_SHORT' ? finalProposal.takeProfitPct : null,
+        horizon_hours: finalProposal.horizonHours,
+        reasons: finalProposal.reasons,
+        invalidation: finalProposal.invalidation,
+        cited_news_ids: citedNewsIds(finalProposal.reasons),
         risk_status: gateResult.riskStatus,
         risk_reason: gateResult.riskReason,
         approved_size_pct: gateResult.approvedSizePct,
@@ -382,11 +553,15 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         effective_risk_budget_pct: appetite.riskBudgetPct,
         effective_single_trade_cap_pct: settings.maxSingleTradePct,
         effective_asset_exposure_cap_pct: settings.maxAssetExposurePct,
+        effective_portfolio_risk_ceiling_pct: settings.portfolioRiskCeilingMultiplier * appetite.riskBudgetPct,
+        effective_max_total_notional_pct: settings.maxTotalNotionalPct,
         size_cap_applied: gateResult.sizeCapApplied,
         input_payload: payload,
-        output_payload: modelResult.rawOutputPayload,
-        prompt_version: modelResult.promptVersion,
-        model_version: modelResult.modelVersion,
+        output_payload: outputPayloadForRow,
+        prompt_version: VETO_PROMPT_VERSION,
+        model_version: modelVersionForRow,
+        strategy_version: 'v1-regime',
+        model_vetoed: modelVetoedValue,
         decided_at: nowIso,
       })
       if (decisionInsertError) throw new Error(`could not insert agent_decisions for ${asset}: ${decisionInsertError.message}`)
@@ -468,7 +643,7 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         }
       }
 
-      decisions.push({ asset, action: proposal.action, riskStatus: finalRiskStatus })
+      decisions.push({ asset, action: finalProposal.action, riskStatus: finalRiskStatus })
     }
 
     // Fresh, authoritative NAV for this run's snapshot — re-read cash

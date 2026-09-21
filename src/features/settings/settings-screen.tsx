@@ -98,7 +98,7 @@ function SettingsContent({ data }: { data: SettingsViewModel }) {
           ))}
         </div>
         <StatGrid columns={2}>
-          <Stat label="MIN CONFIDENCE" value={formatPct(appetite.minConfidence * 100)} />
+          <Stat label="CONFIDENCE GATE" value="Not used in V1" />
           <Stat label="RISK BUDGET / TRADE" value={formatPct(appetite.riskBudgetPct * 100)} />
         </StatGrid>
         <Panel className="flex flex-col gap-1.5">

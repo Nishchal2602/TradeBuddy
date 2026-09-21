@@ -38,7 +38,9 @@ const OHLC_FIXTURE = [
   [1787083200000, 64818.0, 64844.0, 64604.0, 64608.0],
 ]
 
-// Real /market_chart timestamps are exactly 1h (3_600_000ms) apart.
+// Real /market_chart timestamps are exactly 1h (3_600_000ms) apart —
+// exactly at the closedPoints boundary (not dropped; see closed-bars.ts's
+// "boundary inclusive" test).
 const MARKET_CHART_FIXTURE = {
   prices: [
     [1787058000000, 64157.62131397192],
@@ -47,6 +49,35 @@ const MARKET_CHART_FIXTURE = {
   total_volumes: [
     [1787058000000, 1234567.89],
     [1787061600000, 1244567.89],
+  ],
+}
+
+// A third, trailing point with a gap *shorter* than 1h — reproduces the
+// live-verified trailing-live-point shape (strategy-v1 Phase 0,
+// 2026-09-21) closedPoints exists to drop.
+const MARKET_CHART_WITH_LIVE_POINT_FIXTURE = {
+  prices: [
+    ...MARKET_CHART_FIXTURE.prices,
+    [1787061600000 + 20 * 60 * 1000, 64170.0], // +20min, not +1h
+  ],
+  total_volumes: [
+    ...MARKET_CHART_FIXTURE.total_volumes,
+    [1787061600000 + 20 * 60 * 1000, 1250000.0],
+  ],
+}
+
+// Real /market_chart?days=120 timestamps are exactly 24h (86_400_000ms)
+// apart, plus one trailing live point (live-verified, strategy-v1 Phase 0).
+const DAILY_CHART_FIXTURE = {
+  prices: [
+    [1787040000000, 64000.0],
+    [1787126400000, 64500.0], // +24h
+    [1787126400000 + 5 * 60 * 60 * 1000, 64550.0], // +5h, the live point
+  ],
+  total_volumes: [
+    [1787040000000, 30000000000],
+    [1787126400000, 31000000000],
+    [1787126400000 + 5 * 60 * 60 * 1000, 12000000000],
   ],
 }
 
@@ -59,9 +90,12 @@ function jsonResponse(body: unknown, init?: ResponseInit): Response {
 }
 
 // Routes by URL substring, mirroring how CoinGeckoMarketDataProvider
-// actually builds its three endpoint URLs — a realistic double, not a
-// call-count stub.
-function fixtureFetch(overrides: Partial<Record<'markets' | 'ohlc' | 'chart', () => Response>> = {}) {
+// actually builds its four endpoint URLs — a realistic double, not a
+// call-count stub. days=120 is checked BEFORE the generic /market_chart
+// check, exactly like fetchRecentPricePoints' own days=1 test below —
+// both `chartUrl` and `dailyUrl` hit /market_chart and would otherwise
+// collide on the same handler.
+function fixtureFetch(overrides: Partial<Record<'markets' | 'ohlc' | 'chart' | 'daily', () => Response>> = {}) {
   return (url: string | URL): Promise<Response> => {
     const href = url.toString()
     if (href.includes('/coins/markets')) {
@@ -69,6 +103,9 @@ function fixtureFetch(overrides: Partial<Record<'markets' | 'ohlc' | 'chart', ()
     }
     if (href.includes('/ohlc')) {
       return Promise.resolve(overrides.ohlc ? overrides.ohlc() : jsonResponse(OHLC_FIXTURE))
+    }
+    if (href.includes('days=120')) {
+      return Promise.resolve(overrides.daily ? overrides.daily() : jsonResponse(DAILY_CHART_FIXTURE))
     }
     if (href.includes('/market_chart')) {
       return Promise.resolve(overrides.chart ? overrides.chart() : jsonResponse(MARKET_CHART_FIXTURE))
@@ -99,9 +136,42 @@ Deno.test('getMarketData: normalizes a happy-path response for both assets', asy
   assertEquals(btc.closeSeries.length, 2)
   assertEquals(btc.closeSeries[0]!.timestamp, '2026-08-18T13:00:00.000Z')
   assertEquals(btc.volumeSeries[0], { timestamp: '2026-08-18T13:00:00.000Z', volume: 1234567.89 })
+  // DAILY_CHART_FIXTURE has 3 raw points (2 genuine daily + 1 trailing
+  // live point at +5h) -> closedPoints drops exactly the live one.
+  assertEquals(btc.dailyCloseSeries.length, 2)
+  assertEquals(btc.dailyCloseSeries[0], { timestamp: '2026-08-18T08:00:00.000Z', close: 64000.0 })
+  assertEquals(btc.dailyCloseSeries[1], { timestamp: '2026-08-19T08:00:00.000Z', close: 64500.0 })
 
   const eth = result.find((r) => r.asset === 'ETH')!
   assertEquals(eth.price, 2459.19)
+})
+
+Deno.test('getMarketData: a trailing live point on the hourly series (gap < 1h) is dropped from closeSeries and volumeSeries', async () => {
+  const provider = new CoinGeckoMarketDataProvider(
+    fixtureFetch({ chart: () => jsonResponse(MARKET_CHART_WITH_LIVE_POINT_FIXTURE) }) as typeof fetch,
+  )
+  const result = await provider.getMarketData(['BTC'])
+  const btc = result[0]!
+  // 3 raw points in, the +20min trailing one dropped -> back to 2.
+  assertEquals(btc.closeSeries.length, 2)
+  assertEquals(btc.volumeSeries.length, 2)
+  assertEquals(btc.closeSeries[btc.closeSeries.length - 1]!.timestamp, '2026-08-18T14:00:00.000Z')
+})
+
+Deno.test('getMarketData: candles are never passed through closedPoints, even when the ohlc fixture would trigger it', async () => {
+  // A 20-minute trailing gap on a 4-hourly series would be dropped by
+  // closedPoints if it were (wrongly) applied to `candles` — confirming
+  // it is NOT, per closed-bars.ts's doc comment (/ohlc has no trailing
+  // live point in reality; this fixture is adversarial on purpose).
+  const ohlcWithShortGap = [
+    ...OHLC_FIXTURE,
+    [1787083200000 + 20 * 60 * 1000, 64608.0, 64650.0, 64600.0, 64620.0],
+  ]
+  const provider = new CoinGeckoMarketDataProvider(
+    fixtureFetch({ ohlc: () => jsonResponse(ohlcWithShortGap) }) as typeof fetch,
+  )
+  const result = await provider.getMarketData(['BTC'])
+  assertEquals(result[0]!.candles.length, 3)
 })
 
 Deno.test('getMarketData: empty asset list makes zero requests and returns []', async () => {

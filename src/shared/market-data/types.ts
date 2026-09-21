@@ -8,7 +8,13 @@ export type AssetSymbol = z.infer<typeof AssetSymbol>
 
 // One true OHLC candle. `timestamp` is the candle's close time, UTC ISO 8601
 // — never a Date object, so this survives JSON round-trips (Postgres JSONB,
-// fetch payloads) without a revival step.
+// fetch payloads) without a revival step. Close-time semantics and
+// closed-bar safety both freshly live-verified (2026-09-21, strategy-v1
+// Phase 0): 180 candles at days=30 are spaced exactly 4.0h apart with zero
+// exception, including the last one — CoinGecko withholds the in-progress
+// 4h candle from `/ohlc` entirely, unlike `/market_chart` (see
+// `agent-cycle/strategy/closed-bars.ts`, which exists because
+// `closeSeries`/`volumeSeries` below do NOT get this same protection).
 export const OhlcCandle = z.object({
   timestamp: z.string().datetime(),
   open: z.number().positive(),
@@ -74,5 +80,19 @@ export const NormalizedMarketData = z.object({
   })),
 
   volumeSeries: z.array(VolumePoint),
+
+  // Ordered oldest -> newest, one point per UTC day — the sole input to
+  // the trading-strategy-v1.md §7 regime rule (daily close vs. 50-day MA).
+  // Structurally identical to `closeSeries` (same reasoning: no high/low
+  // needed for a close-price average) but a genuinely different series,
+  // not a re-aggregation of it — `closeSeries` only covers a 30-day
+  // hourly window, nowhere near enough history for a 50-day daily MA.
+  // Like `closeSeries`, this is `/market_chart`-sourced and therefore
+  // needs `closed-bars.ts`'s filter applied before use — see that file's
+  // doc comment for the live-verified reasoning.
+  dailyCloseSeries: z.array(z.object({
+    timestamp: z.string().datetime(),
+    close: z.number().positive(),
+  })),
 })
 export type NormalizedMarketData = z.infer<typeof NormalizedMarketData>

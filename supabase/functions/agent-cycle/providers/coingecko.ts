@@ -13,6 +13,10 @@ import {
 // triggers.ts), matching how NormalizedMarketData is owned by
 // src/shared/market-data/types.ts and merely produced here.
 import type { PricePoint } from '../../position-monitor/triggers.ts'
+import { closedPoints } from '../strategy/closed-bars.ts'
+
+const HOUR_MS = 60 * 60 * 1000
+const DAY_MS = 24 * HOUR_MS
 
 // CoinGecko coin ids for the V0 asset universe. Entirely internal to this
 // file — nothing outside ever sees the string "bitcoin"/"ethereum". This is
@@ -168,14 +172,40 @@ export class CoinGeckoMarketDataProvider implements MarketDataProvider {
 
     const ohlcUrl = `${this.baseUrl}/coins/${coinId}/ohlc?vs_currency=usd&days=30`
     const chartUrl = `${this.baseUrl}/coins/${coinId}/market_chart?vs_currency=usd&days=30`
+    // days=120 -> daily granularity on the free tier (confirmed live,
+    // 2026-09-21 — strategy-v1 Phase 0: 121 points, ~24h apart, for both
+    // BTC and ETH). The sole feed for the trading-strategy-v1.md §7 regime
+    // rule (50-day MA needs >=50 CLOSED daily points; 120 raw days leaves
+    // ~119 after closedPoints trims the trailing live one — comfortable
+    // headroom). A separate call, not a re-aggregation of chartUrl above:
+    // that 30-day hourly window has nowhere near enough history.
+    const dailyUrl = `${this.baseUrl}/coins/${coinId}/market_chart?vs_currency=usd&days=120`
 
-    const [ohlcRaw, chartRaw] = await Promise.all([
+    const [ohlcRaw, chartRaw, dailyRaw] = await Promise.all([
       fetchJson(ohlcUrl, this.fetchImpl),
       fetchJson(chartUrl, this.fetchImpl),
+      fetchJson(dailyUrl, this.fetchImpl),
     ])
 
     const ohlc = parseOrThrow(CoinGeckoOhlcResponse, ohlcRaw, `/coins/${coinId}/ohlc`)
     const chart = parseOrThrow(CoinGeckoMarketChartResponse, chartRaw, `/coins/${coinId}/market_chart`)
+    const daily = parseOrThrow(CoinGeckoMarketChartResponse, dailyRaw, `/coins/${coinId}/market_chart (days=120)`)
+
+    // closedPoints only — never applied to `candles`: /ohlc has no trailing
+    // live point to drop (see closed-bars.ts's doc comment for the live
+    // verification both facts rest on).
+    const closeSeries = closedPoints(
+      chart.prices.map(([ts, price]) => ({ timestamp: msToIso(ts), close: price })),
+      HOUR_MS,
+    )
+    const volumeSeries = closedPoints(
+      chart.total_volumes.map(([ts, volume]) => ({ timestamp: msToIso(ts), volume })),
+      HOUR_MS,
+    )
+    const dailyCloseSeries = closedPoints(
+      daily.prices.map(([ts, price]) => ({ timestamp: msToIso(ts), close: price })),
+      DAY_MS,
+    )
 
     return {
       asset,
@@ -193,14 +223,9 @@ export class CoinGeckoMarketDataProvider implements MarketDataProvider {
         low,
         close,
       })),
-      closeSeries: chart.prices.map(([ts, price]) => ({
-        timestamp: msToIso(ts),
-        close: price,
-      })),
-      volumeSeries: chart.total_volumes.map(([ts, volume]) => ({
-        timestamp: msToIso(ts),
-        volume,
-      })),
+      closeSeries,
+      volumeSeries,
+      dailyCloseSeries,
     }
   }
 }
