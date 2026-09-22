@@ -14,6 +14,8 @@ import { derivePrimaryDriver, citedNewsIds } from './cycle/decision-record.ts'
 import { computeNav } from './broker/accounting.ts'
 import { rowToPosition, toIsoZ } from './db/row-mappers.ts'
 import { toQuoteRow } from './db/quote-rows.ts'
+import { buildDecisionIdempotencyKey, classifyRunInsertConflict, parseTrigger, staleRunCutoffIso } from './cycle/idempotency.ts'
+import type { CycleTrigger } from './cycle/idempotency.ts'
 import { riskAppetiteThresholds } from '../../../src/shared/risk/appetite-mapping.ts'
 import type { RiskAppetite } from '../../../src/shared/risk/appetite-mapping.ts'
 import type { SlTpBounds } from '../../../src/shared/risk/sl-tp.ts'
@@ -33,12 +35,6 @@ import type { NormalizedNewsItem } from '../../../src/shared/news/types.ts'
 // here: the extension reads persisted state via its existing anon-key
 // REST access). No accounting math, risk logic, or model-calling logic
 // lives in this file.
-
-function floorToIntervalIso(nowIso: string, intervalMinutes: number): string {
-  const intervalMs = intervalMinutes * 60_000
-  const floored = Math.floor(new Date(nowIso).getTime() / intervalMs) * intervalMs
-  return new Date(floored).toISOString()
-}
 
 interface Settings {
   decisionIntervalMinutes: number
@@ -213,7 +209,7 @@ async function readRecentDecisions(supabase: SupabaseClient, portfolioId: string
 }
 
 export interface CycleSummary {
-  status: 'completed' | 'skipped' | 'duplicate_tick' | 'failed'
+  status: 'completed' | 'skipped' | 'duplicate_tick' | 'already_running' | 'failed'
   runId?: string
   decisions: { asset: AssetSymbol; action: string; riskStatus: string }[]
   detail?: string
@@ -224,11 +220,26 @@ export interface CycleDeps {
   apiKeys: string[]
   // deno-lint-ignore no-explicit-any
   fetchImpl?: any
+  // The single instant the whole cycle's business logic treats as "now"
+  // (idempotency bucket, staleness checks, decided_at, etc.) — captured
+  // once at request start so every check inside one cycle agrees on the
+  // same clock reading. agent_runs.completed_at deliberately does NOT
+  // reuse this value (2026-09-22 fix) — every completion site instead
+  // calls `new Date().toISOString()` at the moment it actually completes,
+  // so a run's real wall-clock duration is measurable. Reusing nowIso
+  // here previously meant every single row recorded an identical
+  // started_at/completed_at and therefore an artifactual 0.00s duration,
+  // regardless of how long the cycle actually took.
   nowIso: string
+  // "Manual idempotency" plan (2026-09-22) — manual (the extension's Run
+  // agent button) gets a per-click key so multiple deliberate clicks in
+  // one 3-hour window all execute; scheduled (a future cron, once one
+  // exists) keeps the unchanged bucketed key. See cycle/idempotency.ts.
+  trigger: CycleTrigger
 }
 
 export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
-  const { supabase, apiKeys, nowIso } = deps
+  const { supabase, apiKeys, nowIso, trigger } = deps
   const fetchImpl = deps.fetchImpl ?? fetch
 
   const settings = await readSettings(supabase)
@@ -245,7 +256,20 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
     return { status: 'skipped', decisions: [], detail: 'agent_settings.is_paused is true' }
   }
 
-  const idempotencyKey = `decision-${floorToIntervalIso(nowIso, settings.decisionIntervalMinutes)}`
+  // Reap any decision run abandoned mid-cycle (an Edge Function
+  // crash/timeout before its own catch block could mark it failed) —
+  // otherwise a single dead 'running' row would permanently wedge
+  // agent_runs_one_running_decision_idx (the mutex below) for every
+  // future click. Idempotent and harmless to race: two requests reaping
+  // the same stale row both just no-op past the already-updated row: 0.
+  await supabase
+    .from('agent_runs')
+    .update({ status: 'failed', error_detail: 'run abandoned: still running past the staleness cutoff, reaped by a later invocation', completed_at: new Date().toISOString() })
+    .eq('kind', 'decision')
+    .eq('status', 'running')
+    .lt('started_at', staleRunCutoffIso(nowIso))
+
+  const idempotencyKey = buildDecisionIdempotencyKey(trigger, nowIso, settings.decisionIntervalMinutes)
   const { data: run, error: runInsertError } = await supabase
     .from('agent_runs')
     .insert({ portfolio_id: portfolio.id, idempotency_key: idempotencyKey, status: 'running', kind: 'decision', started_at: nowIso })
@@ -254,7 +278,10 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
 
   if (runInsertError) {
     if (runInsertError.code === '23505') {
-      return { status: 'duplicate_tick', decisions: [], detail: 'this tick was already handled by another invocation (in progress or completed)' }
+      const conflict = classifyRunInsertConflict(runInsertError.message, trigger)
+      return conflict === 'already_running'
+        ? { status: 'already_running', decisions: [], detail: 'another decision cycle is currently running' }
+        : { status: 'duplicate_tick', decisions: [], detail: 'this tick was already handled by another invocation (in progress or completed)' }
     }
     return { status: 'failed', decisions: [], detail: `could not create agent_runs row: ${runInsertError.message}` }
   }
@@ -284,7 +311,7 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
 
     const freshness = checkMarketDataFreshness(marketData, settings.maxDataStalenessMinutes, nowIso)
     if (!freshness.fresh) {
-      await supabase.from('agent_runs').update({ status: 'skipped', skip_reason: freshness.reason, completed_at: nowIso }).eq('id', runId)
+      await supabase.from('agent_runs').update({ status: 'skipped', skip_reason: freshness.reason, completed_at: new Date().toISOString() }).eq('id', runId)
       return { status: 'skipped', runId, decisions: [], detail: freshness.reason }
     }
 
@@ -690,12 +717,12 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
       realized_pnl_cum: realizedPnlCum,
     })
 
-    await supabase.from('agent_runs').update({ status: 'completed', completed_at: nowIso }).eq('id', runId)
+    await supabase.from('agent_runs').update({ status: 'completed', completed_at: new Date().toISOString() }).eq('id', runId)
 
     return { status: 'completed', runId, decisions }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    await supabase.from('agent_runs').update({ status: 'failed', error_detail: message, completed_at: nowIso }).eq('id', runId)
+    await supabase.from('agent_runs').update({ status: 'failed', error_detail: message, completed_at: new Date().toISOString() }).eq('id', runId)
     return { status: 'failed', runId, decisions: [], detail: message }
   }
 }
@@ -722,12 +749,26 @@ Deno.serve(async (req) => {
     return new Response(null, { headers: corsHeaders })
   }
 
+  // Body is optional — a future cron caller, and this session's own
+  // direct-invocation checks, typically send none at all. req.json()
+  // throws on an empty/missing body; that failure is swallowed here
+  // rather than treated as a real error, since parseTrigger's own
+  // fail-safe default (scheduled) already handles an unparseable body
+  // exactly the same way it handles an absent trigger field.
+  let body: unknown
+  try {
+    body = await req.json()
+  } catch {
+    body = undefined
+  }
+  const trigger = parseTrigger(body)
+
   const supabase = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!)
   // Single paid-tier key (user, 2026-09-19) — the free-tier 3-key
   // rotation is retired; callModel's own loop still generalizes to N
   // keys unchanged (model/call-model.ts), so this is the only line that
   // needed to change to make that switch.
   const apiKeys = [Deno.env.get('GEMINI_API_KEY_1')].filter((k): k is string => !!k)
-  const summary = await runAgentCycle({ supabase, apiKeys, nowIso: new Date().toISOString() })
+  const summary = await runAgentCycle({ supabase, apiKeys, nowIso: new Date().toISOString(), trigger })
   return new Response(JSON.stringify(summary), { headers: { ...corsHeaders, 'content-type': 'application/json' } })
 })

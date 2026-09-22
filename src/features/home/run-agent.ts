@@ -13,14 +13,21 @@ import { supabase } from '@/supabase'
  * import, same tradeoff every other Edge-Function-only type in this
  * codebase makes. */
 export interface AgentCycleRunResult {
-  status: 'completed' | 'skipped' | 'duplicate_tick' | 'failed'
+  status: 'completed' | 'skipped' | 'duplicate_tick' | 'already_running' | 'failed'
   runId?: string
   decisions: { asset: string; action: string; riskStatus: string }[]
   detail?: string
 }
 
+// trigger: 'manual' ("manual idempotency" plan, 2026-09-22) — every click
+// of this button IS a manual invocation, so this is never anything else.
+// Its absence (a future scheduled caller sending no body, or an
+// unrecognized value) is exactly what agent-cycle's own parseTrigger
+// treats as 'scheduled' — the more restrictive default — so an
+// extension build that somehow failed to send this would revert to the
+// OLD bucketed behavior, not a worse one.
 export async function invokeAgentCycle(): Promise<AgentCycleRunResult> {
-  const { data, error } = await supabase.functions.invoke<AgentCycleRunResult>('agent-cycle')
+  const { data, error } = await supabase.functions.invoke<AgentCycleRunResult>('agent-cycle', { body: { trigger: 'manual' } })
   if (error) throw new Error(`could not run the agent: ${error.message}`)
   if (!data) throw new Error('the agent cycle returned no result')
   return data

@@ -120,12 +120,17 @@ function describeRunResult(result: AgentCycleRunResult): RunFeedback {
       return { tone: 'success', message: `Cycle complete — ${count} decision${count === 1 ? '' : 's'} made.` }
     }
     case 'duplicate_tick':
-      // agent-cycle's idempotency key floors to the configured 3-hour
-      // decision_interval_minutes bucket regardless of trigger source —
-      // a second manual click inside the same window is a real, expected
-      // no-op (23505 unique-violation path), not a failure to explain
-      // away as an error.
+      // "Manual idempotency" plan (2026-09-22): every click from this
+      // button now sends trigger:'manual', which gets its own per-click
+      // idempotency key — a second manual click inside the same 3-hour
+      // decision_interval_minutes window now genuinely executes, rather
+      // than colliding here. This status is only still reachable from a
+      // FUTURE scheduled caller retrying the same bucket; kept distinct
+      // from 'already_running' (a concurrent invocation right now) since
+      // the two mean different things.
       return { tone: 'info', message: 'Already ran for the current window — try again once it rolls over.' }
+    case 'already_running':
+      return { tone: 'info', message: 'A cycle is already running — try again in a moment.' }
     case 'skipped':
       return { tone: 'info', message: result.detail ?? 'Cycle skipped.' }
     case 'failed':

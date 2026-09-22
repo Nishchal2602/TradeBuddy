@@ -58,7 +58,7 @@ Important execution fields include the trade's `intent` (OPEN_LONG/OPEN_SHORT/CL
 
 **Rewritten for Trading Strategy V1 (2026-09-21, implemented) — see `context/specs/trading-strategy-v1.md` for the strategy itself and Model Boundary below for the model's now much narrower role.** Two passes, not one: Pass 1 needs no model call at all; Pass 2 needs at most one, batched, only when Pass 1 produced ≥1 candidate worth checking.
 
-1. Acquire the current run lock/idempotency key (`agent_runs.kind = 'decision'`).
+1. Acquire the current run lock/idempotency key (`agent_runs.kind = 'decision'`). **Manual and scheduled invocations use disjoint keys (2026-09-22)**: a manual trigger (the extension's Run agent button) gets a key unique to that click, so multiple deliberate clicks inside one `decision_interval_minutes` window each execute; a scheduled trigger keeps the original bucketed key, so a retried tick still dedupes exactly as before. Either way, true concurrency exclusion — not just key uniqueness — comes from a separate partial unique index allowing at most one `status = 'running'` decision-cycle row at a time; a run abandoned mid-cycle (a crash before it could mark itself failed) is reaped after 10 minutes so it can never permanently wedge that lock. See `cycle/idempotency.ts`.
 2. Fetch current BTC/ETH market data, including daily closes for the trend regime.
 3. Fetch recent relevant news for the elapsed cycle window (failure here does not fail the cycle — see Model Boundary).
 4. Validate freshness and completeness, including sufficient closed daily bars for the regime rule.
