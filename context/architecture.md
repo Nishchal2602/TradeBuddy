@@ -22,6 +22,7 @@
 - `extension/` — owns Chrome UI, presentation state, user controls, and read-only data access. It must not contain secrets, trading logic, indicator calculations, risk logic, or model calls.
 - `supabase/functions/agent-cycle/` — owns one complete scheduled decision cycle: data retrieval, indicator calculation, decision-model invocation, risk evaluation, paper execution, and persistence. Also the home for the shared domain contract (`domain/`), providers, and indicator/broker modules the position monitor reuses.
 - `supabase/functions/position-monitor/` — owns the independent SL/TP/collateral-exhaustion execution cycle. Polls prices only for assets with an open position, evaluates triggers, and executes through the same paper broker module `agent-cycle` uses (never a second implementation — invariant 12). Runs on its own 10-minute schedule, decoupled from the 3-hour decision cycle. Full behavior, including data-sufficiency limits and the fill-price policy, is specified in `context/specs/trading-domain-contract.md` §5.
+- `supabase/functions/market-refresh/` (2026-09-22, "market_quotes plan") — owns keeping displayed BTC/ETH quotes current independent of the manual decision cadence. Deliberately the most restricted of the three functions: imports only the CoinGecko provider and row mappers, never the strategy, risk gate, broker, or either atomic RPC, and writes only `market_quotes` — there is no code path here that can produce a decision, trade, or position. Runs on its own 5-minute schedule; `agent-cycle` also upserts the same table on every manual run at zero extra request cost.
 - `supabase/functions/control/` — owns authenticated control actions such as pause/resume and run-now. It may invoke the agent cycle but must not duplicate its business logic.
 - `supabase/migrations/` — owns database schema, indexes, RLS policies, and database-level constraints.
 - `src/shared/` — owns shared TypeScript types, schemas, constants, and pure utilities that are safe to use across boundaries. It must not contain secrets or server-only integrations.
@@ -29,7 +30,7 @@
 
 ## Storage Model
 
-- **Supabase Postgres**: portfolios, positions, trades, decisions, serialized decision inputs, news records, market snapshots, agent runs, settings, and NAV snapshots.
+- **Supabase Postgres**: portfolios, positions, trades, decisions, serialized decision inputs, news records, market snapshots, live market quotes, agent runs, settings, and NAV snapshots.
 - **JSONB columns**: exact serialized decision inputs, structured model outputs, reasons, invalidation conditions, and other bounded decision metadata that benefits from replayability.
 - **No blob/file storage in V0**: the product does not need large generated artifacts or media.
 - **Browser storage**: only lightweight UI preferences that genuinely need to persist locally. Never store API keys, model keys, or trading credentials.
@@ -45,6 +46,7 @@ The implementation should use normalized tables with clear foreign-key relations
 - `agent_runs`
 - `agent_decisions`
 - `market_snapshots`
+- `market_quotes` (2026-09-22) — the extension's own live-price source, not the strategy's. One row per asset, upserted by `market-refresh` (5-minute schedule) and by `agent-cycle` on every manual run; `market_snapshots` above stays the immutable per-decision audit trail the strategy and Decision-detail UI read, with no new writer or reader added to it by this table's existence.
 - `news_items`
 - `agent_settings`
 
@@ -150,16 +152,17 @@ No real exchange integration, real leverage, margin, funding, or liquidation mec
 
 ## Scheduling
 
-Two independent `pg_cron` jobs — not one job with two responsibilities:
+Three independent `pg_cron` jobs — not one job with several responsibilities:
 
 - **Decision cycle** (`agent-cycle`) — default 3 hours, configurable (`agent_settings.decision_interval_minutes`). Runs the deterministic regime-and-gate loop, with at most one batched Gemini veto call when there's ≥1 candidate to check (Agent Cycle above).
 - **Position monitor** (`position-monitor`) — default 10 minutes, configurable (`agent_settings.monitor_interval_minutes`). Runs SL/TP/collateral-exhaustion execution only — no model call, no new decisions. Each run replays the 5-minute price series since its last run rather than reading a single spot snapshot, so detection is limited by data resolution (5 min) rather than poll frequency (10 min). This is explicitly an approximation of a real stop order, not a claim of equivalence — see `context/specs/trading-domain-contract.md` §5 for the stated limitations.
+- **Market-refresh** (`market-refresh`, 2026-09-22) — every 5 minutes, hardcoded (not `agent_settings`-configurable — it exists purely to keep `market_quotes` current for display, not to run any part of the trading logic those settings govern). One batched `/coins/markets` call for both assets, upserted into `market_quotes`. No decision, no trade, no position — see System Boundaries above.
 
-Both intervals are configuration, not hardcoded. V0 uses fixed scheduling only for both — event-driven triggers on the *decision* cycle are explicitly deferred; the position monitor's price-triggered execution is a distinct, deliberate exception that exists specifically for SL/TP, not a general event-driven mechanism.
+The decision cycle's and position monitor's intervals are configuration, not hardcoded; market-refresh's is not, for the reason given above. V0 uses fixed scheduling only for all three — event-driven triggers on the *decision* cycle are explicitly deferred; the position monitor's price-triggered execution and market-refresh's own polling are each a distinct, deliberate exception to that, not a general event-driven mechanism.
 
 **V0 execution mode: manual-only (2026-09-19).** The description above is the target design; V0's actual current behavior is narrower for the decision cycle specifically. No `pg_cron` schedule exists for `agent-cycle`, and none is created in V0 — it runs exclusively when the user clicks "Run agent" in the Chrome extension, which invokes the deployed function directly (anon key as bearer token, same trust model as every other extension read; no separate `control` wrapper). `decision_interval_minutes` stays configured and unused, reserved for switching this on deliberately later. The position monitor is unaffected by this and keeps running exactly as scheduled above — this section's design remains fully current for it.
 
-Both cycles must be idempotent so retries cannot create duplicate trades. The two cycles can race on the same position (one closes it while the other is mid-decision) — resolved deterministically via a conditional `UPDATE ... WHERE status = 'open'` inside the fill transaction; see `context/specs/trading-domain-contract.md` §6.
+The decision cycle and position monitor must both be idempotent so retries cannot create duplicate trades; the two can race on the same position (one closes it while the other is mid-decision) — resolved deterministically via a conditional `UPDATE ... WHERE status = 'open'` inside the fill transaction, see `context/specs/trading-domain-contract.md` §6. Market-refresh needs neither property: it cannot create a trade, so a duplicate or retried invocation just upserts the same 2 `market_quotes` rows again, harmlessly.
 
 ## Invariants
 

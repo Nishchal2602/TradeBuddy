@@ -1,6 +1,6 @@
 import { z } from 'zod'
-import type { AssetSymbol, NormalizedMarketData } from '../../../../src/shared/market-data/types.ts'
-import { NormalizedMarketData as NormalizedMarketDataSchema } from '../../../../src/shared/market-data/types.ts'
+import type { AssetSymbol, NormalizedMarketData, MarketQuote } from '../../../../src/shared/market-data/types.ts'
+import { NormalizedMarketData as NormalizedMarketDataSchema, MarketQuote as MarketQuoteSchema } from '../../../../src/shared/market-data/types.ts'
 import type { MarketDataProvider } from '../../../../src/shared/market-data/provider.ts'
 import {
   ProviderFetchError,
@@ -122,6 +122,66 @@ function parseOrThrow<T>(schema: z.ZodType<T>, raw: unknown, context: string): T
   return result.data
 }
 
+// One batched /coins/markets call for every requested asset — the single
+// most reused piece of this file. Shared by CoinGeckoMarketDataProvider
+// (which layers three more per-asset requests on top, below) and
+// fetchLatestQuotes (which needs nothing more than this). Module-private,
+// not a method: neither caller needs an instance to use it, and it takes
+// fetchImpl/baseUrl as plain params so fetchLatestQuotes's own defaulted
+// signature can pass them straight through, same shape as fetchJson.
+async function fetchMarketsSummary(
+  assets: AssetSymbol[],
+  fetchImpl: typeof fetch,
+  baseUrl: string,
+): Promise<z.infer<typeof CoinGeckoMarketsResponse>> {
+  const ids = assets.map((asset) => COIN_ID[asset])
+  const marketsUrl =
+    `${baseUrl}/coins/markets?vs_currency=usd&ids=${ids.join(',')}` +
+    `&price_change_percentage=1h,24h,7d`
+  const marketsRaw = await fetchJson(marketsUrl, fetchImpl)
+  return parseOrThrow(CoinGeckoMarketsResponse, marketsRaw, '/coins/markets')
+}
+
+// Shared by fetchOneAsset (below) and fetchLatestQuotes — both need "the
+// one /coins/markets entry for this asset, or a validation error naming
+// exactly what was requested vs. what came back."
+function findMarketEntry(
+  asset: AssetSymbol,
+  markets: z.infer<typeof CoinGeckoMarketsResponse>,
+): z.infer<typeof CoinGeckoMarketsEntry> {
+  const coinId = COIN_ID[asset]
+  const marketEntry = markets.find((entry) => entry.id === coinId)
+  if (!marketEntry) {
+    throw new ProviderValidationError(
+      `coingecko: /coins/markets response did not include requested asset ${asset} (${coinId})`,
+      'coingecko',
+      { requested: coinId, received: markets.map((m) => m.id) },
+    )
+  }
+  return marketEntry
+}
+
+// The exact field mapping MarketQuote needs — also the first eight fields
+// of a full NormalizedMarketData (fetchOneAsset spreads this same object
+// below, rather than re-listing the fields a second time). Kept as a
+// plain, unvalidated object here; each caller validates the shape it
+// actually needs (MarketQuote vs. the full NormalizedMarketData) at its
+// own boundary via parseOrThrow, matching this file's existing
+// "parse once, at the point a caller commits to a specific output shape"
+// convention.
+function toQuoteFields(asset: AssetSymbol, marketEntry: z.infer<typeof CoinGeckoMarketsEntry>, fetchedAt: string) {
+  return {
+    asset,
+    provider: 'coingecko',
+    dataAsOf: marketEntry.last_updated,
+    fetchedAt,
+    price: marketEntry.current_price,
+    change1hPct: marketEntry.price_change_percentage_1h_in_currency ?? null,
+    change24hPct: marketEntry.price_change_percentage_24h_in_currency ?? null,
+    change7dPct: marketEntry.price_change_percentage_7d_in_currency ?? null,
+  }
+}
+
 // --- Provider ----------------------------------------------------------
 
 export class CoinGeckoMarketDataProvider implements MarketDataProvider {
@@ -140,13 +200,7 @@ export class CoinGeckoMarketDataProvider implements MarketDataProvider {
     if (assets.length === 0) return []
 
     const fetchedAt = new Date().toISOString()
-    const ids = assets.map((asset) => COIN_ID[asset])
-
-    const marketsUrl =
-      `${this.baseUrl}/coins/markets?vs_currency=usd&ids=${ids.join(',')}` +
-      `&price_change_percentage=1h,24h,7d`
-    const marketsRaw = await fetchJson(marketsUrl, this.fetchImpl)
-    const markets = parseOrThrow(CoinGeckoMarketsResponse, marketsRaw, '/coins/markets')
+    const markets = await fetchMarketsSummary(assets, this.fetchImpl, this.baseUrl)
 
     const perAsset = await Promise.all(
       assets.map((asset) => this.fetchOneAsset(asset, markets, fetchedAt)),
@@ -161,14 +215,7 @@ export class CoinGeckoMarketDataProvider implements MarketDataProvider {
     fetchedAt: string,
   ): Promise<NormalizedMarketData> {
     const coinId = COIN_ID[asset]
-    const marketEntry = markets.find((entry) => entry.id === coinId)
-    if (!marketEntry) {
-      throw new ProviderValidationError(
-        `coingecko: /coins/markets response did not include requested asset ${asset} (${coinId})`,
-        'coingecko',
-        { requested: coinId, received: markets.map((m) => m.id) },
-      )
-    }
+    const marketEntry = findMarketEntry(asset, markets)
 
     const ohlcUrl = `${this.baseUrl}/coins/${coinId}/ohlc?vs_currency=usd&days=30`
     const chartUrl = `${this.baseUrl}/coins/${coinId}/market_chart?vs_currency=usd&days=30`
@@ -208,14 +255,7 @@ export class CoinGeckoMarketDataProvider implements MarketDataProvider {
     )
 
     return {
-      asset,
-      provider: 'coingecko',
-      dataAsOf: marketEntry.last_updated,
-      fetchedAt,
-      price: marketEntry.current_price,
-      change1hPct: marketEntry.price_change_percentage_1h_in_currency ?? null,
-      change24hPct: marketEntry.price_change_percentage_24h_in_currency ?? null,
-      change7dPct: marketEntry.price_change_percentage_7d_in_currency ?? null,
+      ...toQuoteFields(asset, marketEntry, fetchedAt),
       candles: ohlc.map(([ts, open, high, low, close]) => ({
         timestamp: msToIso(ts),
         open,
@@ -266,4 +306,31 @@ export async function fetchRecentPricePoints(
   )
 
   return Object.fromEntries(entries)
+}
+
+// --- Market-quote refresh -----------------------------------------------
+//
+// The cheapest possible current-price fetch: one /coins/markets call for
+// every requested asset, no OHLC/market_chart requests at all — used by
+// the market-refresh Edge Function (a separate, trade-incapable process,
+// see context/architecture.md § Scheduling) to keep the extension's
+// displayed prices current between manual agent runs, without the ~7x
+// request cost getMarketData pays for indicator history it doesn't need.
+// Standalone, same reasoning as fetchRecentPricePoints above: it returns
+// MarketQuote, not NormalizedMarketData, so it doesn't implement
+// MarketDataProvider and doesn't belong on the class either.
+export async function fetchLatestQuotes(
+  assets: AssetSymbol[],
+  fetchImpl: typeof fetch = fetch,
+  baseUrl: string = BASE_URL,
+): Promise<MarketQuote[]> {
+  if (assets.length === 0) return []
+
+  const fetchedAt = new Date().toISOString()
+  const markets = await fetchMarketsSummary(assets, fetchImpl, baseUrl)
+
+  return assets.map((asset) => {
+    const marketEntry = findMarketEntry(asset, markets)
+    return parseOrThrow(MarketQuoteSchema, toQuoteFields(asset, marketEntry, fetchedAt), 'quote output')
+  })
 }

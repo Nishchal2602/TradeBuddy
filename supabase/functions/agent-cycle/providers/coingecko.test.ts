@@ -1,5 +1,5 @@
 import { assertEquals, assertRejects } from 'jsr:@std/assert@1'
-import { CoinGeckoMarketDataProvider, fetchRecentPricePoints } from './coingecko.ts'
+import { CoinGeckoMarketDataProvider, fetchRecentPricePoints, fetchLatestQuotes } from './coingecko.ts'
 import {
   ProviderFetchError,
   ProviderRateLimitError,
@@ -304,4 +304,83 @@ Deno.test('fetchRecentPricePoints: HTTP failure on one asset throws (fail-closed
   }) as unknown as typeof fetch
 
   await assertRejects(() => fetchRecentPricePoints(['BTC', 'ETH'], fetchImpl), ProviderFetchError)
+})
+
+// --- fetchLatestQuotes (market-refresh's lightweight quote fetch) ---------
+
+Deno.test('fetchLatestQuotes: happy path for both assets, exactly one HTTP call total', async () => {
+  let calls = 0
+  const fetchImpl = ((url: string) => {
+    calls++
+    if (!url.includes('/coins/markets')) throw new Error(`expected only /coins/markets, got ${url}`)
+    return Promise.resolve(jsonResponse(MARKETS_FIXTURE))
+  }) as unknown as typeof fetch
+
+  const result = await fetchLatestQuotes(['BTC', 'ETH'], fetchImpl)
+  // The whole point of this function: one request covers every asset, no
+  // /ohlc or /market_chart calls at all (unlike getMarketData's 1+3N).
+  assertEquals(calls, 1)
+  assertEquals(result.length, 2)
+
+  const btc = result.find((q) => q.asset === 'BTC')!
+  assertEquals(btc.provider, 'coingecko')
+  assertEquals(btc.price, 76851)
+  assertEquals(btc.dataAsOf, '2026-09-17T12:22:10.000Z')
+  assertEquals(btc.change1hPct, 0.0)
+  assertEquals(btc.change24hPct, 1.11918)
+  assertEquals(btc.change7dPct, -2.0)
+  // No candles/closeSeries/volumeSeries/dailyCloseSeries leak through —
+  // MarketQuote is a strict structural subset, not a NormalizedMarketData
+  // with extra fields silently still attached.
+  assertEquals(
+    Object.keys(btc).sort(),
+    ['asset', 'change1hPct', 'change24hPct', 'change7dPct', 'dataAsOf', 'fetchedAt', 'price', 'provider'],
+  )
+
+  const eth = result.find((q) => q.asset === 'ETH')!
+  assertEquals(eth.price, 2459.19)
+})
+
+Deno.test('fetchLatestQuotes: a null change-percentage field stays null, not undefined or 0', async () => {
+  const marketsWithNullChange = [{ ...MARKETS_FIXTURE[0], price_change_percentage_1h_in_currency: null }]
+  const fetchImpl = (() => Promise.resolve(jsonResponse(marketsWithNullChange))) as unknown as typeof fetch
+  const result = await fetchLatestQuotes(['BTC'], fetchImpl)
+  assertEquals(result[0]!.change1hPct, null)
+})
+
+Deno.test('fetchLatestQuotes: asset missing from /coins/markets throws ProviderValidationError', async () => {
+  const fetchImpl = (() => Promise.resolve(jsonResponse([MARKETS_FIXTURE[0]]))) as unknown as typeof fetch
+  await assertRejects(() => fetchLatestQuotes(['BTC', 'ETH'], fetchImpl), ProviderValidationError)
+})
+
+Deno.test('fetchLatestQuotes: HTTP 500 throws ProviderFetchError', async () => {
+  const fetchImpl = (() =>
+    Promise.resolve(new Response('Internal Server Error', { status: 500, statusText: 'Internal Server Error' }))
+  ) as unknown as typeof fetch
+  await assertRejects(() => fetchLatestQuotes(['BTC'], fetchImpl), ProviderFetchError)
+})
+
+Deno.test('fetchLatestQuotes: HTTP 429 throws ProviderRateLimitError with retry-after', async () => {
+  const fetchImpl = (() =>
+    Promise.resolve(new Response(null, { status: 429, headers: { 'retry-after': '15' } }))
+  ) as unknown as typeof fetch
+  const err = await assertRejects(() => fetchLatestQuotes(['BTC'], fetchImpl), ProviderRateLimitError)
+  assertEquals((err as ProviderRateLimitError).retryAfterSeconds, 15)
+})
+
+Deno.test('fetchLatestQuotes: non-JSON body throws ProviderFetchError', async () => {
+  const fetchImpl = (() => Promise.resolve(new Response('not json{{{', { status: 200 }))) as unknown as typeof fetch
+  await assertRejects(() => fetchLatestQuotes(['BTC'], fetchImpl), ProviderFetchError)
+})
+
+Deno.test('fetchLatestQuotes: empty asset list makes zero requests and returns []', async () => {
+  let calls = 0
+  const fetchImpl = (() => {
+    calls++
+    throw new Error('should never be called')
+  }) as unknown as typeof fetch
+
+  const result = await fetchLatestQuotes([], fetchImpl)
+  assertEquals(result, [])
+  assertEquals(calls, 0)
 })

@@ -15,24 +15,24 @@ export interface LatestMarketPrice {
   dataAsOf: string
 }
 
-/** Latest known price per asset, from the most recent decision cycle's
- * market_snapshots — not a live/streaming quote (architecture.md
- * explicitly excludes streaming market feeds; the extension shows what
- * the last cycle actually saw, same figure the risk gate used). Fetches
- * a small recent window and keeps the first (most recent) row per asset
- * in application code — simpler and just as correct as a per-asset
- * "latest" query for a 2-asset universe. */
+/** Latest known price per asset, from market_quotes — a genuinely live
+ * quote (not architecture.md's excluded streaming feed: it's a ~5-minute
+ * poll, refreshed independently of the decision cycle by market-refresh,
+ * see the "market_quotes plan," 2026-09-21). Previously read
+ * market_snapshots (the decision cycle's own per-run indicator snapshot,
+ * frozen between manual "Run agent" clicks) with an order+limit+dedup
+ * loop working around that table having no per-asset "latest" shape;
+ * market_quotes has exactly one row per asset (its primary key), so a
+ * plain filtered select replaces all of that. */
 export async function fetchLatestMarketPrices(assets: AssetSymbol[]): Promise<Map<AssetSymbol, LatestMarketPrice>> {
   const { data, error } = await supabase
-    .from('market_snapshots')
+    .from('market_quotes')
     .select('asset, price, change_24h_pct, data_as_of')
-    .order('data_as_of', { ascending: false })
-    .limit(assets.length * 5)
+    .in('asset', assets)
   if (error) throw new Error(`could not load market prices: ${error.message}`)
 
   const byAsset = new Map<AssetSymbol, LatestMarketPrice>()
   for (const row of data ?? []) {
-    if (byAsset.has(row.asset)) continue
     byAsset.set(row.asset, {
       asset: row.asset,
       price: Number(row.price),

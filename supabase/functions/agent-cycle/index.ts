@@ -13,6 +13,7 @@ import { planDecisionExecution } from './cycle/plan-decision.ts'
 import { derivePrimaryDriver, citedNewsIds } from './cycle/decision-record.ts'
 import { computeNav } from './broker/accounting.ts'
 import { rowToPosition, toIsoZ } from './db/row-mappers.ts'
+import { toQuoteRow } from './db/quote-rows.ts'
 import { riskAppetiteThresholds } from '../../../src/shared/risk/appetite-mapping.ts'
 import type { RiskAppetite } from '../../../src/shared/risk/appetite-mapping.ts'
 import type { SlTpBounds } from '../../../src/shared/risk/sl-tp.ts'
@@ -265,6 +266,21 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
 
     const marketData = await marketProvider.getMarketData(settings.assets)
     const latestPriceByAsset = new Map(marketData.map((m) => [m.asset, m.price]))
+
+    // Best-effort ("market_quotes plan", 2026-09-21): this cycle already
+    // holds this exact data from the getMarketData call above, so
+    // upserting it into market_quotes costs zero extra CoinGecko requests
+    // and keeps a manual run's displayed quote from sitting stale until
+    // the next 5-minute market-refresh tick (supabase/migrations/
+    // 20260921095012_market_quotes.sql). Placed BEFORE the freshness gate
+    // below on purpose — fail-closed governs whether this cycle trades,
+    // not whether the UI shows the price CoinGecko actually just
+    // returned, so even a cycle this gate is about to skip still updates
+    // the display quote. A failure here must never fail the decision
+    // cycle itself — it is a side write to a display-only table, not a
+    // trading action.
+    const { error: quotesError } = await supabase.from('market_quotes').upsert(marketData.map(toQuoteRow), { onConflict: 'asset' })
+    if (quotesError) console.error(`agent-cycle: could not upsert market_quotes: ${quotesError.message}`)
 
     const freshness = checkMarketDataFreshness(marketData, settings.maxDataStalenessMinutes, nowIso)
     if (!freshness.fresh) {

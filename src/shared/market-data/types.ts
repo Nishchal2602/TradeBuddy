@@ -96,3 +96,24 @@ export const NormalizedMarketData = z.object({
   })),
 })
 export type NormalizedMarketData = z.infer<typeof NormalizedMarketData>
+
+// A lightweight, /coins/markets-only quote — exactly what market-refresh
+// fetches and market_quotes stores (supabase/migrations/<ts>_market_quotes.
+// sql), and what the extension actually displays. Built with .pick(), not a
+// separately hand-typed object: this makes "MarketQuote is a structural
+// subset of NormalizedMarketData" a property Zod enforces, not just a
+// convention two schemas happen to follow — so agent-cycle's own
+// NormalizedMarketData (it already calls getMarketData) can be passed
+// straight into the same market_quotes row mapper market-refresh uses,
+// with no separate conversion path to keep in sync.
+export const MarketQuote = NormalizedMarketData.pick({
+  asset: true,
+  provider: true,
+  dataAsOf: true,
+  fetchedAt: true,
+  price: true,
+  change1hPct: true,
+  change24hPct: true,
+  change7dPct: true,
+})
+export type MarketQuote = z.infer<typeof MarketQuote>
