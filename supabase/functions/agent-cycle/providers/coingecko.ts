@@ -30,6 +30,19 @@ const COIN_ID: Record<AssetSymbol, string> = {
 
 const BASE_URL = 'https://api.coingecko.com/api/v3'
 
+// Every request in this file goes through fetchJson, which sends this
+// header whenever an apiKey is provided — CoinGecko's free Demo API key
+// (2026-09-22, found live: the fully anonymous public endpoint this file
+// used until now is rate-limited to 5-15 calls/min, SHARED across all of
+// CoinGecko's worldwide anonymous traffic; a Demo key raises that to a
+// stable 100/min + 10,000/month, which is what "10,000 calls/month" in
+// CoinGecko's own docs actually refers to — not the keyless tier).
+// Optional everywhere it's threaded through: keyless access still works
+// (just at the much stricter limit), so a missing/unset key degrades
+// gracefully rather than throwing — useful for local dev/tests, which
+// never set one.
+const API_KEY_HEADER = 'x-cg-demo-api-key'
+
 // --- Raw response schemas -------------------------------------------------
 //
 // These validate only the fields this adapter actually reads. CoinGecko's
@@ -79,10 +92,11 @@ function msToIso(ms: number): string {
 async function fetchJson(
   url: string,
   fetchImpl: typeof fetch,
+  apiKey?: string,
 ): Promise<unknown> {
   let response: Response
   try {
-    response = await fetchImpl(url)
+    response = await fetchImpl(url, apiKey ? { headers: { [API_KEY_HEADER]: apiKey } } : undefined)
   } catch (cause) {
     throw new ProviderFetchError(`coingecko: network error fetching ${url}`, 'coingecko', cause)
   }
@@ -133,12 +147,13 @@ async function fetchMarketsSummary(
   assets: AssetSymbol[],
   fetchImpl: typeof fetch,
   baseUrl: string,
+  apiKey?: string,
 ): Promise<z.infer<typeof CoinGeckoMarketsResponse>> {
   const ids = assets.map((asset) => COIN_ID[asset])
   const marketsUrl =
     `${baseUrl}/coins/markets?vs_currency=usd&ids=${ids.join(',')}` +
     `&price_change_percentage=1h,24h,7d`
-  const marketsRaw = await fetchJson(marketsUrl, fetchImpl)
+  const marketsRaw = await fetchJson(marketsUrl, fetchImpl, apiKey)
   return parseOrThrow(CoinGeckoMarketsResponse, marketsRaw, '/coins/markets')
 }
 
@@ -187,20 +202,22 @@ function toQuoteFields(asset: AssetSymbol, marketEntry: z.infer<typeof CoinGecko
 export class CoinGeckoMarketDataProvider implements MarketDataProvider {
   private readonly fetchImpl: typeof fetch
   private readonly baseUrl: string
+  private readonly apiKey?: string
 
   // Style note: explicit fields + manual assignment rather than TS
   // constructor parameter-property shorthand — see src/shared/providers/
   // errors.ts for why (erasableSyntaxOnly).
-  constructor(fetchImpl: typeof fetch = fetch, baseUrl: string = BASE_URL) {
+  constructor(fetchImpl: typeof fetch = fetch, baseUrl: string = BASE_URL, apiKey?: string) {
     this.fetchImpl = fetchImpl
     this.baseUrl = baseUrl
+    this.apiKey = apiKey
   }
 
   async getMarketData(assets: AssetSymbol[]): Promise<NormalizedMarketData[]> {
     if (assets.length === 0) return []
 
     const fetchedAt = new Date().toISOString()
-    const markets = await fetchMarketsSummary(assets, this.fetchImpl, this.baseUrl)
+    const markets = await fetchMarketsSummary(assets, this.fetchImpl, this.baseUrl, this.apiKey)
 
     const perAsset = await Promise.all(
       assets.map((asset) => this.fetchOneAsset(asset, markets, fetchedAt)),
@@ -229,9 +246,9 @@ export class CoinGeckoMarketDataProvider implements MarketDataProvider {
     const dailyUrl = `${this.baseUrl}/coins/${coinId}/market_chart?vs_currency=usd&days=120`
 
     const [ohlcRaw, chartRaw, dailyRaw] = await Promise.all([
-      fetchJson(ohlcUrl, this.fetchImpl),
-      fetchJson(chartUrl, this.fetchImpl),
-      fetchJson(dailyUrl, this.fetchImpl),
+      fetchJson(ohlcUrl, this.fetchImpl, this.apiKey),
+      fetchJson(chartUrl, this.fetchImpl, this.apiKey),
+      fetchJson(dailyUrl, this.fetchImpl, this.apiKey),
     ])
 
     const ohlc = parseOrThrow(CoinGeckoOhlcResponse, ohlcRaw, `/coins/${coinId}/ohlc`)
@@ -285,6 +302,7 @@ export async function fetchRecentPricePoints(
   assets: AssetSymbol[],
   fetchImpl: typeof fetch = fetch,
   baseUrl: string = BASE_URL,
+  apiKey?: string,
 ): Promise<Partial<Record<AssetSymbol, PricePoint[]>>> {
   // Promise.all fails fast on any single rejection (matching
   // getMarketData's own "throw rather than partial" convention above), so
@@ -298,7 +316,7 @@ export async function fetchRecentPricePoints(
     assets.map(async (asset): Promise<[AssetSymbol, PricePoint[]]> => {
       const coinId = COIN_ID[asset]
       const url = `${baseUrl}/coins/${coinId}/market_chart?vs_currency=usd&days=1`
-      const raw = await fetchJson(url, fetchImpl)
+      const raw = await fetchJson(url, fetchImpl, apiKey)
       const chart = parseOrThrow(CoinGeckoMarketChartResponse, raw, `/coins/${coinId}/market_chart?days=1`)
       const points = chart.prices.map(([ts, price]) => ({ timestamp: msToIso(ts), price }))
       return [asset, points]
@@ -323,11 +341,12 @@ export async function fetchLatestQuotes(
   assets: AssetSymbol[],
   fetchImpl: typeof fetch = fetch,
   baseUrl: string = BASE_URL,
+  apiKey?: string,
 ): Promise<MarketQuote[]> {
   if (assets.length === 0) return []
 
   const fetchedAt = new Date().toISOString()
-  const markets = await fetchMarketsSummary(assets, fetchImpl, baseUrl)
+  const markets = await fetchMarketsSummary(assets, fetchImpl, baseUrl, apiKey)
 
   return assets.map((asset) => {
     const marketEntry = findMarketEntry(asset, markets)

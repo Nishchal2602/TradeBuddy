@@ -384,3 +384,72 @@ Deno.test('fetchLatestQuotes: empty asset list makes zero requests and returns [
   assertEquals(result, [])
   assertEquals(calls, 0)
 })
+
+// --- CoinGecko Demo API key (2026-09-22) -----------------------------------
+//
+// Live-verified finding this key exists to fix: the fully anonymous
+// endpoint every call above tests against is rate-limited to 5-15
+// calls/min, shared across ALL of CoinGecko's worldwide anonymous
+// traffic — not the 10,000/month figure in CoinGecko's own docs, which
+// is the Demo-key tier's allowance. These tests prove the header is
+// actually sent when a key is configured, and prove its absence changes
+// nothing (every test above this section passes an apiKey of undefined,
+// via simply not passing one — the fifth/fourth positional argument
+// everywhere it exists).
+
+function capturingFetch(response: Response): { fetchImpl: typeof fetch; calls: { url: string; init: RequestInit | undefined }[] } {
+  const calls: { url: string; init: RequestInit | undefined }[] = []
+  const fetchImpl = ((url: string, init?: RequestInit) => {
+    calls.push({ url, init })
+    return Promise.resolve(response.clone())
+  }) as unknown as typeof fetch
+  return { fetchImpl, calls }
+}
+
+Deno.test('getMarketData: sends the x-cg-demo-api-key header on every request when an apiKey is configured', async () => {
+  const { fetchImpl, calls } = capturingFetch(jsonResponse(MARKETS_FIXTURE))
+  // Every non-/coins/markets URL needs its own matching fixture body, but
+  // this test only cares about what header each REQUEST carried, not the
+  // response shape — reusing MARKETS_FIXTURE's Response for every call is
+  // fine since nothing here parses the ohlc/chart/daily bodies.
+  const provider = new CoinGeckoMarketDataProvider(fetchImpl, undefined, 'test-demo-key-123')
+  await provider.getMarketData(['BTC']).catch(() => {}) // shape mismatch on ohlc/chart is expected and irrelevant here
+
+  // 4 calls for one asset: markets + ohlc + chart(30d) + chart(120d).
+  assertEquals(calls.length, 4)
+  for (const call of calls) {
+    assertEquals((call.init?.headers as Record<string, string> | undefined)?.['x-cg-demo-api-key'], 'test-demo-key-123')
+  }
+})
+
+Deno.test('getMarketData: sends no api-key header at all when apiKey is not configured (graceful keyless fallback)', async () => {
+  const { fetchImpl, calls } = capturingFetch(jsonResponse(MARKETS_FIXTURE))
+  const provider = new CoinGeckoMarketDataProvider(fetchImpl)
+  await provider.getMarketData(['BTC']).catch(() => {})
+
+  assertEquals(calls.length, 4)
+  for (const call of calls) {
+    assertEquals(call.init, undefined)
+  }
+})
+
+Deno.test('fetchLatestQuotes: sends the x-cg-demo-api-key header when an apiKey is configured', async () => {
+  const { fetchImpl, calls } = capturingFetch(jsonResponse(MARKETS_FIXTURE))
+  await fetchLatestQuotes(['BTC', 'ETH'], fetchImpl, undefined, 'test-demo-key-123')
+
+  assertEquals(calls.length, 1)
+  // init is asserted present, not optionally chained through — the whole
+  // point of this test is that it must exist; a genuinely missing init
+  // here is a real failure, not a case to silently tolerate.
+  const headers = calls[0]!.init!.headers as Record<string, string>
+  assertEquals(headers['x-cg-demo-api-key'], 'test-demo-key-123')
+})
+
+Deno.test('fetchRecentPricePoints: sends the x-cg-demo-api-key header when an apiKey is configured', async () => {
+  const { fetchImpl, calls } = capturingFetch(jsonResponse(FIVE_MIN_CHART_FIXTURE))
+  await fetchRecentPricePoints(['BTC'], fetchImpl, undefined, 'test-demo-key-123')
+
+  assertEquals(calls.length, 1)
+  const headers = calls[0]!.init!.headers as Record<string, string>
+  assertEquals(headers['x-cg-demo-api-key'], 'test-demo-key-123')
+})

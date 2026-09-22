@@ -104,6 +104,7 @@ Never put these in extension/client code:
 
 - Gemini keys
 - News API keys
+- CoinGecko API key
 - Supabase service-role keys
 - Future exchange credentials
 - Any other privileged secret

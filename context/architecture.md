@@ -34,7 +34,7 @@
 - **JSONB columns**: exact serialized decision inputs, structured model outputs, reasons, invalidation conditions, and other bounded decision metadata that benefits from replayability.
 - **No blob/file storage in V0**: the product does not need large generated artifacts or media.
 - **Browser storage**: only lightweight UI preferences that genuinely need to persist locally. Never store API keys, model keys, or trading credentials.
-- **Server secrets**: Gemini and news-provider credentials live only in Supabase Edge Function secrets.
+- **Server secrets**: Gemini, news-provider, and CoinGecko (`COINGECKO_API_KEY`, 2026-09-22 — optional, raises the market-data provider's rate limit well above the anonymous public endpoint's; see progress-tracker.md Architecture Decisions) credentials live only in Supabase Edge Function secrets.
 
 ## Core Data Model
 

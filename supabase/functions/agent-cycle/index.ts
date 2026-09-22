@@ -236,10 +236,17 @@ export interface CycleDeps {
   // one 3-hour window all execute; scheduled (a future cron, once one
   // exists) keeps the unchanged bucketed key. See cycle/idempotency.ts.
   trigger: CycleTrigger
+  // CoinGecko Demo API key (2026-09-22) — optional, same "degrade to the
+  // stricter keyless rate limit rather than throw" reasoning as every
+  // other optional param coingecko.ts threads this through. Read from
+  // Deno.env.get('COINGECKO_API_KEY') by the Deno.serve handler below;
+  // kept here (not read directly inside this function) so tests can
+  // inject a fixed value without touching real env vars.
+  coingeckoApiKey?: string
 }
 
 export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
-  const { supabase, apiKeys, nowIso, trigger } = deps
+  const { supabase, apiKeys, nowIso, trigger, coingeckoApiKey } = deps
   const fetchImpl = deps.fetchImpl ?? fetch
 
   const settings = await readSettings(supabase)
@@ -288,7 +295,7 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
   const runId: string = run.id
 
   try {
-    const marketProvider = new CoinGeckoMarketDataProvider(fetchImpl)
+    const marketProvider = new CoinGeckoMarketDataProvider(fetchImpl, undefined, coingeckoApiKey)
     const newsProvider = new RssNewsProvider(fetchImpl)
 
     const marketData = await marketProvider.getMarketData(settings.assets)
@@ -769,6 +776,10 @@ Deno.serve(async (req) => {
   // keys unchanged (model/call-model.ts), so this is the only line that
   // needed to change to make that switch.
   const apiKeys = [Deno.env.get('GEMINI_API_KEY_1')].filter((k): k is string => !!k)
-  const summary = await runAgentCycle({ supabase, apiKeys, nowIso: new Date().toISOString(), trigger })
+  // CoinGecko Demo key (2026-09-22) — undefined (not empty string) when
+  // unset, so coingecko.ts's own `apiKey ?` check degrades to keyless
+  // access rather than sending an empty header value.
+  const coingeckoApiKey = Deno.env.get('COINGECKO_API_KEY') || undefined
+  const summary = await runAgentCycle({ supabase, apiKeys, nowIso: new Date().toISOString(), trigger, coingeckoApiKey })
   return new Response(JSON.stringify(summary), { headers: { ...corsHeaders, 'content-type': 'application/json' } })
 })

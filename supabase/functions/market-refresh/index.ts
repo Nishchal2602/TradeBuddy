@@ -34,14 +34,18 @@ export interface RefreshDeps {
   // deno-lint-ignore no-explicit-any
   fetchImpl?: any
   nowIso: string
+  // CoinGecko Demo API key (2026-09-22) — optional, same "degrade to the
+  // stricter keyless rate limit rather than throw" reasoning as every
+  // other optional param coingecko.ts threads this through.
+  coingeckoApiKey?: string
 }
 
 export async function refreshMarketQuotes(deps: RefreshDeps): Promise<RefreshSummary> {
-  const { supabase, nowIso } = deps
+  const { supabase, nowIso, coingeckoApiKey } = deps
   const fetchImpl = deps.fetchImpl ?? fetch
 
   try {
-    const quotes = await fetchLatestQuotes(ASSETS, fetchImpl)
+    const quotes = await fetchLatestQuotes(ASSETS, fetchImpl, undefined, coingeckoApiKey)
     const { error } = await supabase.from('market_quotes').upsert(quotes.map(toQuoteRow), { onConflict: 'asset' })
     if (error) throw new Error(`could not upsert market_quotes: ${error.message}`)
     return { status: 'refreshed', assets: ASSETS }
@@ -70,6 +74,7 @@ export async function refreshMarketQuotes(deps: RefreshDeps): Promise<RefreshSum
 
 Deno.serve(async (_req) => {
   const supabase = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!)
-  const summary = await refreshMarketQuotes({ supabase, nowIso: new Date().toISOString() })
+  const coingeckoApiKey = Deno.env.get('COINGECKO_API_KEY') || undefined
+  const summary = await refreshMarketQuotes({ supabase, nowIso: new Date().toISOString(), coingeckoApiKey })
   return new Response(JSON.stringify(summary), { headers: { 'content-type': 'application/json' } })
 })

@@ -63,10 +63,17 @@ export interface MonitorDeps {
   // deno-lint-ignore no-explicit-any
   fetchImpl?: any
   nowIso: string
+  // CoinGecko Demo API key (2026-09-22) — optional, same "degrade to the
+  // stricter keyless rate limit rather than throw" reasoning as every
+  // other optional param coingecko.ts threads this through. This
+  // function's own fetchRecentPricePoints calls are real, not
+  // hypothetical — it fires whenever a position is open, which is the
+  // common case right now (trading-strategy-v1.md's live positions).
+  coingeckoApiKey?: string
 }
 
 export async function runPositionMonitor(deps: MonitorDeps): Promise<MonitorRunSummary> {
-  const { supabase, nowIso } = deps
+  const { supabase, nowIso, coingeckoApiKey } = deps
   const fetchImpl = deps.fetchImpl ?? fetch
 
   const { data: settings, error: settingsError } = await supabase
@@ -144,7 +151,7 @@ export async function runPositionMonitor(deps: MonitorDeps): Promise<MonitorRunS
       : new Date(nowIso).getTime() - 2 * settings.monitor_interval_minutes * 60_000
 
     const distinctAssets = [...new Set(openPositions.map((p) => p.asset))] as AssetSymbol[]
-    const pointsByAsset = await fetchRecentPricePoints(distinctAssets, fetchImpl)
+    const pointsByAsset = await fetchRecentPricePoints(distinctAssets, fetchImpl, undefined, coingeckoApiKey)
 
     const latestPriceByAsset = new Map<AssetSymbol, number>()
     for (const asset of distinctAssets) {
@@ -270,6 +277,7 @@ export async function runPositionMonitor(deps: MonitorDeps): Promise<MonitorRunS
 
 Deno.serve(async (_req) => {
   const supabase = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!)
-  const summary = await runPositionMonitor({ supabase, nowIso: new Date().toISOString() })
+  const coingeckoApiKey = Deno.env.get('COINGECKO_API_KEY') || undefined
+  const summary = await runPositionMonitor({ supabase, nowIso: new Date().toISOString(), coingeckoApiKey })
   return new Response(JSON.stringify(summary), { headers: { 'content-type': 'application/json' } })
 })
