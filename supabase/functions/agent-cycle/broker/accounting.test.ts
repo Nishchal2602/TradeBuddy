@@ -1,6 +1,7 @@
 import { assertAlmostEquals, assertEquals } from 'jsr:@std/assert@1'
-import { applySlippage, closePosition, computeNav, computePositionValue, openPosition } from './accounting.ts'
+import { addToPosition, applySlippage, closePosition, computeNav, computePositionValue, openPosition, reducePosition } from './accounting.ts'
 import { ACCOUNTING_SCENARIOS } from '../domain/contract.fixtures.ts'
+import type { Position } from '../../../../src/shared/positions/types.ts'
 
 const PORTFOLIO_ID = '11111111-1111-1111-1111-111111111111'
 const OPEN_DECISION_ID = '22222222-2222-2222-2222-222222222222'
@@ -244,4 +245,193 @@ Deno.test('computePositionValue: a short priced far past exhaustion is floored a
 Deno.test('computePositionValue: a long has no floor — its value simply tracks quantity times current price', () => {
   const long = { direction: 'long' as const, quantity: 20, entryPrice: 100, costBasis: 2000, currentPrice: 1 }
   assertAlmostEquals(computePositionValue(long), 20, 1e-9) // small but not artificially floored to anything else
+})
+
+// =========================================================================
+// Phase 2 (2026-09-22) — addToPosition / reducePosition
+//
+// Every non-trivial number below was computed independently by hand
+// before being transcribed here — same discipline as the Step 0 fixtures
+// above. All positions in this section start from a real openPosition()
+// call rather than a hand-typed literal, so the entryPrice/costBasis
+// invariant (entryPrice === costBasis/quantity) these functions depend on
+// is proven to hold from real broker output, not assumed.
+// =========================================================================
+
+const ADD_REDUCE_DECISION_ID = '44444444-4444-4444-4444-444444444444'
+
+Deno.test('addToPosition: multiple ADDs produce a true weighted-average entry', () => {
+  const opened = openPosition({
+    asset: 'BTC', direction: 'long', referencePrice: 100, notionalUsd: 1000,
+    stopLossPrice: 50, takeProfitPrice: 200, feeBps: 0, slippageBps: 0,
+    portfolioId: PORTFOLIO_ID, decisionId: OPEN_DECISION_ID, startingCash: 10_000, nowIso: T0,
+  })
+  assertAlmostEquals(opened.position.quantity, 10, 1e-9)
+  assertAlmostEquals(opened.position.entryPrice, 100, 1e-9)
+
+  const add1 = addToPosition({
+    position: opened.position, referencePrice: 120, addNotionalUsd: 600,
+    feeBps: 0, slippageBps: 0, decisionId: ADD_REDUCE_DECISION_ID, startingCash: opened.cashAfter, nowIso: T1,
+  })
+  // qty: 10 + 600/120 = 10 + 5 = 15. costBasis: 1000 + 600 = 1600. entry: 1600/15.
+  assertAlmostEquals(add1.updatedPosition.quantity, 15, 1e-9)
+  assertAlmostEquals(add1.updatedPosition.costBasis, 1600, 1e-9)
+  assertAlmostEquals(add1.updatedPosition.entryPrice, 1600 / 15, 1e-9)
+  assertEquals(add1.trade.intent, 'ADD_LONG')
+  assertEquals(add1.trade.realizedPnl, null, 'nothing realized on an ADD')
+  // SL/TP untouched — this function has no authority to move them.
+  assertAlmostEquals(add1.updatedPosition.stopLossPrice, 50, 1e-9)
+  assertAlmostEquals(add1.updatedPosition.takeProfitPrice, 200, 1e-9)
+
+  const add2 = addToPosition({
+    position: add1.updatedPosition, referencePrice: 140, addNotionalUsd: 700,
+    feeBps: 0, slippageBps: 0, decisionId: ADD_REDUCE_DECISION_ID, startingCash: add1.cashAfter, nowIso: T1,
+  })
+  // qty: 15 + 700/140 = 15 + 5 = 20. costBasis: 1600 + 700 = 2300. entry: 2300/20 = 115 exactly.
+  assertAlmostEquals(add2.updatedPosition.quantity, 20, 1e-9)
+  assertAlmostEquals(add2.updatedPosition.costBasis, 2300, 1e-9)
+  assertAlmostEquals(add2.updatedPosition.entryPrice, 115, 1e-9)
+})
+
+Deno.test('addToPosition + reducePosition: a profitable round trip realizes P&L only on the reduced portion, remainder stays open at the same entry', () => {
+  const opened = openPosition({
+    asset: 'BTC', direction: 'long', referencePrice: 100, notionalUsd: 1000,
+    stopLossPrice: 50, takeProfitPrice: 200, feeBps: 10, slippageBps: 0,
+    portfolioId: PORTFOLIO_ID, decisionId: OPEN_DECISION_ID, startingCash: 10_000, nowIso: T0,
+  })
+  const added = addToPosition({
+    position: opened.position, referencePrice: 110, addNotionalUsd: 550,
+    feeBps: 10, slippageBps: 0, decisionId: ADD_REDUCE_DECISION_ID, startingCash: opened.cashAfter, nowIso: T1,
+  })
+  // qty 15, costBasis 1550, entry 1550/15 = 103.333...
+  assertAlmostEquals(added.updatedPosition.quantity, 15, 1e-9)
+  assertAlmostEquals(added.updatedPosition.entryPrice, 1550 / 15, 1e-9)
+
+  const reduced = reducePosition({
+    position: added.updatedPosition, attemptedFillPrice: 130, reduceQuantity: 5,
+    feeBps: 10, slippageBps: 0, decisionId: ADD_REDUCE_DECISION_ID, startingCash: added.cashAfter, nowIso: T1,
+  })
+  // realizedPnl = (130 - 1550/15) * 5 = (130 - 103.3333...) * 5 = 133.3333...
+  assertAlmostEquals(reduced.realizedPnl, (130 - 1550 / 15) * 5, 1e-9)
+  assertEquals(reduced.realizedPnl > 0, true, 'profitable')
+  assertAlmostEquals(reduced.updatedPosition.quantity, 10, 1e-9)
+  // costBasisReleased = 1550 * (5/15) = 516.666...; remaining costBasis = 1033.333...
+  assertAlmostEquals(reduced.updatedPosition.costBasis, 1550 - (1550 * 5) / 15, 1e-9)
+  // entryPrice UNCHANGED by the reduce — and still exactly costBasis/quantity, proving the invariant survives a partial exit.
+  assertAlmostEquals(reduced.updatedPosition.entryPrice, added.updatedPosition.entryPrice, 1e-9)
+  assertAlmostEquals(reduced.updatedPosition.entryPrice, reduced.updatedPosition.costBasis / reduced.updatedPosition.quantity, 1e-9)
+  assertEquals(reduced.trade.intent, 'REDUCE_LONG')
+  assertAlmostEquals(reduced.trade.realizedPnl!, reduced.realizedPnl, 1e-9, 'the trade row and the return value must agree')
+})
+
+Deno.test('addToPosition + reducePosition: a losing round trip realizes a negative P&L on the reduced portion', () => {
+  const opened = openPosition({
+    asset: 'BTC', direction: 'long', referencePrice: 100, notionalUsd: 1000,
+    stopLossPrice: 50, takeProfitPrice: 200, feeBps: 0, slippageBps: 0,
+    portfolioId: PORTFOLIO_ID, decisionId: OPEN_DECISION_ID, startingCash: 10_000, nowIso: T0,
+  })
+  const added = addToPosition({
+    position: opened.position, referencePrice: 90, addNotionalUsd: 450,
+    feeBps: 0, slippageBps: 0, decisionId: ADD_REDUCE_DECISION_ID, startingCash: opened.cashAfter, nowIso: T1,
+  })
+  // qty 15, costBasis 1450, entry 1450/15 = 96.666...
+  assertAlmostEquals(added.updatedPosition.entryPrice, 1450 / 15, 1e-9)
+
+  const reduced = reducePosition({
+    position: added.updatedPosition, attemptedFillPrice: 80, reduceQuantity: 6,
+    feeBps: 0, slippageBps: 0, decisionId: ADD_REDUCE_DECISION_ID, startingCash: added.cashAfter, nowIso: T1,
+  })
+  // realizedPnl = (80 - 96.666...) * 6 = -100 exactly.
+  assertAlmostEquals(reduced.realizedPnl, -100, 1e-9)
+  assertAlmostEquals(reduced.updatedPosition.quantity, 9, 1e-9)
+})
+
+Deno.test('reducePosition: fees can turn a nominally profitable reduce net-negative once round-trip costs are counted', () => {
+  // Deliberately large fee (100 bps) and a tiny 0.5% price move — the
+  // price-only realizedPnl is positive, but the two fees (open + reduce)
+  // together exceed it, so the trade is a net loser despite looking
+  // "profitable" if you only read realizedPnl in isolation.
+  const opened = openPosition({
+    asset: 'BTC', direction: 'long', referencePrice: 100, notionalUsd: 10_000,
+    stopLossPrice: 50, takeProfitPrice: 200, feeBps: 100, slippageBps: 0,
+    portfolioId: PORTFOLIO_ID, decisionId: OPEN_DECISION_ID, startingCash: 20_000, nowIso: T0,
+  })
+  assertAlmostEquals(opened.trade.fee, 100, 1e-9) // 1% of 10,000
+
+  const reduced = reducePosition({
+    position: opened.position, attemptedFillPrice: 100.5, reduceQuantity: opened.position.quantity,
+    feeBps: 100, slippageBps: 0, decisionId: ADD_REDUCE_DECISION_ID, startingCash: opened.cashAfter, nowIso: T1,
+  })
+  // realizedPnl = (100.5 - 100) * 100 = 50 — nominally profitable.
+  assertAlmostEquals(reduced.realizedPnl, 50, 1e-9)
+  assertEquals(reduced.realizedPnl > 0, true, 'nominally profitable on price alone')
+
+  const totalFees = opened.trade.fee + reduced.trade.fee
+  assertAlmostEquals(totalFees, 100 + 100.5, 1e-9)
+  assertEquals(reduced.realizedPnl - totalFees < 0, true, 'net-negative once round-trip fees are counted, despite a positive realizedPnl')
+})
+
+Deno.test('reducePosition: a 100% reduce is arithmetically IDENTICAL to closePosition — the same trade/cash numbers, proving REDUCE-to-zero is safe to treat as a close', () => {
+  const opened = openPosition({
+    asset: 'BTC', direction: 'long', referencePrice: 100, notionalUsd: 1000,
+    stopLossPrice: 50, takeProfitPrice: 200, feeBps: 10, slippageBps: 5,
+    portfolioId: PORTFOLIO_ID, decisionId: OPEN_DECISION_ID, startingCash: 10_000, nowIso: T0,
+  })
+
+  const reduced = reducePosition({
+    position: opened.position, attemptedFillPrice: 120, reduceQuantity: opened.position.quantity,
+    feeBps: 10, slippageBps: 5, decisionId: ADD_REDUCE_DECISION_ID, startingCash: opened.cashAfter, nowIso: T1,
+  })
+  const closed = closePosition({
+    position: opened.position, attemptedFillPrice: 120,
+    feeBps: 10, slippageBps: 5, closeReason: 'agent_close', decisionId: ADD_REDUCE_DECISION_ID, startingCash: opened.cashAfter, nowIso: T1,
+  })
+
+  assertAlmostEquals(reduced.trade.fillPrice, closed.trade.fillPrice, 1e-9)
+  assertAlmostEquals(reduced.trade.grossValue, closed.trade.grossValue, 1e-9)
+  assertAlmostEquals(reduced.trade.fee, closed.trade.fee, 1e-9)
+  assertAlmostEquals(reduced.trade.slippageCost, closed.trade.slippageCost, 1e-9)
+  assertAlmostEquals(reduced.trade.netCashDelta, closed.trade.netCashDelta, 1e-9)
+  assertAlmostEquals(reduced.cashAfter, closed.cashAfter, 1e-9)
+  assertAlmostEquals(reduced.realizedPnl, closed.realizedPnl, 1e-9)
+  assertAlmostEquals(reduced.updatedPosition.quantity, 0, 1e-9)
+  assertAlmostEquals(reduced.updatedPosition.costBasis, 0, 1e-9)
+  // What does NOT match, by design: reducePosition never sets status/
+  // closedAt/closeReason — that is exactly why a >=100% REDUCE magnitude
+  // must be normalized to an actual CLOSE upstream (cycle/apply-
+  // management.ts), never executed as a REDUCE at the broker layer. A
+  // quantity-0 OPEN position would violate positions_qty_positive at the
+  // DB level; this test proves the ARITHMETIC is safe, not that skipping
+  // the normalization is.
+  assertEquals(reduced.updatedPosition.status, 'open')
+  assertEquals(closed.closedPosition.status, 'closed')
+})
+
+Deno.test('reducePosition: a short reduce applies the same exhaustion clamp as closePosition', () => {
+  const opened = openPosition({
+    asset: 'BTC', direction: 'short', referencePrice: 100, notionalUsd: 1000,
+    stopLossPrice: 190, takeProfitPrice: 50, feeBps: 0, slippageBps: 0,
+    portfolioId: PORTFOLIO_ID, decisionId: OPEN_DECISION_ID, startingCash: 10_000, nowIso: T0,
+  })
+  // Price gaps past 2x entry (200) — exhaustion clamp must fire, same as closePosition's.
+  const reduced = reducePosition({
+    position: opened.position, attemptedFillPrice: 250, reduceQuantity: opened.position.quantity,
+    feeBps: 0, slippageBps: 0, decisionId: ADD_REDUCE_DECISION_ID, startingCash: opened.cashAfter, nowIso: T1,
+  })
+  assertAlmostEquals(reduced.trade.fillPrice, 200, 1e-9, 'clamped to exactly 2x entry, not the observed 250')
+})
+
+Deno.test('addToPosition + reducePosition: type check — a Position produced by either function still satisfies the Position shape (spot-check via field access)', () => {
+  const opened = openPosition({
+    asset: 'ETH', direction: 'long', referencePrice: 50, notionalUsd: 500,
+    stopLossPrice: 25, takeProfitPrice: 100, feeBps: 0, slippageBps: 0,
+    portfolioId: PORTFOLIO_ID, decisionId: OPEN_DECISION_ID, startingCash: 10_000, nowIso: T0,
+  })
+  const added = addToPosition({
+    position: opened.position, referencePrice: 55, addNotionalUsd: 110,
+    feeBps: 0, slippageBps: 0, decisionId: ADD_REDUCE_DECISION_ID, startingCash: opened.cashAfter, nowIso: T1,
+  })
+  const position: Position = added.updatedPosition
+  assertEquals(position.status, 'open')
+  assertEquals(position.asset, 'ETH')
 })

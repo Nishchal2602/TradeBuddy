@@ -11,7 +11,15 @@ import { CloseReason } from '../positions/types.ts'
 export const TradeSide = z.enum(['BUY', 'SELL'])
 export type TradeSide = z.infer<typeof TradeSide>
 
-export const TradeIntent = z.enum(['OPEN_LONG', 'OPEN_SHORT', 'CLOSE_LONG', 'CLOSE_SHORT'])
+// ADD_LONG/ADD_SHORT/REDUCE_LONG/REDUCE_SHORT added by Phase 2 (2026-09-22,
+// "Jev as a portfolio-management decision layer"). CLOSE_LONG/CLOSE_SHORT
+// stay reserved for the FINAL close of a position — trades_
+// one_close_per_position_idx (a unique index, not just a convention)
+// keeps its exact pre-Phase-2 meaning: at most one close-trade per
+// position, ever. A partial exit is a REDUCE_*, never a CLOSE_* — this is
+// precisely what makes partial exits representable at all without
+// touching that index.
+export const TradeIntent = z.enum(['OPEN_LONG', 'OPEN_SHORT', 'CLOSE_LONG', 'CLOSE_SHORT', 'ADD_LONG', 'ADD_SHORT', 'REDUCE_LONG', 'REDUCE_SHORT'])
 export type TradeIntent = z.infer<typeof TradeIntent>
 
 // trades.trigger_reason uses the exact same four values as
@@ -56,16 +64,32 @@ const tradeCoreFields = {
 
   cashAfter: z.number().nonnegative(),
   executedAt: z.string().datetime(),
+
+  // Phase 2 (2026-09-22) — null on OPEN/ADD (nothing realized yet),
+  // populated on REDUCE (the realized portion only) and CLOSE (the full
+  // amount). Making this a real column (rather than deriving it only
+  // from positions.realized_pnl, which the "open" invariant forbids
+  // populating) is what makes `sum(trades.realized_pnl)` a trustworthy
+  // lifetime P&L source across a position's whole open->add->reduce->
+  // close lifecycle — see close_position_atomic's own migration comment
+  // for why CLOSE populating this too (not just REDUCE) was a required
+  // correction, not an optional nicety.
+  realizedPnl: z.number().nullable(),
 }
 
 const OpenTrade = z.object({ ...tradeCoreFields, intent: z.enum(['OPEN_LONG', 'OPEN_SHORT']), ...openFields }).strict()
 const AgentCloseTrade = z.object({ ...tradeCoreFields, intent: z.enum(['CLOSE_LONG', 'CLOSE_SHORT']), ...agentCloseFields }).strict()
 const AutomaticCloseTrade = z.object({ ...tradeCoreFields, intent: z.enum(['CLOSE_LONG', 'CLOSE_SHORT']), ...automaticCloseFields }).strict()
+// Phase 2 — ADD/REDUCE are always agent-initiated (the position monitor
+// never adjusts a position, only closes one), so they share OpenTrade's
+// exact provenance shape (decisionId set, triggerReason null) — never
+// the agent-close or automatic-close shapes, which are CLOSE_*-specific.
+const AdjustTrade = z.object({ ...tradeCoreFields, intent: z.enum(['ADD_LONG', 'ADD_SHORT', 'REDUCE_LONG', 'REDUCE_SHORT']), ...openFields }).strict()
 
 // Not a single z.discriminatedUnion here: the discriminant would need to
 // be a combination of `intent` category AND provenance, which isn't one
 // literal field the way ModelDecisionProposal's `action` is. A plain union
 // with .strict() branches still gets the same "illegal combinations don't
 // parse" guarantee; it just can't narrow as cleanly at the call site.
-export const Trade = z.union([OpenTrade, AgentCloseTrade, AutomaticCloseTrade])
+export const Trade = z.union([OpenTrade, AgentCloseTrade, AutomaticCloseTrade, AdjustTrade])
 export type Trade = z.infer<typeof Trade>

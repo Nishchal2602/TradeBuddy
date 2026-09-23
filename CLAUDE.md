@@ -31,7 +31,7 @@ The product is V0 paper trading only.
 
 - The Chrome extension is the UI/control surface, not the autonomous engine.
 - The server-side agent loop owns trading decisions and execution.
-- **Deterministic code originates every trading decision (action, confidence, SL/TP, invalidation); the LLM may only veto a proposed entry — see AI-specific rules.** Superseded 2026-09-21 (Trading Strategy V1): before, this line read "the LLM proposes; deterministic code validates, constrains, and executes" — the reverse of what's built now.
+- **Deterministic code originates every trading decision and remains the sole authority over final size and price. The model may veto a proposed entry, and — for an existing open position only — propose a bounded ADD/REDUCE magnitude or a MODIFY_PROTECTION intent; it never originates a trade, sets an absolute size, or computes a price — see AI-specific rules.** Superseded 2026-09-21 (Trading Strategy V1): before that, this line read "the LLM proposes; deterministic code validates, constrains, and executes" — the reverse of what was built then. Superseded again 2026-09-22/23 (Phase 2, "Jev as a portfolio-management decision layer"): the model's mandate widened from pure entry-veto to also managing existing positions, still strictly bounded — see AI-specific rules for the exact mandate and its limits.
 - Technical indicators are calculated in code.
 - Risk decisions are deterministic.
 - Paper execution is deterministic.
@@ -69,32 +69,41 @@ If the current architecture must change, explain the conflict and update the rel
 
 ## AI-specific rules
 
-**Trading Strategy V1 (2026-09-21, implemented) demoted the model to a binary veto — it no longer originates decisions.** A deterministic daily-trend regime rule (`supabase/functions/agent-cycle/strategy/`) decides action, confidence, stop-loss/take-profit, and invalidation for every asset, every cycle, with zero model input. The model's only remaining question, asked once per candidate that rule proposes opening: *"is there a known exogenous confound that invalidates this setup's premise?"* Full detail: `context/specs/trading-strategy-v1.md` §11–12.
+**Trading Strategy V1 (2026-09-21, implemented) demoted the model to a binary veto — it no longer originates decisions.** A deterministic daily-trend regime rule (`supabase/functions/agent-cycle/strategy/`) decides action, confidence, stop-loss/take-profit, and invalidation for every asset, every cycle, with zero model input. The model's only entry-side question, asked once per candidate that rule proposes opening: *"is there a known, material, exogenous event specific to this asset that should prevent this trade right now?"* Full detail: `context/specs/trading-strategy-v1.md` §11–12. **This part is unchanged by Phase 2 below** — a FLAT asset's OPEN_LONG eligibility is still decided entirely by the deterministic regime rule, and the model can still only veto it, never originate one.
 
-At most one model call per scheduled V0 cycle — zero when there are no OPEN_LONG candidates that cycle, one batched call covering every candidate when there are.
+**Phase 2 (2026-09-22/23, implemented) widened the model's mandate to also manage EXISTING open positions** — still strictly bounded, never originating, never sizing, never pricing. For an OPEN position whose regime is still intact this cycle (Pass 1's own candidate is HOLD — a regime-flip CLOSE is authoritative and is never routed through the model at all), the model may propose exactly one of: `HOLD`, `ADD` (a bounded magnitude, 0–1, of the risk-derived headroom the gate computes from the EXISTING stop), `REDUCE` (a bounded magnitude of the current quantity, never reaching 100% — a full exit is normalized to `CLOSE`), `CLOSE`, or `MODIFY_PROTECTION` (a `KEEP`/`TIGHTEN_TO_BREAKEVEN` stop intent and/or a `KEEP`/`MOVE_CLOSER`/`MOVE_OUT` target intent — never a price). `cycle/apply-management.ts` is the single place these intents turn into a proposal, mirroring `cycle/apply-veto.ts`'s role exactly. Full detail: the Phase 2 migration plan and `progress-tracker.md`'s implementation entry.
 
-All model calls must go through one `callModel(payload)` abstraction.
+**Jev may choose a bounded adjustment magnitude; deterministic code remains the sole authority over final size.** An ADD magnitude genuinely is a sizing signal — code (the risk gate) multiplies it against a risk-derived maximum it computes itself, then applies every existing cap on top; Jev never names a dollar figure and can only ever request less than the deterministic ceiling. Stating this plainly matters: an earlier, imprecise phrasing that flatly forbade the model from "influencing size" would have been actively wrong about what Phase 2 does.
+
+**No confidence-based gating on the management side.** Choice/Score answers carry a `confidence` field Noul does not; Phase 2 persists it on every decision for later analysis but gates nothing on it in this version — a blanket low-confidence-means-HOLD rule was considered and explicitly rejected, because "HOLD" is not uniformly the safe direction (a low-confidence CLOSE normalized to HOLD would keep risk on precisely when the model leans toward removing it). If a confidence gate is ever added, it must be task-specific and chosen from real observed data, not assumed.
+
+**The provider is TypeSafe's Jev, and only Jev (2026-09-22) — Gemini was removed entirely, not kept as a fallback, shadow, or comparison provider.** See `progress-tracker.md` Architecture Decisions for the full migration record.
+
+At most one model call per scheduled V0 cycle — zero when there are no OPEN_LONG candidates AND no manageable OPEN positions that cycle; one batched call covering every candidate of both kinds together when there are (the veto's noul questions and the management layer's choice/score questions share one request — the API contract confirms mixed question types in one call).
+
+All model calls must go through one `requestPortfolioDecisions(vetoCandidates, managementCandidates, navUsd, availableCashUsd, totalExposurePct, apiKey, fetchImpl)` abstraction (`model/jev/provider.ts`) — `requestVetoDecisions` still exists (a pure veto-only cycle degrades to it structurally) but the cycle wiring calls the unified function.
 
 Use structured output/schema validation.
 
-The model may propose, per candidate:
+The model returns, per entry candidate, a single calibrated probability (Jev's "noul," 0–1) — not a boolean and not free-form text. **The boolean veto is derived in code** by thresholding that probability against a versioned constant (`model/jev/question.ts`'s `JEV_VETO_THRESHOLD`) — this threshold ships explicitly **provisional**, not validated against any evaluation study; see the same file's own comment for why that was a deliberate choice, and never describe it as validated until it has actually been reviewed. The raw probability is persisted on every decision specifically so the threshold can be revisited later from real data. For a management candidate, the model returns a Choice (the action, plus confidence and a full probability distribution) and two speculative Scores (ADD/REDUCE magnitude, mapped to a code-defined fraction table — never a raw number) and two Choices (stop/target intent) — all persisted verbatim.
 
-- veto: true/false
-- rationale (one sentence)
-
-The model does not propose action, confidence, stop-loss/take-profit, horizon, primary driver, reasons, cited news IDs, or invalidation conditions — the deterministic strategy rule originates all of those, for every proposal, whether or not the model is ever called that cycle. A HOLD or CLOSE proposal never reaches the model at all (exits and no-ops need no veto).
+The model does not propose action, confidence, stop-loss/take-profit, horizon, primary driver, reasons, cited news IDs, or invalidation conditions for an entry — the deterministic strategy rule originates all of those, for every proposal, whether or not the model is ever called that cycle. A HOLD or CLOSE proposal from a FLAT asset never reaches the model at all (exits and no-ops need no veto). The model returns no rationale text either — a factual audit string (`"noul=0.87, threshold=0.70, N news items evaluated"`) is synthesized deterministically in code for the veto, never model-authored prose; the management side's `reasons` are likewise carried from the deterministic Pass-1 candidate, never generated by the model.
 
 The model may not:
 
-- originate a trade, choose its direction, or set its size, stop-loss, or take-profit
+- originate a trade, choose its direction, or set an absolute size, stop-loss, or take-profit price
+- widen a stop-loss under any circumstance (long: never move down; short: never move up) — `MODIFY_PROTECTION` may only tighten
+- move a take-profit to or past the current market price (that is a disguised CLOSE, kept strictly distinct)
+- reduce a position to zero (a 100%-equivalent REDUCE is normalized to CLOSE, never executed as a REDUCE)
 - execute trades
 - mutate portfolio state
 - bypass the risk gate
 - calculate authoritative indicators
 - access secrets
 - turn news text into executable instructions
+- have its probability/confidence reach sizing, direction, or any decision surface other than the derived veto boolean and the bounded, gate-validated management fields listed above
 
-A failed veto call (or a failed news fetch feeding it) fails closed to HOLD for the affected candidate(s) — it is never treated as an implicit non-veto. A decision whose cycle made no model call records that honestly (`agent_decisions.model_vetoed = null`, `model_version = 'not-called'`) rather than a fabricated value — the "exact model input/output and prompt/model version" persistence invariant below now applies only to decisions a call actually happened for; see `progress-tracker.md`'s Trading Strategy V1 implementation entry for the exact sentinel values and the reasoning behind them.
+A failed model call (or a failed news fetch feeding it) fails closed for every affected candidate this cycle — an entry candidate fails to HOLD (veto); an open position simply stays unmanaged this cycle (no ADD, no REDUCE, no Jev-originated CLOSE, no protection change — its existing SL/TP keep protecting it exactly as before, and `position-monitor` is entirely unaffected). Never treated as an implicit non-veto or an implicit approval, and there is no second model to fall back to. A decision whose cycle made no model call records that honestly (`agent_decisions.model_vetoed = null`, `model_version = 'not-called'`) rather than a fabricated value — the "exact model input/output and prompt/model version" persistence invariant below now applies only to decisions a call actually happened for; see `progress-tracker.md`'s Trading Strategy V1 and Phase 2 implementation entries for the exact sentinel values and the reasoning behind them.
 
 Trade only when the evidence crosses the decision threshold; otherwise HOLD. HOLD is a valid, ordinary outcome — not a biased default and not a fallback to avoid.
 
@@ -102,7 +111,7 @@ Trade only when the evidence crosses the decision threshold; otherwise HOLD. HOL
 
 Never put these in extension/client code:
 
-- Gemini keys
+- TypeSafe (Jev) API key
 - News API keys
 - CoinGecko API key
 - Supabase service-role keys
@@ -179,14 +188,14 @@ Keep `progress-tracker.md` current after every meaningful implementation change.
 
 ## Current V0
 
-The intended flow is (Trading Strategy V1, 2026-09-21):
+The intended flow is (Trading Strategy V1, 2026-09-21; Phase 2 portfolio management, 2026-09-22/23):
 
 Market data (incl. daily closes) + recent news
 → deterministic indicators + the 50-day trend regime
 → deterministic candidate synthesis, per asset (OPEN_LONG / HOLD / CLOSE — never OPEN_SHORT; stop = max(2×ATR, 2.5%), take-profit = 6×stop)
-→ at most one batched model veto call this cycle, only for OPEN_LONG candidates, asking only "is there a known exogenous confound?" — zero candidates means zero calls
-→ deterministic risk gate (SL/TP validation, stop-out re-entry block, risk-derived sizing, single-trade/asset/portfolio-risk/total-notional caps, drawdown breaker — confidence is no longer a gate)
-→ deterministic paper broker
+→ at most one batched model call this cycle, covering BOTH: OPEN_LONG candidates asking only "is there a known exogenous confound?" (veto), and OPEN positions whose regime is still intact this cycle asking "HOLD / ADD / REDUCE / CLOSE / MODIFY_PROTECTION?" (management) — zero candidates of either kind means zero calls
+→ deterministic risk gate (SL/TP validation, stop-out re-entry block, risk-derived sizing, single-trade/asset/portfolio-risk/total-notional/minimum-notional caps, drawdown breaker, ADD/REDUCE/MODIFY_PROTECTION validation — confidence is not a gate anywhere)
+→ deterministic paper broker (now including `addToPosition`/`reducePosition` — a true weighted-average entry on ADD, a proportional cost-basis release on REDUCE, never a second position row)
 → Supabase persistence
 → Chrome extension
 
@@ -204,11 +213,13 @@ V0 cadence:
 V0 execution:
 
 - paper only
-- one net position per asset: FLAT / LONG / SHORT (no lots, no pyramiding, no partial exits)
+- one net position per asset: FLAT / LONG / SHORT (no lots, no pyramiding — unchanged, still database-enforced)
+- **partial exits and in-place resizing exist as of Phase 2 (2026-09-22/23)**: `ADD` (weighted-average entry, never a second position row) and `REDUCE` (proportional cost-basis release, never touches entry price; a full-quantity reduce is normalized to `CLOSE`, never executed as a 100% reduce) — see `context/specs/trading-domain-contract.md` §1
 - shorts are 1x unleveraged synthetic paper positions only — see `context/specs/trading-domain-contract.md`
-- every open position carries a mandatory stop-loss and take-profit, validated deterministically
-- SL/TP execution runs on an independent 10-minute position-monitor cycle, not gated by the 3-hour decision cycle
-- position size is derived from risk-at-stop, then capped (max 20% NAV per trade, max 35% NAV per asset) — not a raw model-proposed percentage
+- every open position carries a mandatory stop-loss and take-profit, validated deterministically; `MODIFY_PROTECTION` (Phase 2) may tighten a stop or move a take-profit, never widen a stop, never touch quantity
+- SL/TP execution runs on an independent 10-minute position-monitor cycle, not gated by the 3-hour decision cycle — completely unaffected by Phase 2, and always wins any race against an ADD/REDUCE/MODIFY_PROTECTION the same way it already wins against a CLOSE
+- position size is derived from risk-at-stop, then capped (max 20% NAV per trade, max 35% NAV per asset) — not a raw model-proposed percentage; an ADD's magnitude is capped the identical way, against the EXISTING stop
+- a provisional minimum-trade-notional floor (`agent_settings.min_trade_notional_pct`/`_usd`, Phase 2) applies to ADD and a partial REDUCE only — a full CLOSE has no floor and is always permitted
 - approximately 0.1% simulated fee per side
 - approximately 0.05% simulated slippage per side
 
@@ -222,7 +233,8 @@ V0 deliberately excludes:
 - streaming feeds
 - real leverage, funding, or exchange-style liquidation
 - limit orders
-- pyramiding, multi-leg positions, partial exits, trailing stops
+- pyramiding (a second position row), multi-leg positions, trailing stops (`MODIFY_PROTECTION`'s stop-tighten is a discrete, gate-validated step per decision, not a continuously-trailing mechanism)
+- ~~partial exits~~ — **superseded 2026-09-22/23 (Phase 2)**: `REDUCE` now exists, in-place on the one open position row; see the V0 execution list above
 - multi-agent systems
 - RAG/vector databases
 - on-chain/social signals

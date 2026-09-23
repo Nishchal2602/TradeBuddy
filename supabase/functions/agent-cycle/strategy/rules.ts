@@ -4,10 +4,10 @@ import type { ModelDecisionProposal } from '../../../../src/shared/decisions/typ
 import type { RegimeResult } from '../../../../src/shared/strategy/types.ts'
 
 // trading-strategy-v1.md §14-15, §20 — deterministic candidate synthesis.
-// Pure: no Gemini, no Supabase, no sizing (that's the existing risk gate's
+// Pure: no model, no Supabase, no sizing (that's the existing risk gate's
 // job downstream, unchanged). This is the ONLY place `ModelDecisionProposal`
-// values are constructed by strategy code rather than parsed from Gemini's
-// JSON — everything downstream of the gate (planDecisionExecution, both
+// values are constructed by strategy code rather than parsed from the
+// model's JSON — everything downstream of the gate (planDecisionExecution, both
 // atomic RPCs, the broker) neither knows nor cares that this proposal was
 // synthesized rather than model-generated, by design (see index.ts's
 // rewired loop, Phase 5).

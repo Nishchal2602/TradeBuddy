@@ -175,6 +175,19 @@ function validAgentDecision(overrides: Partial<Record<string, unknown>> = {}): u
     strategyVersion: 'v1-regime',
     modelVetoed: false,
 
+    // Phase 2 (2026-09-22) provenance — null throughout for this fixture:
+    // it represents a pre-Phase-2-shaped OPEN_LONG decision, which never
+    // asked a management question.
+    proposedAction: null,
+    proposedActionConfidence: null,
+    proposedAdjustNotional: null,
+    executedAdjustNotional: null,
+    stopLossPriceBefore: null,
+    stopLossPriceAfter: null,
+    takeProfitPriceBefore: null,
+    takeProfitPriceAfter: null,
+    protectionRejectionReason: null,
+
     decidedAt: '2026-09-18T12:00:00.000Z',
     ...overrides,
   }

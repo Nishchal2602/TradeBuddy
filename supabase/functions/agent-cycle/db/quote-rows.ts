@@ -12,7 +12,7 @@ import type { AssetSymbol, MarketQuote } from '../../../../src/shared/market-dat
 //
 // Plain TS interfaces, not Zod: this is data WE construct and send, not
 // untrusted input to validate — same asymmetry as model/payload.ts's
-// ModelCallPayload/VetoCallPayload.
+// ModelCallPayload/VetoCandidateInput.
 //
 // The two row shapes are deliberately DIFFERENT sets of keys, not one
 // shape with optional fields: PostgREST's upsert (Prefer:

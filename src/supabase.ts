@@ -8,16 +8,17 @@ import { createClient } from '@supabase/supabase-js'
 //
 // The URL and anon key are hardcoded, not read from a VITE_-prefixed env
 // var. This is not the same call CLAUDE.md's Security rules address —
-// that list (Gemini keys, news-provider keys, the Supabase service-role
-// key) is explicitly about privileged secrets that must never enter
-// client code; the anon key is not on it, because it is not privileged —
-// RLS is the actual security boundary, and the extension shipping the
-// anon key was already decided (progress-tracker.md, Unit 2 Architecture
-// Decisions: "the extension ships the public anon key"). Hardcoding
-// avoids relying on any VITE_ env var at all, since .env.example's own
-// "never VITE_-prefixed anywhere" note — written for the Gemini keys —
-// otherwise reads unqualified enough to cause exactly this kind of
-// second-guessing the next time someone touches this file.
+// that list (TypeSafe/Jev key, news-provider keys, CoinGecko key, the
+// Supabase service-role key) is explicitly about privileged secrets that
+// must never enter client code; the anon key is not on it, because it is
+// not privileged — RLS is the actual security boundary, and the
+// extension shipping the anon key was already decided (progress-
+// tracker.md, Unit 2 Architecture Decisions: "the extension ships the
+// public anon key"). Hardcoding avoids relying on any VITE_ env var at
+// all, since .env.example's own "never VITE_-prefixed anywhere" note —
+// written for those provider keys — otherwise reads unqualified enough
+// to cause exactly this kind of second-guessing the next time someone
+// touches this file.
 const SUPABASE_URL = 'https://ymmegosnnywpnyafgnrk.supabase.co'
 const SUPABASE_ANON_KEY = 'sb_publishable_Ivy16t3A_t_CDskxYP6O9A_Kemn5ZUJ'
 

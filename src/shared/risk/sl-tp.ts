@@ -102,3 +102,57 @@ export function validateStopLossTakeProfit(
   }
   return { valid: true }
 }
+
+// Phase 2 (2026-09-22) — the same three checks as
+// validateStopLossTakeProfit (bounds, ordering, exhaustion), entered from
+// the other end: an already-ABSOLUTE stop-loss/take-profit pair, not
+// percentages. Two Phase-2 callers need this, both re-validating existing
+// or Jev-selected absolute levels against a given entry rather than
+// computing fresh ones from a percentage: (1) an ADD re-validating the
+// EXISTING SL/TP against the new weighted-average entry it just produced
+// (gate.ts) — the SL/TP prices don't move, but the entry did, so ordering
+// can break even though nothing about the protection itself changed; (2) a
+// MODIFY_PROTECTION re-validating a Jev-selected intent's computed price
+// (also gate.ts) against the position's unchanged entry.
+export function validateAbsoluteProtection(
+  direction: Direction,
+  entryPrice: number,
+  stopLossPrice: number,
+  takeProfitPrice: number,
+  bounds: SlTpBounds,
+): SlTpValidationResult {
+  const stopLossPct = direction === 'long'
+    ? (entryPrice - stopLossPrice) / entryPrice
+    : (stopLossPrice - entryPrice) / entryPrice
+  const takeProfitPct = direction === 'long'
+    ? (takeProfitPrice - entryPrice) / entryPrice
+    : (entryPrice - takeProfitPrice) / entryPrice
+
+  if (stopLossPct < bounds.minStopLossPct || stopLossPct > bounds.maxStopLossPct) {
+    return {
+      valid: false,
+      reason: `stop-loss distance ${stopLossPct} outside configured bounds [${bounds.minStopLossPct}, ${bounds.maxStopLossPct}]`,
+    }
+  }
+  if (takeProfitPct < bounds.minTakeProfitPct || takeProfitPct > bounds.maxTakeProfitPct) {
+    return {
+      valid: false,
+      reason: `take-profit distance ${takeProfitPct} outside configured bounds [${bounds.minTakeProfitPct}, ${bounds.maxTakeProfitPct}]`,
+    }
+  }
+
+  if (direction === 'long') {
+    if (!(stopLossPrice < entryPrice && entryPrice < takeProfitPrice)) {
+      return { valid: false, reason: 'long SL/TP ordering invalid: requires stopLoss < entry < takeProfit' }
+    }
+    return { valid: true }
+  }
+
+  if (!(takeProfitPrice < entryPrice && entryPrice < stopLossPrice)) {
+    return { valid: false, reason: 'short SL/TP ordering invalid: requires takeProfit < entry < stopLoss' }
+  }
+  if (!(stopLossPrice < exhaustionPrice(entryPrice))) {
+    return { valid: false, reason: 'short stop-loss at or beyond the collateral-exhaustion price (2x entry) — unreachable' }
+  }
+  return { valid: true }
+}

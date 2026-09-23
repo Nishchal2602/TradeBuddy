@@ -4,14 +4,20 @@ import type { BadgeProps } from '@/components/ui/badge'
 
 /** Shared Action -> badge/label mapping. Lives outside src/features/home/
  * deliberately: the Home, Positions, Activity, and Decision-detail screens
- * all render the same four-action vocabulary and must render it
- * identically (ui-context.md § Decision Card Language) — one mapping, not
- * one per screen. */
+ * all render the same action vocabulary and must render it identically
+ * (ui-context.md § Decision Card Language) — one mapping, not one per
+ * screen. ADD/REDUCE/MODIFY_PROTECTION added by Phase 2 (2026-09-22/23,
+ * "Jev as a portfolio-management decision layer") — label/badge entries
+ * only, forced by Record<Action, ...> now including them; no other UI
+ * change accompanies this (explicit scope boundary for this migration). */
 export const ACTION_LABEL: Record<Action, string> = {
   OPEN_LONG: 'OPEN LONG',
   OPEN_SHORT: 'OPEN SHORT',
   HOLD: 'HOLD',
   CLOSE: 'CLOSE',
+  ADD: 'ADD',
+  REDUCE: 'REDUCE',
+  MODIFY_PROTECTION: 'MODIFY PROTECTION',
 }
 
 export const ACTION_BADGE_VARIANT: Record<Action, NonNullable<BadgeProps['variant']>> = {
@@ -19,6 +25,9 @@ export const ACTION_BADGE_VARIANT: Record<Action, NonNullable<BadgeProps['varian
   OPEN_SHORT: 'short',
   HOLD: 'hold',
   CLOSE: 'neutral',
+  ADD: 'long',
+  REDUCE: 'neutral',
+  MODIFY_PROTECTION: 'accent',
 }
 
 export const RISK_STATUS_LABEL: Record<RiskStatus, string> = {

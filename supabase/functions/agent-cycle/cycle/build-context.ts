@@ -3,7 +3,7 @@ import { derivePositionState } from '../../../../src/shared/positions/types.ts'
 import type { Direction, Position } from '../../../../src/shared/positions/types.ts'
 import type { NormalizedMarketData, AssetSymbol } from '../../../../src/shared/market-data/types.ts'
 import type { InvalidationCondition } from '../../../../src/shared/decisions/types.ts'
-import type { RiskGateContext, RecentStopLossClose } from '../../../../src/shared/risk/gate.ts'
+import type { RiskGateContext, RecentStopLossClose, OpenPositionSnapshot } from '../../../../src/shared/risk/gate.ts'
 import type { PortfolioConstraints, AssetInput, OpenPositionInput, NewsInput, RecentDecisionInput } from '../model/payload.ts'
 import type { RiskAppetiteThresholds } from '../../../../src/shared/risk/appetite-mapping.ts'
 import type { SlTpBounds } from '../../../../src/shared/risk/sl-tp.ts'
@@ -158,16 +158,35 @@ export interface GateContextInputs {
   otherSameDirectionNotionalUsd: number
   peakNav: number
   drawdownBreakerFloorPct: number
+
+  // Phase 2 (2026-09-22) additions — see RiskGateContext's own comments
+  // for the full reasoning (fee/slippage cash headroom, the provisional
+  // minimum-notional floor).
+  feeBps: number
+  slippageBps: number
+  minTradeNotionalPct: number
+  minTradeNotionalUsd: number
 }
 
-// currentAssetExposureUsd is always 0 in V0 regardless of openPosition —
-// sizing.ts's own module comment: with one net position per asset and no
-// ADD action, an asset either has a brand-new open being sized (exposure
-// 0 so far) or already has a position and therefore can't be sized again
-// (the gate's state check rejects OPEN_* before sizing ever runs). Kept
-// as a real, named 0 here (not silently hardcoded inside sizing.ts) so
-// this doesn't need to change the day pyramiding makes it non-zero.
+// currentAssetExposureUsd is always 0 in V0/V1 regardless of openPosition
+// — sizing.ts's own module comment: with one net position per asset, an
+// OPEN_LONG/OPEN_SHORT candidate only ever reaches the gate's sizing step
+// from FLAT (the gate's state check rejects it otherwise), so there is
+// never pre-existing exposure on the asset an OPEN is being sized for.
+// Phase 2's ADD does NOT read this field — evaluateAdd (gate.ts) derives
+// its own exposure figure directly from the new openPosition field below,
+// which is the actual mechanism that makes ADD's exposure cap real; this
+// field's own meaning is unchanged and stays correctly 0.
 export function buildRiskGateContext(inputs: GateContextInputs): RiskGateContext {
+  const openPositionSnapshot: OpenPositionSnapshot | null = inputs.openPosition
+    ? {
+      quantity: inputs.openPosition.quantity,
+      entryPrice: inputs.openPosition.entryPrice,
+      stopLossPrice: inputs.openPosition.stopLossPrice,
+      takeProfitPrice: inputs.openPosition.takeProfitPrice,
+    }
+    : null
+
   return {
     currentState: derivePositionState(inputs.openPosition),
     entryPrice: inputs.entryPrice,
@@ -188,6 +207,11 @@ export function buildRiskGateContext(inputs: GateContextInputs): RiskGateContext
     otherSameDirectionNotionalUsd: inputs.otherSameDirectionNotionalUsd,
     peakNav: inputs.peakNav,
     drawdownBreakerFloorPct: inputs.drawdownBreakerFloorPct,
+    openPosition: openPositionSnapshot,
+    feeBps: inputs.feeBps,
+    slippageBps: inputs.slippageBps,
+    minTradeNotionalPct: inputs.minTradeNotionalPct,
+    minTradeNotionalUsd: inputs.minTradeNotionalUsd,
   }
 }
 

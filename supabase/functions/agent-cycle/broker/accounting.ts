@@ -107,9 +107,201 @@ export function openPosition(input: OpenPositionInput): OpenPositionResult {
     intent: input.direction === 'long' ? 'OPEN_LONG' : 'OPEN_SHORT',
     decisionId: input.decisionId,
     triggerReason: null,
+    realizedPnl: null, // nothing realized on an OPEN
   }
 
   return { position, trade, cashAfter }
+}
+
+// --- Add (Phase 2, 2026-09-22) -------------------------------------------
+//
+// Increases an existing position's quantity via a true weighted-average
+// entry — never a second position row (positions_one_open_per_asset_idx
+// stays satisfied: this mutates the one open row, it doesn't insert a
+// new one). SL/TP are NEVER touched here — an ADD's interaction with
+// existing protection is a re-validation the risk gate performs BEFORE
+// this function is ever called (src/shared/risk/gate.ts's evaluateAdd);
+// this function only executes an already-approved amount.
+
+export interface AddToPositionInput {
+  position: Position
+  referencePrice: number
+  addNotionalUsd: number
+  feeBps: number
+  slippageBps: number
+  decisionId: string
+  startingCash: number
+  nowIso: string
+}
+
+export interface AddToPositionResult {
+  updatedPosition: Position
+  trade: Trade
+  cashAfter: number
+}
+
+export function addToPosition(input: AddToPositionInput): AddToPositionResult {
+  const { position } = input
+  const side = sideFor(position.direction, true)
+  const fillPrice = applySlippage(input.referencePrice, side, input.slippageBps)
+
+  // Same reference-price sizing convention as openPosition: quantity is
+  // sized from the requested notional at the REFERENCE price, then the
+  // actual transacted value (grossValue) is that quantity at the real
+  // fill price.
+  const addQuantity = input.addNotionalUsd / input.referencePrice
+  const grossValue = addQuantity * fillPrice
+  const fee = grossValue * (input.feeBps / 10_000)
+  const slippageCost = Math.abs(fillPrice - input.referencePrice) * addQuantity
+
+  const netCashDelta = -(grossValue + fee) // identical shape to an OPEN's cash effect
+  const cashAfter = input.startingCash + netCashDelta
+
+  const newQuantity = position.quantity + addQuantity
+  const newCostBasis = position.costBasis + grossValue
+  // True weighted-average entry — holds by construction because
+  // costBasis === quantity * fillPrice at every prior open/add
+  // (broker/accounting.ts's own invariant), so newCostBasis/newQuantity
+  // is exactly the blended entry, not an approximation.
+  const newEntryPrice = newCostBasis / newQuantity
+
+  const updatedPosition: Position = {
+    ...position,
+    quantity: newQuantity,
+    entryPrice: newEntryPrice,
+    costBasis: newCostBasis,
+    // stopLossPrice/takeProfitPrice deliberately UNCHANGED — the gate
+    // already proved they remain valid under this new entry before
+    // approving the ADD; this function has no authority to touch them.
+  }
+
+  const trade: Trade = {
+    id: crypto.randomUUID(),
+    portfolioId: position.portfolioId,
+    positionId: position.id,
+    asset: position.asset,
+    side,
+    quantity: addQuantity,
+    referencePrice: input.referencePrice,
+    fillPrice,
+    fee,
+    slippageCost,
+    grossValue,
+    netCashDelta,
+    cashAfter,
+    executedAt: input.nowIso,
+    intent: position.direction === 'long' ? 'ADD_LONG' : 'ADD_SHORT',
+    decisionId: input.decisionId,
+    triggerReason: null,
+    realizedPnl: null, // nothing realized on an ADD
+  }
+
+  return { updatedPosition, trade, cashAfter }
+}
+
+// --- Reduce (Phase 2, 2026-09-22) -----------------------------------------
+//
+// Partially exits a position — never touches entry_price (a partial exit
+// never moves the average entry, only a full close/re-open does) and
+// never inserts a second trades row of the closing kind:
+// trades_one_close_per_position_idx only matches CLOSE_LONG/CLOSE_SHORT,
+// so a REDUCE_* trade is structurally exempt from it, which is exactly
+// what makes more than one partial exit on the same position legal.
+//
+// A 100%-of-quantity REDUCE is arithmetically IDENTICAL to closePosition
+// (costBasisReleased == costBasis, newQuantity == 0) — proven directly in
+// accounting.test.ts, not just asserted here. Callers should still
+// normalize a >=100% magnitude to an actual CLOSE upstream (cycle/apply-
+// management.ts) for correct provenance (a full exit should read CLOSE in
+// the decision feed, not "REDUCE that happened to be 100%") — this
+// function itself has no opinion on that and will happily execute a
+// 100% reduce if asked to.
+
+export interface ReducePositionInput {
+  position: Position
+  attemptedFillPrice: number
+  reduceQuantity: number
+  feeBps: number
+  slippageBps: number
+  decisionId: string
+  startingCash: number
+  nowIso: string
+}
+
+export interface ReducePositionResult {
+  updatedPosition: Position
+  trade: Trade
+  cashAfter: number
+  realizedPnl: number
+}
+
+export function reducePosition(input: ReducePositionInput): ReducePositionResult {
+  const { position } = input
+  const side = sideFor(position.direction, false)
+
+  // Same exhaustion clamp closePosition applies to a short — a partial
+  // exit is still subject to the same collateral ceiling a full one is.
+  let fillPrice = applySlippage(input.attemptedFillPrice, side, input.slippageBps)
+  if (position.direction === 'short') {
+    const exhaustion = exhaustionPrice(position.entryPrice)
+    if (fillPrice >= exhaustion) fillPrice = exhaustion
+  }
+
+  const grossValue = input.reduceQuantity * fillPrice
+  const fee = grossValue * (input.feeBps / 10_000)
+  const slippageCost = Math.abs(fillPrice - input.attemptedFillPrice) * input.reduceQuantity
+
+  const realizedPnl = position.direction === 'long'
+    ? (fillPrice - position.entryPrice) * input.reduceQuantity
+    : (position.entryPrice - fillPrice) * input.reduceQuantity
+
+  // Cost basis released is PROPORTIONAL to the fraction of quantity being
+  // reduced — the remaining position's cost basis (and therefore its
+  // entryPrice, since entryPrice === costBasis/quantity is this broker's
+  // own invariant) is otherwise untouched. At reduceQuantity ===
+  // position.quantity, costBasisReleased === position.costBasis exactly
+  // (the 100%-reduce-equals-close identity accounting.test.ts proves).
+  const costBasisReleased = position.costBasis * (input.reduceQuantity / position.quantity)
+
+  const netCashDelta = position.direction === 'long'
+    ? grossValue - fee
+    : costBasisReleased + realizedPnl - fee
+  const cashAfter = input.startingCash + netCashDelta
+
+  const newQuantity = position.quantity - input.reduceQuantity
+  const newCostBasis = position.costBasis - costBasisReleased
+
+  const updatedPosition: Position = {
+    ...position,
+    quantity: newQuantity,
+    costBasis: newCostBasis,
+    // entryPrice UNCHANGED — a partial exit never moves the average
+    // entry (only ADD does, and only via a genuine weighted average).
+  }
+
+  const intent = position.direction === 'long' ? 'REDUCE_LONG' as const : 'REDUCE_SHORT' as const
+  const trade: Trade = {
+    id: crypto.randomUUID(),
+    portfolioId: position.portfolioId,
+    positionId: position.id,
+    asset: position.asset,
+    side,
+    quantity: input.reduceQuantity,
+    referencePrice: input.attemptedFillPrice,
+    fillPrice,
+    fee,
+    slippageCost,
+    grossValue,
+    netCashDelta,
+    cashAfter,
+    executedAt: input.nowIso,
+    intent,
+    decisionId: input.decisionId,
+    triggerReason: null,
+    realizedPnl, // populated — this is a realizing fill, unlike OPEN/ADD
+  }
+
+  return { updatedPosition, trade, cashAfter, realizedPnl }
 }
 
 // --- Close -------------------------------------------------------------
@@ -225,12 +417,20 @@ export function closePosition(input: ClosePositionInput): ClosePositionResult {
   // monitor-initiated), which can legitimately diverge from
   // positionCloseReason (accounting truth) in the rare gap-during-
   // agent-close edge case above.
+  // Phase 2 (2026-09-22): realizedPnl now populated on EVERY close trade,
+  // agent- or monitor-initiated — required for sum(trades.realized_pnl)
+  // to be a trustworthy lifetime-P&L source across a position's whole
+  // open->add->reduce->close lifecycle (a full close that left this null
+  // would silently under-report the total). positions.realized_pnl keeps
+  // its own, unchanged meaning (the final close) — this doesn't redefine
+  // that column, it populates a second, additive one.
   const trade: Trade = input.decisionId
-    ? { ...tradeCore, decisionId: input.decisionId, triggerReason: 'agent_close' }
+    ? { ...tradeCore, decisionId: input.decisionId, triggerReason: 'agent_close', realizedPnl }
     : {
       ...tradeCore,
       decisionId: null,
       triggerReason: positionCloseReason as 'stop_loss' | 'take_profit' | 'collateral_exhausted',
+      realizedPnl,
     }
 
   return { closedPosition, trade, cashAfter, realizedPnl }

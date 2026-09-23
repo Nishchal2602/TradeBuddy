@@ -3,10 +3,20 @@ import { AssetSymbol } from '../market-data/types.ts'
 
 // Not BUY/SELL — ambiguous once both directions exist
 // (trading-domain-contract.md §1). State-dependent: FLAT allows
-// OPEN_LONG/OPEN_SHORT/HOLD only; LONG/SHORT allow HOLD/CLOSE only. That
-// constraint is enforced by the risk gate (Step 3) against live position
-// state, not encoded here — this type only spells out the four values.
-export const Action = z.enum(['OPEN_LONG', 'OPEN_SHORT', 'HOLD', 'CLOSE'])
+// OPEN_LONG/OPEN_SHORT/HOLD only; LONG/SHORT allow
+// HOLD/ADD/REDUCE/CLOSE/MODIFY_PROTECTION only. That constraint is
+// enforced by the risk gate against live position state, not encoded
+// here — this type only spells out the seven values.
+//
+// ADD/REDUCE/MODIFY_PROTECTION added by Phase 2 (2026-09-22, "Jev as a
+// portfolio-management decision layer") — direction-agnostic, matching
+// CLOSE's existing convention: direction comes from the open position
+// itself, never from the action literal. See gate.ts's own comment on
+// why every branch below HOLD/CLOSE must derive direction per-action,
+// never by a blanket `action === 'OPEN_LONG' ? 'long' : 'short'` — a
+// documented past trap this migration specifically had to close before
+// adding these three values.
+export const Action = z.enum(['OPEN_LONG', 'OPEN_SHORT', 'HOLD', 'CLOSE', 'ADD', 'REDUCE', 'MODIFY_PROTECTION'])
 export type Action = z.infer<typeof Action>
 
 // Derived in code from reasons[]'s type distribution, never asked of the
@@ -109,6 +119,53 @@ const openProposalFields = {
   invalidation: z.array(InvalidationCondition).min(1),
 }
 
+// --- Phase 2 (2026-09-22) — ADD/REDUCE/MODIFY_PROTECTION fields --------
+//
+// Each carries a RELATIVE signal, never an absolute dollar amount or
+// price — deterministic code (the risk gate) is the sole authority that
+// turns a magnitude/intent into an actual notional or price, exactly the
+// same split OPEN_LONG/OPEN_SHORT already use (stopLossPct/takeProfitPct
+// are percentages; the gate derives the absolute notional and prices).
+// This is what makes "Jev may choose a bounded adjustment magnitude;
+// deterministic code remains the sole authority over final size" true
+// structurally, not just by convention — there is no field anywhere on
+// this type a proposal could use to name a dollar figure or a price.
+
+const addProposalFields = {
+  // Fraction of the risk-derived headroom to add (Jev's Score answer,
+  // mapped to {0.25, 0.50, 1.00} in code — see model/jev/management-
+  // question.ts). The gate computes the actual headroom from the
+  // EXISTING position's own stop-loss, then multiplies by this fraction,
+  // then applies every sizing cap on top — same three-step split as an
+  // OPEN_LONG's stopLossPct → deriveRiskBasedNotional → applySizingCaps.
+  addMagnitude: z.number().positive().max(1),
+}
+
+const reduceProposalFields = {
+  // Fraction of the CURRENT open quantity to reduce (Jev's Score answer,
+  // mapped to {0.25, 0.50, 0.75}). A magnitude that would reduce >= 100%
+  // is normalized to a CLOSE proposal upstream (cycle/apply-management.ts)
+  // and never reaches this variant — max(1) here is a structural ceiling,
+  // not the expected range.
+  reduceMagnitude: z.number().positive().max(1),
+}
+
+const modifyProtectionProposalFields = {
+  // Deterministically computed ABSOLUTE prices, not intents — the intent
+  // enums (KEEP/TIGHTEN_TO_BREAKEVEN, KEEP/MOVE_CLOSER/MOVE_OUT) are
+  // resolved into these prices by cycle/apply-management.ts BEFORE this
+  // proposal is built, the same way strategy/rules.ts resolves the
+  // regime rule into stopLossPct/takeProfitPct before the gate ever sees
+  // them. null means "no change requested" for that leg specifically —
+  // at least one of the two is non-null by construction (a proposal
+  // where both are null is normalized to HOLD upstream, never built as
+  // MODIFY_PROTECTION). The gate's only job is to VALIDATE these prices
+  // (ordering, configured bounds, exhaustion, and — for stop — that it
+  // never widens) — never to compute them.
+  proposedStopLossPrice: z.number().positive().nullable(),
+  proposedTakeProfitPrice: z.number().positive().nullable(),
+}
+
 // .strict() on every branch, not Zod's default "strip" mode: this is
 // parsing untrusted model output (code-standards.md "treat LLM output as
 // untrusted until schema validation succeeds"), and the entire point of
@@ -122,12 +179,18 @@ const OpenLongProposal = z.object({ ...baseProposalFields, ...openProposalFields
 const OpenShortProposal = z.object({ ...baseProposalFields, ...openProposalFields, action: z.literal('OPEN_SHORT') }).strict()
 const HoldProposal = z.object({ ...baseProposalFields, action: z.literal('HOLD') }).strict()
 const CloseProposal = z.object({ ...baseProposalFields, action: z.literal('CLOSE') }).strict()
+const AddProposal = z.object({ ...baseProposalFields, ...addProposalFields, action: z.literal('ADD') }).strict()
+const ReduceProposal = z.object({ ...baseProposalFields, ...reduceProposalFields, action: z.literal('REDUCE') }).strict()
+const ModifyProtectionProposal = z.object({ ...baseProposalFields, ...modifyProtectionProposalFields, action: z.literal('MODIFY_PROTECTION') }).strict()
 
 export const ModelDecisionProposal = z.discriminatedUnion('action', [
   OpenLongProposal,
   OpenShortProposal,
   HoldProposal,
   CloseProposal,
+  AddProposal,
+  ReduceProposal,
+  ModifyProtectionProposal,
 ])
 export type ModelDecisionProposal = z.infer<typeof ModelDecisionProposal>
 
@@ -211,6 +274,21 @@ export const AgentDecision = z.object({
   // candidate never reaches the veto step, §11) — never a false default.
   strategyVersion: z.string().min(1),
   modelVetoed: z.boolean().nullable(),
+
+  // --- Phase 2 (2026-09-22) provenance — "what did Jev want, what did
+  // deterministic code allow, and what actually happened," per decision.
+  // All null for every pre-Phase-2 row and for any Phase-2 row where no
+  // management question was ever asked (a FLAT asset's OPEN/HOLD path,
+  // which still uses only the pre-existing veto columns above).
+  proposedAction: Action.nullable(),
+  proposedActionConfidence: z.number().min(0).max(1).nullable(),
+  proposedAdjustNotional: z.number().nonnegative().nullable(),
+  executedAdjustNotional: z.number().nonnegative().nullable(),
+  stopLossPriceBefore: z.number().positive().nullable(),
+  stopLossPriceAfter: z.number().positive().nullable(),
+  takeProfitPriceBefore: z.number().positive().nullable(),
+  takeProfitPriceAfter: z.number().positive().nullable(),
+  protectionRejectionReason: z.string().nullable(),
 
   decidedAt: z.string().datetime(),
 })

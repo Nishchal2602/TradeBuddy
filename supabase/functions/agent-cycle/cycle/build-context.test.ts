@@ -217,10 +217,32 @@ Deno.test('buildRiskGateContext: currentAssetExposureUsd is always 0 (V0 has no 
     otherSameDirectionNotionalUsd: 1500,
     peakNav: 10_000,
     drawdownBreakerFloorPct: 0.90,
+    feeBps: 10,
+    slippageBps: 5,
+    minTradeNotionalPct: 0.01,
+    minTradeNotionalUsd: 25,
   })
   assertEquals(ctx.currentState, 'LONG')
   assertEquals(ctx.currentAssetExposureUsd, 0)
   assertEquals(ctx.effectiveMinConfidence, 0.65)
+  // Phase 2 (2026-09-22): openPosition is the ONLY place ADD/REDUCE/
+  // MODIFY_PROTECTION read the position's own levels from — verify the
+  // snapshot maps every field correctly.
+  assertEquals(ctx.openPosition, { quantity: 1, entryPrice: 100, stopLossPrice: 95, takeProfitPrice: 110 })
+})
+
+Deno.test('buildRiskGateContext: openPosition is null exactly when currentState is FLAT', () => {
+  const ctx = buildRiskGateContext({
+    asset: 'BTC', entryPrice: 100, nav: 10_000, cash: 10_000, openPosition: null,
+    appetite: { minConfidence: 0, riskBudgetPct: 0.01 }, maxSingleTradePct: 0.2, maxAssetExposurePct: 0.35,
+    slTpBounds: { minStopLossPct: 0.005, maxStopLossPct: 0.15, minTakeProfitPct: 0.005, maxTakeProfitPct: 0.5 },
+    stopOutReentryBlockMinutes: 360, recentStopLossClose: null, nowIso: NOW,
+    portfolioRiskCeilingUsd: 75, otherOpenPositionsRiskAtStopUsd: 20, maxTotalNotionalUsd: 3000, otherSameDirectionNotionalUsd: 1500,
+    peakNav: 10_000, drawdownBreakerFloorPct: 0.90,
+    feeBps: 10, slippageBps: 5, minTradeNotionalPct: 0.01, minTradeNotionalUsd: 25,
+  })
+  assertEquals(ctx.currentState, 'FLAT')
+  assertEquals(ctx.openPosition, null)
 })
 
 Deno.test('buildRiskGateContext: threads every trading-strategy-v1.md §17 portfolio-risk field through unchanged', () => {
@@ -243,6 +265,10 @@ Deno.test('buildRiskGateContext: threads every trading-strategy-v1.md §17 portf
     otherSameDirectionNotionalUsd: 1500,
     peakNav: 12_000,
     drawdownBreakerFloorPct: 0.90,
+    feeBps: 10,
+    slippageBps: 5,
+    minTradeNotionalPct: 0.01,
+    minTradeNotionalUsd: 25,
   })
   assertEquals(ctx.portfolioRiskCeilingUsd, 75)
   assertEquals(ctx.otherOpenPositionsRiskAtStopUsd, 20)

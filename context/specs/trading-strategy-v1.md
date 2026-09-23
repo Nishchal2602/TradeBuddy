@@ -222,13 +222,15 @@ setup(asset) = regime(asset) == UP  and  state(asset) == FLAT
 
 ## 12. Gemini's role
 
+**Historical section — describes the state as implemented 2026-09-21.** Gemini was removed entirely 2026-09-22 (TypeSafe's Jev is the sole provider, no fallback), and the model's mandate widened again 2026-09-22/23 (Phase 2, "Jev as a portfolio-management decision layer") to also manage existing open positions — bounded, gate-validated ADD/REDUCE/MODIFY_PROTECTION, never an absolute size or price. See `CLAUDE.md`'s AI-specific rules and `context/architecture.md`'s Model Boundary section for the current, authoritative description; this section is kept as a record of what V1 originally specified, not edited to read as if it always described the current system.
+
 **[PROPOSED V1] Gemini is a binary veto and a scribe. It has no other authority.**
 
 **It may:**
 - Return `veto: true | false` on the narrow question *"Is there a known exogenous confound that invalidates this setup's premise?"*
 - Write the human-readable thesis and invalidation text for the audit trail.
 
-**It may not:** originate a trade, choose direction, propose or influence size, propose SL/TP, override a veto, or gate on a self-reported confidence number.
+**It may not:** originate a trade, choose direction, propose or influence size, propose SL/TP, override a veto, or gate on a self-reported confidence number. ~~Still true of the entry-veto question itself; no longer a complete description of the model's mandate as a whole once an existing position is being managed (Phase 2) — see the historical-section note above.~~
 
 **Why the confidence gate is removed.** The shipped system gates trades on `confidence ≥ effectiveMinConfidence`. The evidence against this is strong and specific. Verbalised LLM confidence shows expected calibration error of **0.24–0.47**, clusters on **3–4 round values**, and — the property a gate actually requires — has **AUROC 0.55–0.61**, i.e. almost no ability to rank correct predictions above incorrect ones (Xiong et al., ICLR 2024; *Ordinal Gates, Cardinal Bets*, arXiv:2609.00187). Calibration repair provably does not help: "monotone calibration cannot reorder predictions." RLHF actively inflates confidence independently of correctness (arXiv:2410.09724). In the one study of exactly this use case — headline-driven directional gating — **0 of 18 configurations survived Romano-Wolf multiple-testing correction.**
 

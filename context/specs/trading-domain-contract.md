@@ -10,13 +10,15 @@ The executable source of truth is [`supabase/functions/agent-cycle/domain/contra
 
 ## 1. Position state model
 
-One net position per asset. No lots, no pyramiding, no partial exits — enforced at the database level by `positions_one_open_per_asset_idx` (a partial unique index on `status = 'open'`), not just by application logic.
+One net position per asset. No lots, no pyramiding — enforced at the database level by `positions_one_open_per_asset_idx` (a partial unique index on `status = 'open'`), not just by application logic. That invariant is unchanged and remains the actual hard limit.
+
+~~No partial exits.~~ **Superseded 2026-09-22/23 (Phase 2, "Jev as a portfolio-management decision layer").** A partial exit (`REDUCE`) now exists, and an existing position's size can also grow (`ADD`) — both mutate the ONE open row in place (quantity/entry_price/cost_basis) via a true weighted-average entry; neither ever inserts a second position row, and the one-net-position-per-asset invariant above is completely unaffected. A `REDUCE` resolving to the full quantity is normalized to `CLOSE` before it reaches this state machine, never executed as a 100% reduce. Full accounting detail: `broker/accounting.ts`'s `addToPosition`/`reducePosition`, proven against `accounting.test.ts`'s Phase 2 fixtures the same way §2 below was originally proven against `ACCOUNTING_SCENARIOS`.
 
 | State | Meaning | Valid actions |
 |---|---|---|
 | **FLAT** | no open `positions` row for the asset | `OPEN_LONG`, `OPEN_SHORT`, `HOLD` |
-| **LONG** | one open row, `direction = 'long'` | `HOLD`, `CLOSE` |
-| **SHORT** | one open row, `direction = 'short'` | `HOLD`, `CLOSE` |
+| **LONG** | one open row, `direction = 'long'` | `HOLD`, `ADD`, `REDUCE`, `CLOSE`, `MODIFY_PROTECTION` |
+| **SHORT** | one open row, `direction = 'short'` | `HOLD`, `ADD`, `REDUCE`, `CLOSE`, `MODIFY_PROTECTION` |
 
 Every other (state, action) pair is rejected — see `STATE_TRANSITIONS` in the fixtures for all 12 pairs and their exact rejection reasons. The table is total: no undefined pair, no unreachable state.
 
@@ -92,9 +94,11 @@ Exactly **three** legal combinations of (`intent`, `decision_id`, `trigger_reaso
 
 | `intent` | `decision_id` | `trigger_reason` |
 |---|---|---|
-| `OPEN_LONG` / `OPEN_SHORT` | **set** | **null** |
+| `OPEN_LONG` / `OPEN_SHORT` / `ADD_LONG` / `ADD_SHORT` / `REDUCE_LONG` / `REDUCE_SHORT` | **set** | **null** |
 | `CLOSE_*` — agent-initiated | **set** | **`'agent_close'`** |
 | `CLOSE_*` — automatic exit | **null** | `'stop_loss'` / `'take_profit'` / `'collateral_exhausted'` |
+
+**`ADD_*`/`REDUCE_*` added by Phase 2 (2026-09-22/23)** — they share OPEN's exact provenance shape (always agent-initiated; the position monitor only ever closes, never adjusts). `CLOSE_*` stays reserved for the FINAL close of a position — `trades_one_close_per_position_idx` (a genuine unique index, unaffected by this addition) still permits at most one close-trade per position, ever; a partial exit is `REDUCE_*`, never `CLOSE_*`.
 
 **An agent-initiated close legitimately carries both `decision_id` and `trigger_reason`.** An earlier draft of the position-model plan stated the rule as "exactly one of (`decision_id`, `trigger_reason`)" — that was wrong, caught during plan review before any code existed. The corrected rule is keyed on `intent`, not an XOR across two fields, and `contract.test.ts` has a dedicated test (`'an agent-initiated close legitimately carries BOTH...'`) specifically guarding against that mistake recurring.
 

@@ -2,13 +2,16 @@ import { createClient } from '@supabase/supabase-js'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { CoinGeckoMarketDataProvider } from './providers/coingecko.ts'
 import { RssNewsProvider } from './providers/rss-news.ts'
-import { callModel } from './model/call-model.ts'
-import { VETO_PROMPT_VERSION } from './model/prompt.ts'
-import type { VetoVerdict } from './model/gemini-schema.ts'
+import { requestPortfolioDecisions, JEV_QUESTION_VERSION, JEV_VETO_THRESHOLD, MANAGEMENT_QUESTION_VERSION } from './model/jev/provider.ts'
+import type { VetoOutcome, ManagementOutcome } from './model/jev/provider.ts'
+import type { ManagementCandidateInput } from './model/jev/management-question.ts'
 import { buildPortfolioConstraints, buildAssetInput, buildRiskGateContext, checkMarketDataFreshness, aggregateOtherOpenPositionsRisk } from './cycle/build-context.ts'
 import type { PersistedNewsItem } from './cycle/build-context.ts'
 import { evaluateTrendRegime } from './strategy/regime.ts'
 import { buildCandidateProposal, vetoedHoldProposal } from './strategy/rules.ts'
+import { applyVetoOutcome } from './cycle/apply-veto.ts'
+import { applyManagementOutcome } from './cycle/apply-management.ts'
+import type { ManagementPositionContext } from './cycle/apply-management.ts'
 import { planDecisionExecution } from './cycle/plan-decision.ts'
 import { derivePrimaryDriver, citedNewsIds } from './cycle/decision-record.ts'
 import { computeNav } from './broker/accounting.ts'
@@ -21,6 +24,7 @@ import type { RiskAppetite } from '../../../src/shared/risk/appetite-mapping.ts'
 import type { SlTpBounds } from '../../../src/shared/risk/sl-tp.ts'
 import type { RecentStopLossClose } from '../../../src/shared/risk/gate.ts'
 import { evaluateRiskGate } from '../../../src/shared/risk/gate.ts'
+import { deriveRiskBasedNotional } from '../../../src/shared/risk/sizing.ts'
 import type { AssetSymbol, NormalizedMarketData } from '../../../src/shared/market-data/types.ts'
 import type { Position } from '../../../src/shared/positions/types.ts'
 import type { InvalidationCondition, Action, ModelDecisionProposal } from '../../../src/shared/decisions/types.ts'
@@ -57,6 +61,10 @@ interface Settings {
   maxTotalNotionalPct: number
   drawdownBreakerFloorPct: number
   newsVetoEnabled: boolean
+  // Phase 2 (2026-09-22/23) — provisional minimum-trade-notional floor;
+  // applies to ADD and a partial REDUCE only, never to a full CLOSE.
+  minTradeNotionalPct: number
+  minTradeNotionalUsd: number
 }
 
 async function readSettings(supabase: SupabaseClient): Promise<Settings> {
@@ -84,6 +92,8 @@ async function readSettings(supabase: SupabaseClient): Promise<Settings> {
     maxTotalNotionalPct: Number(data.max_total_notional_pct),
     drawdownBreakerFloorPct: Number(data.drawdown_breaker_floor_pct),
     newsVetoEnabled: data.news_veto_enabled,
+    minTradeNotionalPct: Number(data.min_trade_notional_pct),
+    minTradeNotionalUsd: Number(data.min_trade_notional_usd),
   }
 }
 
@@ -217,7 +227,11 @@ export interface CycleSummary {
 
 export interface CycleDeps {
   supabase: SupabaseClient
-  apiKeys: string[]
+  // Gemini removed entirely (2026-09-22) — Jev is the sole model
+  // provider, no fallback. A single key, not an array: the old
+  // multi-key rotation loop existed because Gemini's free tier issued
+  // several keys; TypeSafe's is a normal single-key API.
+  typesafeApiKey: string
   // deno-lint-ignore no-explicit-any
   fetchImpl?: any
   // The single instant the whole cycle's business logic treats as "now"
@@ -246,7 +260,7 @@ export interface CycleDeps {
 }
 
 export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
-  const { supabase, apiKeys, nowIso, trigger, coingeckoApiKey } = deps
+  const { supabase, typesafeApiKey, nowIso, trigger, coingeckoApiKey } = deps
   const fetchImpl = deps.fetchImpl ?? fetch
 
   const settings = await readSettings(supabase)
@@ -437,49 +451,90 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
       passOneResults.push({ asset, assetMarketData, assetInput, regime, candidate, openPosition, recentStopLossClose })
     }
 
-    // --- Batched veto call (trading-strategy-v1.md §11-12) ------------------
-    // At most ONE model call this cycle — CLAUDE.md "exactly one model call
-    // per scheduled V0 cycle," now "at most one": zero OPEN_LONG candidates
-    // (or news_veto_enabled = false) means zero calls; one or more means
-    // exactly one batched call covering all of them.
+    // --- Batched veto + management call (Gemini -> Jev migration,
+    // 2026-09-22; Phase 2 "portfolio management," 2026-09-22/23) ----------
+    // At most ONE model call this cycle, covering BOTH kinds of candidate
+    // in the SAME request: veto questions for FLAT assets with an
+    // OPEN_LONG candidate (trading-strategy-v1.md §11-12, unchanged), and
+    // management questions for OPEN assets whose regime is still intact
+    // this cycle (Pass 1's own candidate is HOLD — a regime-flip CLOSE is
+    // authoritative and never routed through Jev at all). Zero candidates
+    // of either kind (or news_veto_enabled = false) means zero calls. No
+    // fallback provider exists — a failed call fails every candidate of
+    // BOTH kinds closed (veto -> HOLD; management -> unmanaged HOLD),
+    // never an implicit approval or an implicit action.
     const vetoCandidates: VetoCandidateInput[] = []
+    const managementCandidates: ManagementCandidateInput[] = []
     for (const r of passOneResults) {
-      if (r.candidate.action !== 'OPEN_LONG') continue
-      vetoCandidates.push({
-        asset: r.asset,
-        regime: { dailyClose: r.regime.dailyClose, dailyMa: r.regime.dailyMa },
-        stopLossPct: r.candidate.stopLossPct,
-        takeProfitPct: r.candidate.takeProfitPct,
-        news: r.assetInput.news,
-      })
-    }
-
-    const verdictByAsset = new Map<AssetSymbol, VetoVerdict>()
-    // Seeded from a news-provider failure, but only when veto is actually
-    // on — disabling veto means news stops mattering at all, so a feed
-    // outage shouldn't block trading in that mode. Fails every OPEN_LONG
-    // candidate closed to HOLD below without spending an API call on a
-    // request we already know is missing its news context.
-    let vetoCallFailedReason: string | null =
-      settings.newsVetoEnabled && newsProviderFailedReason
-        ? `news retrieval failed, blocking new opens this cycle: ${newsProviderFailedReason}`
-        : null
-    let vetoModelVersion: string | null = null
-    let vetoRawOutputPayload: unknown = null
-
-    if (settings.newsVetoEnabled && vetoCandidates.length > 0 && vetoCallFailedReason === null) {
-      try {
-        const vetoResult = await callModel({ candidates: vetoCandidates }, apiKeys, fetchImpl)
-        for (const v of vetoResult.verdicts) verdictByAsset.set(v.asset, v)
-        vetoModelVersion = vetoResult.modelVersion
-        vetoRawOutputPayload = vetoResult.rawOutputPayload
-      } catch (error) {
-        vetoCallFailedReason = error instanceof Error ? error.message : String(error)
+      if (r.candidate.action === 'OPEN_LONG') {
+        vetoCandidates.push({ asset: r.asset, news: r.assetInput.news })
+      } else if (r.openPosition && r.candidate.action === 'HOLD') {
+        managementCandidates.push({
+          asset: r.asset,
+          direction: r.openPosition.direction,
+          entryPrice: r.openPosition.entryPrice,
+          currentPrice: r.assetMarketData.price,
+          quantity: r.openPosition.quantity,
+          stopLossPrice: r.openPosition.stopLossPrice,
+          takeProfitPrice: r.openPosition.takeProfitPrice,
+          heldHours: (new Date(nowIso).getTime() - new Date(r.openPosition.openedAt).getTime()) / 3_600_000,
+          feeBps: settings.feeBps,
+          slippageBps: settings.slippageBps,
+          atrPct: r.assetInput.market.indicators.atrPct,
+          news: r.assetInput.news,
+        })
       }
     }
 
-    // --- Pass 2: apply the veto (if any), then proceed through the
-    // EXISTING, UNCHANGED gate -> planDecisionExecution -> atomic RPCs ->
+    const vetoOutcomeByAsset = new Map<AssetSymbol, VetoOutcome>()
+    const managementOutcomeByAsset = new Map<AssetSymbol, ManagementOutcome>()
+    // Seeded from a news-provider failure, but only when the model layer is
+    // actually on — disabling it means news stops mattering at all, so a
+    // feed outage shouldn't block trading in that mode. Fails every
+    // candidate of both kinds closed without spending an API call on a
+    // request we already know is missing its news context.
+    let modelCallFailedReason: string | null =
+      settings.newsVetoEnabled && newsProviderFailedReason
+        ? `news retrieval failed, blocking model-assisted decisions this cycle: ${newsProviderFailedReason}`
+        : null
+    let modelVersion: string | null = null
+    let modelRawRequest: unknown = null
+    let modelRawResponse: unknown = null
+
+    if (settings.newsVetoEnabled && (vetoCandidates.length > 0 || managementCandidates.length > 0) && modelCallFailedReason === null) {
+      try {
+        // NAV/cash/exposure as of right now (Pass 1 has made no
+        // executions yet) — the same instant the existing veto call has
+        // always used, just now also passed to the management side of
+        // the same request.
+        const navForCall = currentNav()
+        const totalExposureUsd = [...openPositionsByAsset.values()].reduce(
+          (sum, p) => sum + p.quantity * (latestPriceByAsset.get(p.asset) ?? p.entryPrice),
+          0,
+        )
+        const totalExposurePct = navForCall > 0 ? totalExposureUsd / navForCall : 0
+
+        const portfolioResult = await requestPortfolioDecisions(
+          vetoCandidates,
+          managementCandidates,
+          navForCall,
+          runningCash,
+          totalExposurePct,
+          typesafeApiKey,
+          fetchImpl,
+        )
+        for (const outcome of portfolioResult.vetoOutcomes) vetoOutcomeByAsset.set(outcome.asset, outcome)
+        for (const outcome of portfolioResult.managementOutcomes) managementOutcomeByAsset.set(outcome.asset, outcome)
+        modelVersion = portfolioResult.modelVersion
+        modelRawRequest = portfolioResult.rawRequest
+        modelRawResponse = portfolioResult.rawResponse
+      } catch (error) {
+        modelCallFailedReason = error instanceof Error ? error.message : String(error)
+      }
+    }
+
+    // --- Pass 2: apply the veto/management outcome (if any), then proceed
+    // through the risk gate -> planDecisionExecution -> atomic RPCs ->
     // persistence, per asset, in order — later assets in this pass DO see
     // earlier ones' executed effects on cash/openPositionsByAsset, same as
     // the single-pass loop this replaces.
@@ -489,35 +544,137 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
       let finalProposal: ModelDecisionProposal = candidate
       let modelVetoedValue: boolean | null = null
       let modelVersionForRow = 'not-called'
+      // Which question set this row's prompt_version reflects — veto by
+      // default (matches pre-Phase-2 behavior for every not-called row),
+      // overridden to the management version specifically when this
+      // asset was a management candidate (whether or not the call
+      // actually succeeded — the version describes which question WOULD
+      // apply, same as JEV_QUESTION_VERSION already did for a failed/
+      // not-called veto row).
+      let promptVersionForRow: string = JEV_QUESTION_VERSION
       let outputPayloadForRow: unknown = null
+      // Phase 2 (2026-09-22/23) provenance — null unless this asset was a
+      // management candidate this cycle (see agent_decisions' own new
+      // columns, migration 20260923060000).
+      let proposedActionForRow: string | null = null
+      let proposedActionConfidenceForRow: number | null = null
+      let proposedAdjustNotionalForRow: number | null = null
+      let executedAdjustNotionalForRow: number | null = null
+      let stopLossPriceBeforeForRow: number | null = null
+      let stopLossPriceAfterForRow: number | null = null
+      let takeProfitPriceBeforeForRow: number | null = null
+      let takeProfitPriceAfterForRow: number | null = null
+      let protectionRejectionReasonForRow: string | null = null
+
+      // Computed once, up front, so both branches below (and the sizing/
+      // gate context further down) can reuse the identical value rather
+      // than recomputing currentNav() redundantly mid-branch.
+      const nav = currentNav()
 
       if (candidate.action === 'OPEN_LONG') {
-        if (vetoCallFailedReason !== null) {
+        if (modelCallFailedReason !== null) {
           modelVersionForRow = 'call-failed'
-          outputPayloadForRow = { error: vetoCallFailedReason }
-          finalProposal = vetoedHoldProposal(asset, `veto call failed, failing closed: ${vetoCallFailedReason}`)
+          outputPayloadForRow = { provider: 'typesafe-jev', error: modelCallFailedReason }
+          finalProposal = vetoedHoldProposal(asset, `veto call failed, failing closed: ${modelCallFailedReason}`)
           // modelVetoedValue stays null — no completed model verdict this
           // cycle (AgentDecision.modelVetoed's own doc comment); the
           // failure itself is fully captured in the proposal's reasons
           // text and in outputPayloadForRow above instead.
         } else {
-          const verdict = verdictByAsset.get(asset)
-          if (verdict) {
-            // vetoModelVersion/vetoRawOutputPayload are always set
-            // together with verdictByAsset entries (the same successful-
-            // call branch above) — never null here by construction.
-            modelVersionForRow = vetoModelVersion!
-            outputPayloadForRow = vetoRawOutputPayload
-            modelVetoedValue = verdict.veto
-            if (verdict.veto) finalProposal = vetoedHoldProposal(asset, verdict.rationale)
+          const outcome = vetoOutcomeByAsset.get(asset)
+          if (outcome) {
+            // modelVersion/modelRawRequest/modelRawResponse are always set
+            // together with vetoOutcomeByAsset entries (the same
+            // successful-call branch above) — never null here by
+            // construction.
+            modelVersionForRow = modelVersion!
+            // noul/derivedVeto are per-asset even though request/response
+            // are the shared batch payload (every candidate in one call
+            // legitimately shares the same raw request/response). Jev
+            // returns no rationale text; noul is the raw calibrated
+            // probability, persisted verbatim so the provisional
+            // threshold (model/jev/question.ts) can be revisited later
+            // as a query over real observations rather than a replay.
+            outputPayloadForRow = {
+              provider: 'typesafe-jev',
+              request: modelRawRequest,
+              response: modelRawResponse,
+              threshold: JEV_VETO_THRESHOLD,
+              noul: outcome.noul,
+              derivedVeto: outcome.veto,
+            }
+            modelVetoedValue = outcome.veto
+            // The ALLOW-is-strict-pass-through guarantee lives in this
+            // function, not here — see cycle/apply-veto.ts's own comment
+            // and cycle/apply-veto.test.ts for the regression test.
+            finalProposal = applyVetoOutcome(candidate, asset, outcome, assetInput.news.length)
           }
           // else: news_veto_enabled is false — no call was ever attempted
           // for this candidate; it proceeds unvetoed, and the row
           // correctly records "not-called" / null.
         }
+      } else if (openPosition && candidate.action === 'HOLD') {
+        // Phase 2 — portfolio management. Only reached when Pass 1's own
+        // deterministic candidate for this OPEN position is HOLD (the
+        // regime is intact) — a regime-flip CLOSE never reaches here, and
+        // is never overridable by Jev (see the batched-call comment
+        // above).
+        stopLossPriceBeforeForRow = openPosition.stopLossPrice
+        takeProfitPriceBeforeForRow = openPosition.takeProfitPrice
+        promptVersionForRow = MANAGEMENT_QUESTION_VERSION
+
+        if (modelCallFailedReason !== null) {
+          modelVersionForRow = 'call-failed'
+          outputPayloadForRow = { provider: 'typesafe-jev', error: modelCallFailedReason }
+          // finalProposal stays as candidate (HOLD) — unmanaged this
+          // cycle. No ADD, no REDUCE, no Jev-originated CLOSE, no
+          // protection change; the position's existing SL/TP keep
+          // protecting it exactly as before, and position-monitor is
+          // entirely unaffected.
+        } else {
+          const outcome = managementOutcomeByAsset.get(asset)
+          if (outcome) {
+            modelVersionForRow = modelVersion!
+            proposedActionForRow = outcome.action
+            proposedActionConfidenceForRow = outcome.actionConfidence
+
+            const positionContext: ManagementPositionContext = {
+              direction: openPosition.direction,
+              entryPrice: openPosition.entryPrice,
+              currentPrice: assetMarketData.price,
+              stopLossPrice: openPosition.stopLossPrice,
+              takeProfitPrice: openPosition.takeProfitPrice,
+              atrPct: assetInput.market.indicators.atrPct,
+              minStopLossPct: settings.slTpBounds.minStopLossPct,
+            }
+            finalProposal = applyManagementOutcome(candidate, asset, outcome, positionContext)
+
+            // Observability-only figures (migration plan §12) — the
+            // UNCAPPED amount Jev's magnitude implies, computed via the
+            // same exported pure sizing function the gate itself calls
+            // (reuse, not a second implementation of its math). The
+            // ACTUAL executed amount (post-cap) is set further below,
+            // once the gate result is known.
+            if (outcome.action === 'ADD') {
+              const riskBasedMaxAdd = deriveRiskBasedNotional(nav, appetite.riskBudgetPct, assetMarketData.price, openPosition.stopLossPrice)
+              proposedAdjustNotionalForRow = riskBasedMaxAdd * outcome.addMagnitude
+            } else if (outcome.action === 'REDUCE') {
+              proposedAdjustNotionalForRow = outcome.reduceMagnitude * openPosition.quantity * assetMarketData.price
+            }
+
+            outputPayloadForRow = {
+              provider: 'typesafe-jev',
+              request: modelRawRequest,
+              response: modelRawResponse,
+              managementOutcome: outcome,
+            }
+          }
+          // else: news_veto_enabled is false — no call was ever attempted
+          // for this position; it proceeds unmanaged (HOLD stands), and
+          // the row correctly records "not-called" / null.
+        }
       }
 
-      const nav = currentNav()
       const payload: ModelCallPayload = {
         portfolio: { cash: runningCash, nav, constraints: buildPortfolioConstraints(appetite.minConfidence, settings.slTpBounds) },
         assets: [assetInput],
@@ -550,8 +707,49 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         otherSameDirectionNotionalUsd,
         peakNav,
         drawdownBreakerFloorPct: settings.drawdownBreakerFloorPct,
+        feeBps: settings.feeBps,
+        slippageBps: settings.slippageBps,
+        minTradeNotionalPct: settings.minTradeNotionalPct,
+        minTradeNotionalUsd: settings.minTradeNotionalUsd,
       })
       const gateResult = evaluateRiskGate(finalProposal, gateContext)
+
+      // Phase 2 — finalize the executed-side provenance now that the gate
+      // has actually run, and apply the one normalization the gate itself
+      // signals rather than rejects: an ADD/REDUCE below the minimum
+      // trade notional comes back `not_applicable` (§4/§9 of the
+      // migration plan — "not a rejection, nothing was wrong, just too
+      // small to be worth a fill"), which is normalized here to the
+      // ORIGINAL HOLD candidate for persistence. Reusing this SAME gate
+      // result is deliberate: `not_applicable` already means exactly what
+      // a HOLD's own risk status means ("nothing to gate"), so no second
+      // gate call is needed.
+      if (finalProposal.action === 'ADD') {
+        if (gateResult.riskStatus === 'approved' || gateResult.riskStatus === 'clamped') {
+          executedAdjustNotionalForRow = gateResult.approvedAdjustNotionalUsd
+        } else if (gateResult.riskStatus === 'not_applicable') {
+          finalProposal = candidate
+        }
+      } else if (finalProposal.action === 'REDUCE') {
+        if (gateResult.riskStatus === 'approved') {
+          executedAdjustNotionalForRow = (gateResult.approvedReduceQuantity ?? 0) * assetMarketData.price
+        } else if (gateResult.riskStatus === 'not_applicable') {
+          finalProposal = candidate
+        }
+      } else if (finalProposal.action === 'MODIFY_PROTECTION') {
+        if (gateResult.riskStatus === 'approved') {
+          stopLossPriceAfterForRow = gateResult.computedStopLossPrice
+          takeProfitPriceAfterForRow = gateResult.computedTakeProfitPrice
+        } else if (gateResult.riskStatus === 'rejected') {
+          // A genuine rejection (e.g. a widen attempt) stays visible as a
+          // rejected MODIFY_PROTECTION in the decision feed — unlike the
+          // ADD/REDUCE-too-small case above, this is NOT a normalization;
+          // Jev's request was denied, and that denial is exactly what
+          // should show up, matching how a rejected OPEN_LONG is
+          // persisted as action='OPEN_LONG', risk_status='rejected'.
+          protectionRejectionReasonForRow = gateResult.riskReason
+        }
+      }
 
       const decisionId = crypto.randomUUID()
       const plan = planDecisionExecution({
@@ -606,9 +804,21 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         effective_portfolio_risk_ceiling_pct: settings.portfolioRiskCeilingMultiplier * appetite.riskBudgetPct,
         effective_max_total_notional_pct: settings.maxTotalNotionalPct,
         size_cap_applied: gateResult.sizeCapApplied,
+        // Phase 2 (2026-09-22/23) provenance — null on every pre-Phase-2
+        // row and on any row where no management question was ever asked
+        // (see the field-by-field comments above where each is set).
+        proposed_action: proposedActionForRow,
+        proposed_action_confidence: proposedActionConfidenceForRow,
+        proposed_adjust_notional: proposedAdjustNotionalForRow,
+        executed_adjust_notional: executedAdjustNotionalForRow,
+        stop_loss_price_before: stopLossPriceBeforeForRow,
+        stop_loss_price_after: stopLossPriceAfterForRow,
+        take_profit_price_before: takeProfitPriceBeforeForRow,
+        take_profit_price_after: takeProfitPriceAfterForRow,
+        protection_rejection_reason: protectionRejectionReasonForRow,
         input_payload: payload,
         output_payload: outputPayloadForRow,
-        prompt_version: VETO_PROMPT_VERSION,
+        prompt_version: promptVersionForRow,
         model_version: modelVersionForRow,
         strategy_version: 'v1-regime',
         model_vetoed: modelVetoedValue,
@@ -691,6 +901,108 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
           runningCash = Number(outcome.cash_after ?? runningCash)
           realizedPnlThisRun += realizedPnl
         }
+      } else if (plan.kind === 'add') {
+        // Phase 2 (2026-09-22/23) — ADD. adjust_position_atomic mutates
+        // the ONE open row in place (quantity/entry_price/cost_basis) —
+        // never a second position row; positions_one_open_per_asset_idx
+        // stays satisfied throughout. p_realized_pnl is null: nothing is
+        // realized on an ADD.
+        const { updatedPosition, trade } = plan.addResult
+        const { data: rpcData, error: rpcError } = await supabase.rpc('adjust_position_atomic', {
+          p_position_id: updatedPosition.id,
+          p_new_quantity: updatedPosition.quantity,
+          p_new_entry_price: updatedPosition.entryPrice,
+          p_new_cost_basis: updatedPosition.costBasis,
+          p_realized_pnl: null,
+          p_trade_id: trade.id,
+          p_side: trade.side,
+          p_trade_quantity: trade.quantity,
+          p_reference_price: trade.referencePrice,
+          p_fill_price: trade.fillPrice,
+          p_fee: trade.fee,
+          p_slippage_cost: trade.slippageCost,
+          p_gross_value: trade.grossValue,
+          p_net_cash_delta: trade.netCashDelta,
+          p_executed_at: trade.executedAt,
+          p_intent: trade.intent,
+          p_decision_id: decisionId,
+        })
+        if (rpcError) throw new Error(`adjust_position_atomic (ADD) failed for ${asset}: ${rpcError.message}`)
+        const outcome = Array.isArray(rpcData) ? rpcData[0] : rpcData
+        if (!outcome?.won_race) {
+          // The position monitor closed it first between this cycle's
+          // read and this attempt — same race shape as a CLOSE, failing
+          // safely: no cash movement, no position mutation, nothing
+          // executes.
+          finalRiskStatus = 'rejected'
+          await supabase.from('agent_decisions').update({
+            risk_status: finalRiskStatus,
+            risk_reason: 'position already closed by another path before the ADD could execute',
+          }).eq('id', decisionId)
+        } else {
+          runningCash = Number(outcome.cash_after ?? runningCash)
+          openPositionsByAsset.set(asset, updatedPosition)
+        }
+      } else if (plan.kind === 'reduce') {
+        // Phase 2 — REDUCE. Same RPC as ADD (both only ever mutate
+        // quantity/entry_price/cost_basis on the one open row) —
+        // p_realized_pnl is populated here (the realized portion), unlike
+        // ADD's null.
+        const { updatedPosition, trade, realizedPnl } = plan.reduceResult
+        const { data: rpcData, error: rpcError } = await supabase.rpc('adjust_position_atomic', {
+          p_position_id: updatedPosition.id,
+          p_new_quantity: updatedPosition.quantity,
+          p_new_entry_price: updatedPosition.entryPrice,
+          p_new_cost_basis: updatedPosition.costBasis,
+          p_realized_pnl: realizedPnl,
+          p_trade_id: trade.id,
+          p_side: trade.side,
+          p_trade_quantity: trade.quantity,
+          p_reference_price: trade.referencePrice,
+          p_fill_price: trade.fillPrice,
+          p_fee: trade.fee,
+          p_slippage_cost: trade.slippageCost,
+          p_gross_value: trade.grossValue,
+          p_net_cash_delta: trade.netCashDelta,
+          p_executed_at: trade.executedAt,
+          p_intent: trade.intent,
+          p_decision_id: decisionId,
+        })
+        if (rpcError) throw new Error(`adjust_position_atomic (REDUCE) failed for ${asset}: ${rpcError.message}`)
+        const outcome = Array.isArray(rpcData) ? rpcData[0] : rpcData
+        if (!outcome?.won_race) {
+          finalRiskStatus = 'rejected'
+          await supabase.from('agent_decisions').update({
+            risk_status: finalRiskStatus,
+            risk_reason: 'position already closed by another path before the REDUCE could execute',
+          }).eq('id', decisionId)
+        } else {
+          runningCash = Number(outcome.cash_after ?? runningCash)
+          openPositionsByAsset.set(asset, updatedPosition)
+          realizedPnlThisRun += realizedPnl
+        }
+      } else if (plan.kind === 'modifyProtection') {
+        // Phase 2 — MODIFY_PROTECTION. No trade, no cash effect — just
+        // the two position fields the gate already fully validated
+        // (ordering, configured bounds, exhaustion, and that a stop never
+        // widens).
+        const { updatedPosition } = plan
+        const { data: rpcData, error: rpcError } = await supabase.rpc('modify_protection_atomic', {
+          p_position_id: updatedPosition.id,
+          p_stop_loss_price: updatedPosition.stopLossPrice,
+          p_take_profit_price: updatedPosition.takeProfitPrice,
+        })
+        if (rpcError) throw new Error(`modify_protection_atomic failed for ${asset}: ${rpcError.message}`)
+        const outcome = Array.isArray(rpcData) ? rpcData[0] : rpcData
+        if (!outcome?.won_race) {
+          finalRiskStatus = 'rejected'
+          await supabase.from('agent_decisions').update({
+            risk_status: finalRiskStatus,
+            risk_reason: 'position already closed by another path before protection could be modified',
+          }).eq('id', decisionId)
+        } else {
+          openPositionsByAsset.set(asset, updatedPosition)
+        }
       }
 
       decisions.push({ asset, action: finalProposal.action, riskStatus: finalRiskStatus })
@@ -771,15 +1083,18 @@ Deno.serve(async (req) => {
   const trigger = parseTrigger(body)
 
   const supabase = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!)
-  // Single paid-tier key (user, 2026-09-19) — the free-tier 3-key
-  // rotation is retired; callModel's own loop still generalizes to N
-  // keys unchanged (model/call-model.ts), so this is the only line that
-  // needed to change to make that switch.
-  const apiKeys = [Deno.env.get('GEMINI_API_KEY_1')].filter((k): k is string => !!k)
+  // Gemini removed entirely (2026-09-22) — Jev is the sole model
+  // provider, no fallback. Falls back to '' (never undefined) when
+  // unset, matching CycleDeps.typesafeApiKey's required-string type;
+  // requestVetoDecisions' own `if (!apiKey)` check turns an empty string
+  // into an immediate JevCallError, which the veto block's existing
+  // try/catch already fails closed to HOLD from — no special-casing
+  // needed here for "key not configured."
+  const typesafeApiKey = Deno.env.get('TYPESAFE_API_KEY') ?? ''
   // CoinGecko Demo key (2026-09-22) — undefined (not empty string) when
   // unset, so coingecko.ts's own `apiKey ?` check degrades to keyless
   // access rather than sending an empty header value.
   const coingeckoApiKey = Deno.env.get('COINGECKO_API_KEY') || undefined
-  const summary = await runAgentCycle({ supabase, apiKeys, nowIso: new Date().toISOString(), trigger, coingeckoApiKey })
+  const summary = await runAgentCycle({ supabase, typesafeApiKey, nowIso: new Date().toISOString(), trigger, coingeckoApiKey })
   return new Response(JSON.stringify(summary), { headers: { ...corsHeaders, 'content-type': 'application/json' } })
 })

@@ -3,7 +3,7 @@ import { TREND_MA_LOOKBACK_DAYS } from '../../../../src/shared/strategy/types.ts
 import type { RegimeResult } from '../../../../src/shared/strategy/types.ts'
 
 // trading-strategy-v1.md §7 — the entire directional signal. Pure: no
-// Gemini, no Supabase, no I/O, no sizing. Mirrors indicators/calculate.ts's
+// model, no Supabase, no I/O, no sizing. Mirrors indicators/calculate.ts's
 // own split (types in src/shared/, computation here) and its fail-closed
 // convention (InsufficientDataError, reused rather than a parallel class
 // for the identical failure mode).
