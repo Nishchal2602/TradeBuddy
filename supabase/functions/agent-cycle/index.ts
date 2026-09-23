@@ -4,7 +4,6 @@ import { CoinGeckoMarketDataProvider } from './providers/coingecko.ts'
 import { RssNewsProvider } from './providers/rss-news.ts'
 import { requestPortfolioDecisions, JEV_QUESTION_VERSION, JEV_VETO_THRESHOLD, MANAGEMENT_QUESTION_VERSION } from './model/jev/provider.ts'
 import type { VetoOutcome, ManagementOutcome } from './model/jev/provider.ts'
-import type { ManagementCandidateInput } from './model/jev/management-question.ts'
 import { buildPortfolioConstraints, buildAssetInput, buildRiskGateContext, checkMarketDataFreshness, aggregateOtherOpenPositionsRisk } from './cycle/build-context.ts'
 import type { PersistedNewsItem } from './cycle/build-context.ts'
 import { evaluateTrendRegime } from './strategy/regime.ts'
@@ -12,6 +11,7 @@ import { buildCandidateProposal, vetoedHoldProposal } from './strategy/rules.ts'
 import { applyVetoOutcome } from './cycle/apply-veto.ts'
 import { applyManagementOutcome } from './cycle/apply-management.ts'
 import type { ManagementPositionContext } from './cycle/apply-management.ts'
+import { collectModelCandidates, shouldCallModel } from './cycle/collect-candidates.ts'
 import { planDecisionExecution } from './cycle/plan-decision.ts'
 import { derivePrimaryDriver, citedNewsIds } from './cycle/decision-record.ts'
 import { computeNav } from './broker/accounting.ts'
@@ -29,7 +29,7 @@ import type { AssetSymbol, NormalizedMarketData } from '../../../src/shared/mark
 import type { Position } from '../../../src/shared/positions/types.ts'
 import type { InvalidationCondition, Action, ModelDecisionProposal } from '../../../src/shared/decisions/types.ts'
 import type { RegimeResult } from '../../../src/shared/strategy/types.ts'
-import type { AssetInput, ModelCallPayload, RecentDecisionInput, VetoCandidateInput } from './model/payload.ts'
+import type { AssetInput, ModelCallPayload, RecentDecisionInput } from './model/payload.ts'
 import type { NormalizedNewsItem } from '../../../src/shared/news/types.ts'
 
 // The thin I/O shell around the pure decision core (cycle/build-context.ts,
@@ -61,6 +61,13 @@ interface Settings {
   maxTotalNotionalPct: number
   drawdownBreakerFloorPct: number
   newsVetoEnabled: boolean
+  // Phase 2.1 (2026-09-23) — gates ONLY the portfolio-management layer
+  // (HOLD/ADD/REDUCE/CLOSE/MODIFY_PROTECTION on an already-open
+  // position), independent of newsVetoEnabled above (which gates ONLY
+  // the entry-veto layer). The two shared one flag for the first hour of
+  // Phase 2's deployment — a real defect, see
+  // cycle/collect-candidates.ts's own comment for the fix.
+  managementEnabled: boolean
   // Phase 2 (2026-09-22/23) — provisional minimum-trade-notional floor;
   // applies to ADD and a partial REDUCE only, never to a full CLOSE.
   minTradeNotionalPct: number
@@ -92,6 +99,7 @@ async function readSettings(supabase: SupabaseClient): Promise<Settings> {
     maxTotalNotionalPct: Number(data.max_total_notional_pct),
     drawdownBreakerFloorPct: Number(data.drawdown_breaker_floor_pct),
     newsVetoEnabled: data.news_veto_enabled,
+    managementEnabled: data.management_enabled,
     minTradeNotionalPct: Number(data.min_trade_notional_pct),
     minTradeNotionalUsd: Number(data.min_trade_notional_usd),
   }
@@ -452,56 +460,62 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
     }
 
     // --- Batched veto + management call (Gemini -> Jev migration,
-    // 2026-09-22; Phase 2 "portfolio management," 2026-09-22/23) ----------
+    // 2026-09-22; Phase 2 "portfolio management," 2026-09-22/23; Phase 2.1
+    // "decouple entry eligibility from position management," 2026-09-23)
+    // ------------------------------------------------------------------
     // At most ONE model call this cycle, covering BOTH kinds of candidate
     // in the SAME request: veto questions for FLAT assets with an
     // OPEN_LONG candidate (trading-strategy-v1.md §11-12, unchanged), and
     // management questions for OPEN assets whose regime is still intact
     // this cycle (Pass 1's own candidate is HOLD — a regime-flip CLOSE is
-    // authoritative and never routed through Jev at all). Zero candidates
-    // of either kind (or news_veto_enabled = false) means zero calls. No
-    // fallback provider exists — a failed call fails every candidate of
-    // BOTH kinds closed (veto -> HOLD; management -> unmanaged HOLD),
-    // never an implicit approval or an implicit action.
-    const vetoCandidates: VetoCandidateInput[] = []
-    const managementCandidates: ManagementCandidateInput[] = []
-    for (const r of passOneResults) {
-      if (r.candidate.action === 'OPEN_LONG') {
-        vetoCandidates.push({ asset: r.asset, news: r.assetInput.news })
-      } else if (r.openPosition && r.candidate.action === 'HOLD') {
-        managementCandidates.push({
-          asset: r.asset,
-          direction: r.openPosition.direction,
-          entryPrice: r.openPosition.entryPrice,
-          currentPrice: r.assetMarketData.price,
-          quantity: r.openPosition.quantity,
-          stopLossPrice: r.openPosition.stopLossPrice,
-          takeProfitPrice: r.openPosition.takeProfitPrice,
-          heldHours: (new Date(nowIso).getTime() - new Date(r.openPosition.openedAt).getTime()) / 3_600_000,
-          feeBps: settings.feeBps,
-          slippageBps: settings.slippageBps,
-          atrPct: r.assetInput.market.indicators.atrPct,
-          news: r.assetInput.news,
-        })
-      }
-    }
+    // authoritative and never routed through Jev at all — the thesis-
+    // invalidation rule is not Jev-overridable in either direction).
+    //
+    // Collection and the call decision are two SEPARATE, independently
+    // testable functions (cycle/collect-candidates.ts) — Phase 2 gated
+    // both behind news_veto_enabled alone, which silently disabled
+    // management whenever the entry veto was turned off (two unrelated
+    // product decisions sharing one switch). Each candidate type now has
+    // its own flag, read only by its own branch inside
+    // collectModelCandidates. No fallback provider exists — a failed call
+    // fails every candidate of BOTH kinds closed (veto -> HOLD; management
+    // -> unmanaged HOLD), never an implicit approval or an implicit
+    // action. See CLAUDE.md's "news-provider failure" invariant: a failed
+    // news fetch fails BOTH layers closed for the cycle, deliberately — a
+    // quiet cycle can mean the model was never called, not that it chose
+    // HOLD; agent_decisions.model_version ('jev-*' vs 'call-failed' vs
+    // 'not-called') is what disambiguates the two after the fact.
+    const { vetoCandidates, managementCandidates } = collectModelCandidates(
+      passOneResults.map((r) => ({
+        asset: r.asset,
+        candidate: r.candidate,
+        openPosition: r.openPosition,
+        news: r.assetInput.news,
+        currentPrice: r.assetMarketData.price,
+        atrPct: r.assetInput.market.indicators.atrPct,
+      })),
+      { newsVetoEnabled: settings.newsVetoEnabled, managementEnabled: settings.managementEnabled, feeBps: settings.feeBps, slippageBps: settings.slippageBps },
+      nowIso,
+    )
 
     const vetoOutcomeByAsset = new Map<AssetSymbol, VetoOutcome>()
     const managementOutcomeByAsset = new Map<AssetSymbol, ManagementOutcome>()
-    // Seeded from a news-provider failure, but only when the model layer is
-    // actually on — disabling it means news stops mattering at all, so a
-    // feed outage shouldn't block trading in that mode. Fails every
-    // candidate of both kinds closed without spending an API call on a
-    // request we already know is missing its news context.
+    // Seeded from a news-provider failure, but only when at least one
+    // model layer is actually on — disabling BOTH means news stops
+    // mattering to the model at all, so a feed outage shouldn't block
+    // trading in that mode. Fails every candidate of both kinds closed
+    // without spending an API call on a request we already know is
+    // missing its news context.
+    const anyModelLayerEnabled = settings.newsVetoEnabled || settings.managementEnabled
     let modelCallFailedReason: string | null =
-      settings.newsVetoEnabled && newsProviderFailedReason
+      anyModelLayerEnabled && newsProviderFailedReason
         ? `news retrieval failed, blocking model-assisted decisions this cycle: ${newsProviderFailedReason}`
         : null
     let modelVersion: string | null = null
     let modelRawRequest: unknown = null
     let modelRawResponse: unknown = null
 
-    if (settings.newsVetoEnabled && (vetoCandidates.length > 0 || managementCandidates.length > 0) && modelCallFailedReason === null) {
+    if (shouldCallModel(vetoCandidates, managementCandidates, modelCallFailedReason)) {
       try {
         // NAV/cash/exposure as of right now (Pass 1 has made no
         // executions yet) — the same instant the existing veto call has
@@ -609,9 +623,11 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
             // and cycle/apply-veto.test.ts for the regression test.
             finalProposal = applyVetoOutcome(candidate, asset, outcome, assetInput.news.length)
           }
-          // else: news_veto_enabled is false — no call was ever attempted
-          // for this candidate; it proceeds unvetoed, and the row
-          // correctly records "not-called" / null.
+          // else: news_veto_enabled is false — this candidate was never
+          // collected (cycle/collect-candidates.ts's own veto branch
+          // reads only this flag), so no call was ever attempted for it;
+          // it proceeds unvetoed, and the row correctly records
+          // "not-called" / null.
         }
       } else if (openPosition && candidate.action === 'HOLD') {
         // Phase 2 — portfolio management. Only reached when Pass 1's own
@@ -669,9 +685,12 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
               managementOutcome: outcome,
             }
           }
-          // else: news_veto_enabled is false — no call was ever attempted
-          // for this position; it proceeds unmanaged (HOLD stands), and
-          // the row correctly records "not-called" / null.
+          // else: management_enabled is false — this position was never
+          // collected (cycle/collect-candidates.ts's own management
+          // branch reads only that flag, independent of
+          // news_veto_enabled), so no call was ever attempted for it; it
+          // proceeds unmanaged (HOLD stands), and the row correctly
+          // records "not-called" / null.
         }
       }
 

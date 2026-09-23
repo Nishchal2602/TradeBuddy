@@ -1,6 +1,8 @@
 import { assertAlmostEquals, assertEquals, assertStrictEquals } from 'jsr:@std/assert@1'
 import { applyManagementOutcome } from './apply-management.ts'
 import type { ManagementPositionContext } from './apply-management.ts'
+import { evaluateRiskGate } from '../../../../src/shared/risk/gate.ts'
+import type { RiskGateContext } from '../../../../src/shared/risk/gate.ts'
 import type { ModelDecisionProposal } from '../../../../src/shared/decisions/types.ts'
 import type { ManagementOutcome } from '../model/jev/provider.ts'
 
@@ -138,4 +140,102 @@ Deno.test('applyManagementOutcome: actionConfidence is carried onto every non-HO
   const result = applyManagementOutcome(holdCandidate(), 'BTC', outcome({ action: 'CLOSE', actionConfidence: 0.12 }), LONG_POSITION)
   assertEquals(result.action, 'CLOSE')
   assertEquals(result.confidence, 0.12, 'a low-confidence CLOSE still executes — this is the specific regression the migration plan v1 exists to avoid')
+})
+
+// --- Phase 2.1 (2026-09-23), test 4: "bullish thesis intact must not
+// prevent management processing" -------------------------------------------
+//
+// Regression protection for the actual invariant Phase 2.1 is about: an
+// OPEN position whose deterministic thesis is INTACT (regime still UP,
+// Pass 1's own candidate is HOLD — exactly what holdCandidate() below
+// represents) must still let every one of REDUCE/CLOSE/ADD/
+// MODIFY_PROTECTION run the FULL chain — applyManagementOutcome ->
+// deterministic sizing/price -> evaluateRiskGate — and receive a real
+// verdict, not be short-circuited because "the thesis says stay in."
+// collect-candidates.test.ts already proves the candidate reaches this
+// far; these tests prove what happens once it does.
+
+// One shared, generous gate context so every action in this block is
+// judged on the SAME open, in-profit, thesis-intact position — entry 100,
+// current price 120 (up 20%), matching LONG_POSITION above exactly so
+// there's one number system across this whole file. Caps are
+// deliberately wide (not the tight SEEDED_BOUNDS other gate tests use)
+// so a real verdict — not an incidental cap/bound rejection unrelated to
+// what's being tested — is what each assertion actually exercises.
+function intactThesisGateContext(overrides: Partial<RiskGateContext> = {}): RiskGateContext {
+  return {
+    currentState: 'LONG',
+    entryPrice: 120, // CURRENT market price (gate.ts's naming) — the position's own entry (100) lives on openPosition below
+    nav: 10_000,
+    cash: 10_000,
+    effectiveMinConfidence: 0,
+    effectiveRiskBudgetPct: 0.05,
+    effectiveSingleTradeCapPct: 0.50,
+    effectiveAssetExposureCapPct: 0.50,
+    slTpBounds: { minStopLossPct: 0.005, maxStopLossPct: 0.50, minTakeProfitPct: 0.005, maxTakeProfitPct: 0.90 },
+    currentAssetExposureUsd: 120,
+    stopOutReentryBlockMinutes: 360,
+    recentStopLossClose: null,
+    nowIso: '2026-09-23T12:00:00.000Z',
+    portfolioRiskCeilingUsd: 100_000,
+    otherOpenPositionsRiskAtStopUsd: 0,
+    maxTotalNotionalUsd: 100_000,
+    otherSameDirectionNotionalUsd: 0,
+    peakNav: 10_000,
+    drawdownBreakerFloorPct: 0.90,
+    openPosition: { quantity: 1, entryPrice: 100, stopLossPrice: 90, takeProfitPrice: 180 },
+    feeBps: 10,
+    slippageBps: 5,
+    minTradeNotionalPct: 0.001,
+    minTradeNotionalUsd: 1,
+    ...overrides,
+  }
+}
+
+Deno.test('Phase 2.1 test 4 — REDUCE: intact-thesis HOLD -> management normalization -> deterministic sizing -> risk gate -> a real approved verdict', () => {
+  const candidate = holdCandidate() // the thesis is INTACT — daily close still above the 50-day MA
+  const managed = applyManagementOutcome(candidate, 'BTC', outcome({ action: 'REDUCE', reduceMagnitude: 0.25 }), LONG_POSITION)
+  assertEquals(managed.action, 'REDUCE', 'an intact thesis must not have silently kept this as HOLD')
+
+  const result = evaluateRiskGate(managed, intactThesisGateContext())
+  assertEquals(result.riskStatus, 'approved', 'REDUCE must reach a real deterministic verdict, not be blocked by the thesis still being intact')
+  assertAlmostEquals(result.approvedReduceQuantity!, 0.25, 1e-9)
+  assertAlmostEquals(result.approvedAdjustNotionalUsd!, 30, 1e-9) // 0.25 qty * 120 current price
+})
+
+Deno.test('Phase 2.1 test 4 — CLOSE: intact-thesis HOLD -> management normalization -> risk gate -> approved (exits are never blocked, thesis or no)', () => {
+  const candidate = holdCandidate()
+  const managed = applyManagementOutcome(candidate, 'BTC', outcome({ action: 'CLOSE', actionConfidence: 0.7 }), LONG_POSITION)
+  assertEquals(managed.action, 'CLOSE')
+
+  const result = evaluateRiskGate(managed, intactThesisGateContext())
+  assertEquals(result.riskStatus, 'approved', "an intact bullish thesis is not a reason to reject a model-originated CLOSE — trading-domain-contract.md's 'exits must always be actionable' applies here too")
+})
+
+Deno.test('Phase 2.1 test 4 — ADD: intact-thesis HOLD -> bounded magnitude -> risk-derived ceiling -> caps applied -> approved', () => {
+  const candidate = holdCandidate()
+  const managed = applyManagementOutcome(candidate, 'BTC', outcome({ action: 'ADD', addMagnitude: 0.5 }), LONG_POSITION)
+  assertEquals(managed.action, 'ADD')
+  if (managed.action !== 'ADD') throw new Error('unreachable')
+  assertEquals(managed.addMagnitude, 0.5, 'still only a bounded fraction reaching the gate, never a dollar figure')
+
+  const result = evaluateRiskGate(managed, intactThesisGateContext())
+  assertEquals(result.riskStatus, 'approved', 'an intact thesis is precisely the case ADD exists for — additional conviction on a working trade')
+  // riskBasedMaxAdd = (nav*riskBudgetPct / |entry-stop|) * entry = (500/30)*120 = 2000; * addMagnitude(0.5) = 1000.
+  assertAlmostEquals(result.approvedAdjustNotionalUsd!, 1000, 1e-6)
+})
+
+Deno.test('Phase 2.1 test 4 — MODIFY_PROTECTION: intact-thesis HOLD -> tighten-only stop intent -> deterministic price -> risk gate validates -> approved, quantity untouched', () => {
+  const candidate = holdCandidate()
+  const managed = applyManagementOutcome(candidate, 'BTC', outcome({ action: 'MODIFY_PROTECTION', stopIntent: 'TIGHTEN_TO_BREAKEVEN', targetIntent: 'KEEP' }), LONG_POSITION)
+  assertEquals(managed.action, 'MODIFY_PROTECTION')
+  if (managed.action !== 'MODIFY_PROTECTION') throw new Error('unreachable')
+  assertEquals(managed.proposedStopLossPrice, 99.5)
+
+  const result = evaluateRiskGate(managed, intactThesisGateContext())
+  assertEquals(result.riskStatus, 'approved')
+  assertEquals(result.computedStopLossPrice, 99.5, 'the tightened stop is what the gate leaves in place')
+  assertEquals(result.computedTakeProfitPrice, 180, 'KEEP on the target leg — the existing TP is preserved unchanged')
+  assertEquals(result.approvedSizePct, null, 'MODIFY_PROTECTION never touches size')
+  assertEquals(result.approvedAdjustNotionalUsd, null, 'and never touches quantity')
 })
