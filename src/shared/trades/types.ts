@@ -44,7 +44,10 @@ const agentCloseFields = {
 }
 const automaticCloseFields = {
   decisionId: z.null(),
-  triggerReason: z.enum(['stop_loss', 'take_profit', 'collateral_exhausted']),
+  // profit_giveback added 2026-09-23 — the position-monitor's Aggressive
+  // V3.1 giveback ratchet, the same automatic-close shape as
+  // stop_loss/take_profit/collateral_exhausted (decisionId null).
+  triggerReason: z.enum(['stop_loss', 'take_profit', 'collateral_exhausted', 'profit_giveback']),
 }
 
 const tradeCoreFields = {

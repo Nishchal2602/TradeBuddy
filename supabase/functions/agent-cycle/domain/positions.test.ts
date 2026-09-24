@@ -49,9 +49,9 @@ Deno.test('Position: an invalid close reason is rejected', () => {
   assertEquals(result.success, false)
 })
 
-Deno.test('CloseReason: exactly the four values the contract defines', () => {
+Deno.test('CloseReason: exactly the five values the contract defines (profit_giveback added 2026-09-23)', () => {
   const result = CloseReason.options
-  assertEquals([...result].sort(), ['agent_close', 'collateral_exhausted', 'stop_loss', 'take_profit'])
+  assertEquals([...result].sort(), ['agent_close', 'collateral_exhausted', 'profit_giveback', 'stop_loss', 'take_profit'])
 })
 
 // --- derivePositionState --------------------------------------------------

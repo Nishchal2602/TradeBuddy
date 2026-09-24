@@ -110,6 +110,94 @@ export interface JevPositionSnapshot {
   takeProfitPrice: number
   distanceToStopPct: number
   distanceToTakeProfitPct: number
+  // --- Aggressive-only (v3.1-jev-intraday-30m, 2026-09-23) ----------------
+  // All optional and absent entirely for a Balanced-managed position —
+  // Balanced's buildPositionSnapshot never sets these, so its snapshot
+  // shape (and therefore MANAGEMENT_QUESTION_VERSION's meaning for those
+  // rows) is completely unaffected by this extension.
+  //
+  // Previously this block declared a single ambiguous `rMultiple` field
+  // that had ZERO producers anywhere in the codebase — confirmed by the
+  // live diagnosis that prompted this revision (a real Jev management
+  // call for an open position carried none of this state, only the 13
+  // required fields above). This replacement is deliberately TWO
+  // separately-named R metrics, never one (profit-recycling plan §3.1):
+  // an earlier draft of that plan itself conflated them and was caught in
+  // review — after an ADD at a worse price, price can sit +1.25R above
+  // the original entry while the position is genuinely losing money, a
+  // state a single "R" field would hide.
+  //
+  // priceR — MARKET-PATH: how far price has travelled from the ORIGINAL
+  // entry, in original-risk units. Quantity-independent. Context for
+  // Jev's trend reasoning ONLY — never read as a profit statement.
+  priceR?: number
+  // positionPnlR — ECONOMIC: actual money made or lost, in original-risk
+  // units — (unrealizedPnlUsd + partial-realized-from-REDUCE) /
+  // initialRiskUsd. THE profit metric; what the giveback ladder and the
+  // reframed management question (management-question.ts) are both
+  // denominated in.
+  positionPnlR?: number
+  // Running high-water state, monitor-sampled (position-monitor/
+  // giveback.ts) — NOT a guaranteed market maximum, hence `sampled...`,
+  // matching this file's own naming discipline below. Both are
+  // positionPnlR-basis, never priceR-basis.
+  sampledMfeR?: number
+  sampledMaeR?: number
+  // Derived from the two above — how much of the best-ever gain has
+  // already been given back, as an absolute R amount and as a ratio.
+  givebackR?: number
+  givebackRatio?: number
+  // UNPROVEN / PROVEN / DETERIORATING / GIVING_BACK — see profile-
+  // recycling plan §3.4. A coarse label alongside the raw numbers, not a
+  // replacement for them.
+  profitState?: 'UNPROVEN' | 'PROVEN' | 'DETERIORATING' | 'GIVING_BACK'
+  // Cost floor, in R units — currentRoundTripCostUsd (current quantity,
+  // both sides) / the immutable initialRiskUsd. What the +1R giveback
+  // rung's floor actually is.
+  costR?: number
+  minutesSinceEntry?: number
+  // ATR30 as percentage-as-number — the SAME figure the strategy itself
+  // reasons in for this position's own target step (registry.ts's
+  // managementAtrPctFor). Collected since Phase 2 but never actually
+  // placed in the snapshot until now — a second latent gap the same
+  // diagnosis surfaced (management-question.ts's own comment claimed it
+  // was "sent in the state" when it never was).
+  atrPct?: number
+  // Deterministic short-horizon features, frozen definitions in
+  // strategy/aggressive/features.ts — sampled from the 5-minute spot
+  // series, never provider true intraday extrema (none exist on this
+  // data tier). Named `sampled...` here too, matching that file's own
+  // naming discipline, so this never gets mistaken for a true 24h figure
+  // downstream (Jev's own reasoning, or any later analysis of what was
+  // actually sent).
+  ret15mPct?: number
+  ret30mPct?: number
+  ret60mPct?: number
+  realizedVol5m?: number
+  volumeTrendRatio?: number
+  sampledDayHighPct?: number
+  sampledDayLowPct?: number
+}
+
+// Aggressive-only (2026-09-23) — sent alongside a FLAT asset's news
+// whenever a deterministic opportunity detector fired (strategy/
+// aggressive/detectors.ts). `kind` tells Jev WHAT was objectively
+// detected (never why to act on it — that judgement is entirely Jev's
+// own, via the entry_quality/expected_move questions in
+// model/jev/entry-question.ts). Balanced never sets this field — a FLAT
+// Balanced candidate's assets[asset] entry has no `opportunity` key at
+// all, not merely an undefined one.
+export interface JevOpportunitySnapshot {
+  kind: 'MOMENTUM_BREAKOUT' | 'PULLBACK_CONTINUATION'
+  atrTargetDistancePct: number
+  estimatedRoundTripCostPct: number
+  ret15mPct: number
+  ret30mPct: number
+  ret60mPct: number
+  realizedVol5m: number
+  volumeTrendRatio: number
+  sampledDayHighPct: number
+  sampledDayLowPct: number
 }
 
 export interface JevState {
@@ -120,7 +208,7 @@ export interface JevState {
   navUsd?: number
   availableCashUsd?: number
   totalExposurePct?: number
-  assets: Record<string, { news: JevNewsItem[]; position?: JevPositionSnapshot }>
+  assets: Record<string, { news: JevNewsItem[]; position?: JevPositionSnapshot; opportunity?: JevOpportunitySnapshot }>
 }
 
 export function buildJevState(candidates: VetoCandidateInput[], nowIso: string): JevState {

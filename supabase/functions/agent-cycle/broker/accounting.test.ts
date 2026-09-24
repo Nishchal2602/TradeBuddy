@@ -371,6 +371,62 @@ Deno.test('reducePosition: fees can turn a nominally profitable reduce net-negat
   assertEquals(reduced.realizedPnl - totalFees < 0, true, 'net-negative once round-trip fees are counted, despite a positive realizedPnl')
 })
 
+// --- Aggressive V3.1 profit recycling: partialRealizedPnlDelta must be
+// NET of fee, unlike realizedPnl/trade.realizedPnl which stay gross
+// (migration plan's "positionPnlR must be economically net" correction) --
+
+Deno.test('reducePosition: partialRealizedPnlDelta is realizedPnl NET of the fee this reduce actually paid — realizedPnl itself stays gross', () => {
+  const opened = openPosition({
+    asset: 'BTC', direction: 'long', referencePrice: 100, notionalUsd: 10_000,
+    stopLossPrice: 50, takeProfitPrice: 200, feeBps: 100, slippageBps: 0,
+    portfolioId: PORTFOLIO_ID, decisionId: OPEN_DECISION_ID, startingCash: 20_000, nowIso: T0,
+  })
+  const reduced = reducePosition({
+    position: opened.position, attemptedFillPrice: 100.5, reduceQuantity: opened.position.quantity,
+    feeBps: 100, slippageBps: 0, decisionId: ADD_REDUCE_DECISION_ID, startingCash: opened.cashAfter, nowIso: T1,
+  })
+  // realizedPnl = (100.5-100)*100 = 50 (gross, price-only); this reduce's
+  // own fee = grossValue(100.5*100=10050) * 1% = 100.5.
+  assertAlmostEquals(reduced.realizedPnl, 50, 1e-9)
+  assertAlmostEquals(reduced.trade.fee, 100.5, 1e-9)
+  assertAlmostEquals(reduced.partialRealizedPnlDelta, 50 - 100.5, 1e-9)
+  assertEquals(reduced.partialRealizedPnlDelta < reduced.realizedPnl, true, 'the net figure must be strictly less than the gross one whenever a real fee applies')
+})
+
+Deno.test('reducePosition: updatedPosition.partialRealizedPnlUsd accumulates the NET figure, not the gross realizedPnl', () => {
+  const opened = openPosition({
+    asset: 'BTC', direction: 'long', referencePrice: 100, notionalUsd: 10_000,
+    stopLossPrice: 50, takeProfitPrice: 200, feeBps: 100, slippageBps: 0,
+    portfolioId: PORTFOLIO_ID, decisionId: OPEN_DECISION_ID, startingCash: 20_000, nowIso: T0,
+  })
+  const reduced = reducePosition({
+    position: opened.position, attemptedFillPrice: 100.5, reduceQuantity: opened.position.quantity / 2,
+    feeBps: 100, slippageBps: 0, decisionId: ADD_REDUCE_DECISION_ID, startingCash: opened.cashAfter, nowIso: T1,
+  })
+  assertAlmostEquals(reduced.updatedPosition.partialRealizedPnlUsd!, reduced.partialRealizedPnlDelta, 1e-9)
+  assertEquals(reduced.updatedPosition.partialRealizedPnlUsd! < reduced.realizedPnl, true)
+})
+
+Deno.test('reducePosition: partialRealizedPnlDelta accumulates correctly (net) across two successive REDUCEs on the same position', () => {
+  const opened = openPosition({
+    asset: 'BTC', direction: 'long', referencePrice: 100, notionalUsd: 10_000,
+    stopLossPrice: 50, takeProfitPrice: 200, feeBps: 100, slippageBps: 0,
+    portfolioId: PORTFOLIO_ID, decisionId: OPEN_DECISION_ID, startingCash: 20_000, nowIso: T0,
+  })
+  const firstReduce = reducePosition({
+    position: opened.position, attemptedFillPrice: 105, reduceQuantity: 30,
+    feeBps: 100, slippageBps: 0, decisionId: ADD_REDUCE_DECISION_ID, startingCash: opened.cashAfter, nowIso: T1,
+  })
+  const secondReduce = reducePosition({
+    position: firstReduce.updatedPosition, attemptedFillPrice: 108, reduceQuantity: 30,
+    feeBps: 100, slippageBps: 0, decisionId: ADD_REDUCE_DECISION_ID, startingCash: firstReduce.cashAfter, nowIso: T1,
+  })
+  const expectedTotal = firstReduce.partialRealizedPnlDelta + secondReduce.partialRealizedPnlDelta
+  assertAlmostEquals(secondReduce.updatedPosition.partialRealizedPnlUsd!, expectedTotal, 1e-9)
+  const grossTotal = firstReduce.realizedPnl + secondReduce.realizedPnl
+  assertEquals(expectedTotal < grossTotal, true, 'the compounded NET figure must trail the compounded GROSS figure by the cumulative fees paid — the exact failure mode this fix closes')
+})
+
 Deno.test('reducePosition: a 100% reduce is arithmetically IDENTICAL to closePosition — the same trade/cash numbers, proving REDUCE-to-zero is safe to treat as a close', () => {
   const opened = openPosition({
     asset: 'BTC', direction: 'long', referencePrice: 100, notionalUsd: 1000,

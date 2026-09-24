@@ -81,8 +81,8 @@ Deno.test('applyManagementOutcome: REDUCE carries ONLY reduceMagnitude, the symm
 
 // --- MODIFY_PROTECTION — deterministic price computation --------------------
 
-Deno.test('applyManagementOutcome: TIGHTEN_TO_BREAKEVEN computes the tightest LEGAL stop just inside entry, never entry itself', () => {
-  const result = applyManagementOutcome(holdCandidate(), 'BTC', outcome({ action: 'MODIFY_PROTECTION', stopIntent: 'TIGHTEN_TO_BREAKEVEN', targetIntent: 'KEEP' }), LONG_POSITION)
+Deno.test('applyManagementOutcome: TIGHTEN_TOWARD_ENTRY computes the tightest LEGAL stop just inside entry, never entry itself', () => {
+  const result = applyManagementOutcome(holdCandidate(), 'BTC', outcome({ action: 'MODIFY_PROTECTION', stopIntent: 'TIGHTEN_TOWARD_ENTRY', targetIntent: 'KEEP' }), LONG_POSITION)
   assertEquals(result.action, 'MODIFY_PROTECTION')
   if (result.action !== 'MODIFY_PROTECTION') throw new Error('unreachable')
   // entry(100) * (1 - 0.005) = 99.5 — strictly less than entry, satisfying positions_sl_tp_ordering_valid's strict inequality.
@@ -91,8 +91,8 @@ Deno.test('applyManagementOutcome: TIGHTEN_TO_BREAKEVEN computes the tightest LE
   assertEquals(result.proposedTakeProfitPrice, null, 'KEEP means no change requested for that leg')
 })
 
-Deno.test('applyManagementOutcome: TIGHTEN_TO_BREAKEVEN on a SHORT moves the stop DOWN toward entry, the symmetric direction', () => {
-  const result = applyManagementOutcome(holdCandidate(), 'BTC', outcome({ action: 'MODIFY_PROTECTION', stopIntent: 'TIGHTEN_TO_BREAKEVEN', targetIntent: 'KEEP' }), SHORT_POSITION)
+Deno.test('applyManagementOutcome: TIGHTEN_TOWARD_ENTRY on a SHORT moves the stop DOWN toward entry, the symmetric direction', () => {
+  const result = applyManagementOutcome(holdCandidate(), 'BTC', outcome({ action: 'MODIFY_PROTECTION', stopIntent: 'TIGHTEN_TOWARD_ENTRY', targetIntent: 'KEEP' }), SHORT_POSITION)
   if (result.action !== 'MODIFY_PROTECTION') throw new Error('unreachable')
   // entry(100) * (1 + 0.005) = 100.5 — strictly greater than entry, correct for a short.
   assertAlmostEquals(result.proposedStopLossPrice!, 100.5, 1e-9)
@@ -128,7 +128,7 @@ Deno.test('applyManagementOutcome: both legs KEEP normalizes to the original HOL
 })
 
 Deno.test('applyManagementOutcome: both legs proposed together (tighten stop AND move target) produces one MODIFY_PROTECTION with both prices set', () => {
-  const result = applyManagementOutcome(holdCandidate(), 'BTC', outcome({ action: 'MODIFY_PROTECTION', stopIntent: 'TIGHTEN_TO_BREAKEVEN', targetIntent: 'MOVE_OUT' }), LONG_POSITION)
+  const result = applyManagementOutcome(holdCandidate(), 'BTC', outcome({ action: 'MODIFY_PROTECTION', stopIntent: 'TIGHTEN_TOWARD_ENTRY', targetIntent: 'MOVE_OUT' }), LONG_POSITION)
   if (result.action !== 'MODIFY_PROTECTION') throw new Error('unreachable')
   assertEquals(result.proposedStopLossPrice, 99.5)
   assertEquals(result.proposedTakeProfitPrice, 183)
@@ -227,7 +227,7 @@ Deno.test('Phase 2.1 test 4 — ADD: intact-thesis HOLD -> bounded magnitude -> 
 
 Deno.test('Phase 2.1 test 4 — MODIFY_PROTECTION: intact-thesis HOLD -> tighten-only stop intent -> deterministic price -> risk gate validates -> approved, quantity untouched', () => {
   const candidate = holdCandidate()
-  const managed = applyManagementOutcome(candidate, 'BTC', outcome({ action: 'MODIFY_PROTECTION', stopIntent: 'TIGHTEN_TO_BREAKEVEN', targetIntent: 'KEEP' }), LONG_POSITION)
+  const managed = applyManagementOutcome(candidate, 'BTC', outcome({ action: 'MODIFY_PROTECTION', stopIntent: 'TIGHTEN_TOWARD_ENTRY', targetIntent: 'KEEP' }), LONG_POSITION)
   assertEquals(managed.action, 'MODIFY_PROTECTION')
   if (managed.action !== 'MODIFY_PROTECTION') throw new Error('unreachable')
   assertEquals(managed.proposedStopLossPrice, 99.5)

@@ -30,11 +30,11 @@ function point(minutesAgo: number, price: number) {
   return { timestamp: new Date(new Date(NOW).getTime() - minutesAgo * 60_000).toISOString(), price }
 }
 
-const BASE_INPUT = { maxDataStalenessMinutes: 20, nowIso: NOW, feeBps: 0, slippageBps: 0, startingCash: 1000 }
+const BASE_INPUT = { maxDataStalenessMinutes: 20, nowIso: NOW, feeBps: 0, slippageBps: 0, startingCash: 1000, strategyProfile: 'balanced' as const }
 
 Deno.test('planMonitorActions: no open positions -> everything empty', () => {
   const result = planMonitorActions({ ...BASE_INPUT, openPositions: [] })
-  assertEquals(result, { closes: [], staleAssets: [], remainingOpenPositions: [] })
+  assertEquals(result, { closes: [], givebackCloses: [], highWaterUpdates: [], staleAssets: [], remainingOpenPositions: [] })
 })
 
 Deno.test('planMonitorActions: fresh data, no trigger -> held, not closed', () => {
@@ -140,4 +140,66 @@ Deno.test('planMonitorActions: mixed tick -> one closed, one held, one stale, al
   assertEquals(result.closes[0]!.closedPosition.id, closes.id)
   assertEquals(result.remainingOpenPositions.map((p) => p.id).sort(), [holds.id, stale.id].sort())
   assertEquals(result.staleAssets.map((s) => s.positionId), [stale.id])
+})
+
+// --- Aggressive V3.1 profit recycling: the giveback ratchet, wired into
+// the monitor's per-position loop (migration plan §3.5/§3.7/§5.1) --------
+
+// entry 100, initialStop 92 -> riskPerUnit0 = 8, qty 10 -> initialRiskUsd 80.
+// stopLossPrice/takeProfitPrice set far away so SL/TP never breaches in
+// these fixtures — isolating the giveback ratchet from the static bracket
+// it must never interfere with.
+function trackedLongPosition(overrides: Partial<Position> = {}): Position {
+  return longPosition({
+    quantity: 10,
+    stopLossPrice: 10, takeProfitPrice: 1000,
+    initialEntryPrice: 100, initialStopLossPrice: 92, initialRiskUsd: 80,
+    partialRealizedPnlUsd: 0, sampledMfeR: null, sampledMaeR: null,
+    peakTotalPnlUsd: null, peakPnlAt: null, givebackFloorR: null,
+    highWaterTrackedFrom: '2026-09-18T00:00:00.000Z',
+    ...overrides,
+  })
+}
+
+Deno.test('planMonitorActions: SL/TP always wins the race — a position that breaches its static bracket never reaches giveback tracking', () => {
+  const position = trackedLongPosition({ takeProfitPrice: 108, sampledMfeR: 4.0, givebackFloorR: 1.5 }) // armed and, on positionPnlR alone, would exit — but TP breaches FIRST
+  const result = planMonitorActions({ ...BASE_INPUT, strategyProfile: 'aggressive', openPositions: [{ position, points: [point(0, 108)] }] })
+  assertEquals(result.closes.length, 1)
+  assertEquals(result.closes[0]!.closedPosition.closeReason, 'take_profit')
+  assertEquals(result.givebackCloses.length, 0)
+})
+
+Deno.test('planMonitorActions: a legacy position (highWaterTrackedFrom null) is never sampled and never exits on giveback, regardless of profile', () => {
+  const legacy = trackedLongPosition({ highWaterTrackedFrom: null })
+  const result = planMonitorActions({ ...BASE_INPUT, strategyProfile: 'aggressive', openPositions: [{ position: legacy, points: [point(0, 132), point(0, 100)] }] })
+  assertEquals(result.givebackCloses.length, 0)
+  assertEquals(result.highWaterUpdates.length, 0)
+  assertEquals(result.remainingOpenPositions.map((p) => p.id), [legacy.id])
+})
+
+Deno.test('planMonitorActions: an eligible position under Balanced is SAMPLED but never EXITED — profile gates only the exit (plan §3.7)', () => {
+  const position = trackedLongPosition()
+  // 100 -> 132 (+4R, arms 1.5R floor) -> 108 (+1R, would cross the floor)
+  const result = planMonitorActions({ ...BASE_INPUT, strategyProfile: 'balanced', openPositions: [{ position, points: [point(5, 132), point(0, 108)] }] })
+  assertEquals(result.givebackCloses.length, 0, 'Balanced never executes a giveback exit')
+  assertEquals(result.closes.length, 0)
+  assertEquals(result.remainingOpenPositions.map((p) => p.id), [position.id])
+  assertEquals(result.highWaterUpdates.length, 1, 'but high-water state IS still sampled under Balanced')
+  assertEquals(result.highWaterUpdates[0]!.sampledMfeR, 4.0)
+})
+
+Deno.test('planMonitorActions: an eligible position under Aggressive DOES exit via profit_giveback when the ratchet fires', () => {
+  const position = trackedLongPosition()
+  const result = planMonitorActions({ ...BASE_INPUT, strategyProfile: 'aggressive', openPositions: [{ position, points: [point(5, 132), point(0, 108)] }] })
+  assertEquals(result.givebackCloses.length, 1)
+  assertEquals(result.givebackCloses[0]!.closedPosition.closeReason, 'profit_giveback')
+  assertEquals(result.remainingOpenPositions.length, 0)
+  assertEquals(result.highWaterUpdates.length, 0, 'a closed position gets no separate high-water update — its final state travels on the close itself')
+})
+
+Deno.test('planMonitorActions: no premature exit under Aggressive — a small pullback below +1R stays open with no giveback close', () => {
+  const position = trackedLongPosition()
+  const result = planMonitorActions({ ...BASE_INPUT, strategyProfile: 'aggressive', openPositions: [{ position, points: [point(0, 104)] }] }) // +0.5R, unarmed
+  assertEquals(result.givebackCloses.length, 0)
+  assertEquals(result.remainingOpenPositions.map((p) => p.id), [position.id])
 })

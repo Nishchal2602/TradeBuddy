@@ -6,7 +6,7 @@ import type { Position } from '../../../../src/shared/positions/types.ts'
 
 const NOW = '2026-09-23T12:00:00.000Z'
 
-const BOTH_ENABLED: CandidateFlags = { newsVetoEnabled: true, managementEnabled: true, feeBps: 10, slippageBps: 5 }
+const BOTH_ENABLED: CandidateFlags = { newsVetoEnabled: true, managementEnabled: true, feeBps: 10, slippageBps: 5, minStopLossPct: 0.005 }
 
 function openLongCandidate(overrides: Partial<ModelDecisionProposal> = {}): ModelDecisionProposal {
   return {
@@ -259,7 +259,7 @@ Deno.test('collectModelCandidates: news_veto_enabled=false collects zero veto ca
 })
 
 Deno.test('collectModelCandidates + shouldCallModel: both flags off -> nothing collected, no call', () => {
-  const flags: CandidateFlags = { newsVetoEnabled: false, managementEnabled: false, feeBps: 10, slippageBps: 5 }
+  const flags: CandidateFlags = { newsVetoEnabled: false, managementEnabled: false, feeBps: 10, slippageBps: 5, minStopLossPct: 0.005 }
   const { vetoCandidates, managementCandidates } = collectModelCandidates(
     [
       source({ asset: 'BTC', candidate: openLongCandidate(), openPosition: null }),

@@ -45,13 +45,18 @@ export const RISK_STATUS_BADGE_VARIANT: Record<RiskStatus, NonNullable<BadgeProp
 }
 
 /** Positions and Activity both render a position's close_reason /
- * a trade's trigger_reason — same four-value vocabulary
- * (trading-domain-contract.md §4), one mapping. */
+ * a trade's trigger_reason — same vocabulary (trading-domain-contract.md
+ * §4, widened 2026-09-23 by the Aggressive V3.1 giveback ratchet), one
+ * mapping. Label reads "Profit protected" rather than the raw
+ * "profit_giveback" enum value — the mechanism exists specifically to
+ * PREVENT further giveback, and the literal enum name reads backwards in
+ * a UI badge. */
 export const CLOSE_REASON_LABEL: Record<CloseReason, string> = {
   agent_close: 'Agent close',
   stop_loss: 'Stop loss',
   take_profit: 'Take profit',
   collateral_exhausted: 'Collateral exhausted',
+  profit_giveback: 'Profit protected',
 }
 
 export const CLOSE_REASON_BADGE_VARIANT: Record<CloseReason, NonNullable<BadgeProps['variant']>> = {
@@ -59,4 +64,9 @@ export const CLOSE_REASON_BADGE_VARIANT: Record<CloseReason, NonNullable<BadgePr
   stop_loss: 'error',
   take_profit: 'success',
   collateral_exhausted: 'warning',
+  // Distinct from take_profit (a mechanical target hit) — this is a
+  // deliberate, deterministic protective decision, not a plain win or a
+  // loss, so it gets its own visual identity rather than being folded
+  // into 'success'.
+  profit_giveback: 'accent',
 }

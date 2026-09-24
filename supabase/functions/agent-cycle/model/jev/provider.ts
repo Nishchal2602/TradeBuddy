@@ -13,10 +13,13 @@ import {
   MANAGEMENT_QUESTION_VERSION,
   REDUCE_MAGNITUDE_BY_SCORE_LEVEL,
   reduceMagnitudeQuestionId,
+  remainingUpsideQuestionId,
   stopIntentQuestionId,
   targetIntentQuestionId,
 } from './management-question.ts'
 import type { ManagementCandidateInput } from './management-question.ts'
+import { buildEntryQuestionsForAsset, entryQualityQuestionId, expectedMoveQuestionId, expectedMovePctFromScore } from './entry-question.ts'
+import type { EntryOpportunityInput, EntryOutcome } from './entry-question.ts'
 import type { AssetSymbol } from '../../../../../src/shared/market-data/types.ts'
 import type { VetoCandidateInput } from '../payload.ts'
 
@@ -110,7 +113,14 @@ export async function requestVetoDecisions(
 const VALID_MANAGEMENT_ACTIONS = ['HOLD', 'ADD', 'REDUCE', 'CLOSE', 'MODIFY_PROTECTION'] as const
 export type ManagementAction = (typeof VALID_MANAGEMENT_ACTIONS)[number]
 
-const VALID_STOP_INTENTS = ['KEEP', 'TIGHTEN_TO_BREAKEVEN'] as const
+// Renamed from TIGHTEN_TO_BREAKEVEN 2026-09-23 — apply-management.ts's
+// buildStopProposal lands at entry*(1-minStopLossPct), a small distance
+// INSIDE entry, not literal breakeven (positions_sl_tp_ordering_valid
+// forbids stopLoss === entryPrice). The old name overstated what this
+// intent actually does; profit-locking is now the position-monitor's
+// giveback ratchet's job (strategy/aggressive/protection.ts), not this
+// one.
+const VALID_STOP_INTENTS = ['KEEP', 'TIGHTEN_TOWARD_ENTRY'] as const
 export type StopIntent = (typeof VALID_STOP_INTENTS)[number]
 
 const VALID_TARGET_INTENTS = ['KEEP', 'MOVE_CLOSER', 'MOVE_OUT'] as const
@@ -158,14 +168,34 @@ export interface ManagementOutcome {
   reduceMagnitude: number
   stopIntent: StopIntent
   targetIntent: TargetIntent
+  // Aggressive-only (profile-recycling plan §4.4) — undefined for a
+  // Balanced candidate, which never asks the remaining_upside question at
+  // all. Same code-defined-table mapping the entry path already uses
+  // (never a raw model number) — what finally populates
+  // expected_move_pct/move_to_cost_ratio on a MANAGEMENT row, previously
+  // null for every Aggressive decision.
+  remainingUpsideExpectedMovePct?: number
 }
 
 export interface PortfolioRequestResult {
   vetoOutcomes: VetoOutcome[]
   managementOutcomes: ManagementOutcome[]
+  // Aggressive-only (2026-09-23) — empty whenever entryOpportunities is
+  // empty (every existing Balanced-only or veto-only call site, which
+  // never passes that argument, sees exactly the pre-existing shape).
+  entryOutcomes: EntryOutcome[]
   modelVersion: string
   rawRequest: unknown
   rawResponse: unknown
+}
+
+const VALID_ENTRY_ACTIONS = ['ENTER', 'SKIP'] as const
+
+function asEntryAction(value: string, asset: AssetSymbol): 'ENTER' | 'SKIP' {
+  if (!(VALID_ENTRY_ACTIONS as readonly string[]).includes(value)) {
+    throw new JevCallError(`Jev returned an unrecognized entry_quality answer "${value}" for ${asset}`)
+  }
+  return value as 'ENTER' | 'SKIP'
 }
 
 export async function requestPortfolioDecisions(
@@ -177,6 +207,10 @@ export async function requestPortfolioDecisions(
   apiKey: string,
   fetchImpl: typeof fetch = fetch,
   options: JevCallOptions = {},
+  // Aggressive-only, additive, defaulted to empty — every EXISTING call
+  // site (Balanced, and every pre-existing test) is completely unaffected
+  // by this parameter's mere existence.
+  entryOpportunities: EntryOpportunityInput[] = [],
 ): Promise<PortfolioRequestResult> {
   if (!apiKey) {
     throw new JevCallError('requestPortfolioDecisions: no TYPESAFE_API_KEY configured')
@@ -184,7 +218,34 @@ export async function requestPortfolioDecisions(
 
   const nowIso = new Date().toISOString()
   const state = buildPortfolioState(vetoCandidates, managementCandidates, navUsd, availableCashUsd, totalExposurePct, nowIso)
-  const questions = { ...buildJevQuestions(vetoCandidates), ...buildManagementQuestions(managementCandidates) }
+  // Merge opportunity context onto the SAME per-asset state entry the
+  // veto's own news already populated (an entry-opportunity asset is
+  // always also a vetoCandidate — see entry-question.ts's own comment).
+  // Never mutates buildPortfolioState's own return value in place beyond
+  // this explicit, additive step, and Balanced's path never reaches this
+  // loop at all (entryOpportunities is empty).
+  for (const opp of entryOpportunities) {
+    const existing = state.assets[opp.asset] ?? { news: [] }
+    state.assets[opp.asset] = {
+      ...existing,
+      opportunity: {
+        kind: opp.kind,
+        atrTargetDistancePct: opp.atrTargetDistancePct,
+        estimatedRoundTripCostPct: opp.estimatedRoundTripCostPct,
+        ret15mPct: opp.ret15mPct,
+        ret30mPct: opp.ret30mPct,
+        ret60mPct: opp.ret60mPct,
+        realizedVol5m: opp.realizedVol5m,
+        volumeTrendRatio: opp.volumeTrendRatio,
+        sampledDayHighPct: opp.sampledDayHighPct,
+        sampledDayLowPct: opp.sampledDayLowPct,
+      },
+    }
+  }
+
+  const entryQuestions: Record<string, ReturnType<typeof buildEntryQuestionsForAsset>[string]> = {}
+  for (const opp of entryOpportunities) Object.assign(entryQuestions, buildEntryQuestionsForAsset(opp.asset))
+  const questions = { ...buildJevQuestions(vetoCandidates), ...buildManagementQuestions(managementCandidates), ...entryQuestions }
 
   const result = await callJev(JEV_MODEL_ID, state, questions, apiKey, fetchImpl, options)
   const answerById = new Map<string, JevAnswer>(result.answers.map((a) => [a.questionId, a]))
@@ -208,6 +269,14 @@ export async function requestPortfolioDecisions(
     const reduceMagnitude = expectScore(mustFind(reduceMagnitudeQuestionId(candidate.asset)))
     const stopIntent = expectChoice(mustFind(stopIntentQuestionId(candidate.asset)))
     const targetIntent = expectChoice(mustFind(targetIntentQuestionId(candidate.asset)))
+    // Aggressive-only — the question is only ever built (management-
+    // question.ts's buildManagementQuestionsForAsset) when
+    // candidate.aggressive is present, so this must only ever be looked
+    // up under the same condition; mustFind would throw for a Balanced
+    // candidate, which never has this question in the batch at all.
+    const remainingUpsideExpectedMovePct = candidate.aggressive
+      ? expectedMovePctFromScore(expectScore(mustFind(remainingUpsideQuestionId(candidate.asset))).score)
+      : undefined
 
     return {
       asset: candidate.asset,
@@ -218,12 +287,30 @@ export async function requestPortfolioDecisions(
       reduceMagnitude: magnitudeFromScore(reduceMagnitude.score, REDUCE_MAGNITUDE_BY_SCORE_LEVEL),
       stopIntent: asStopIntent(stopIntent.choice, candidate.asset),
       targetIntent: asTargetIntent(targetIntent.choice, candidate.asset),
+      remainingUpsideExpectedMovePct,
+    }
+  })
+
+  // Entry judgement: veto OR a SKIP answer can only ever REMOVE the
+  // candidate — this function does not enforce that (it merely reports
+  // both raw outcomes); strategy/registry.ts's buildCandidate is where
+  // "either can only remove, neither can grant" is actually applied,
+  // mirroring cycle/apply-veto.ts's own containment discipline.
+  const entryOutcomes: EntryOutcome[] = entryOpportunities.map((opp) => {
+    const entryQuality = expectChoice(mustFind(entryQualityQuestionId(opp.asset)))
+    const expectedMove = expectScore(mustFind(expectedMoveQuestionId(opp.asset)))
+    return {
+      asset: opp.asset,
+      enter: asEntryAction(entryQuality.choice, opp.asset) === 'ENTER',
+      enterConfidence: entryQuality.confidence,
+      expectedMovePct: expectedMovePctFromScore(expectedMove.score),
     }
   })
 
   return {
     vetoOutcomes,
     managementOutcomes,
+    entryOutcomes,
     modelVersion: result.modelVersion,
     rawRequest: { model: JEV_MODEL_ID, state, questions },
     rawResponse: result.rawResponse,

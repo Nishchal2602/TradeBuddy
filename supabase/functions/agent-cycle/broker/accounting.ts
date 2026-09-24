@@ -232,7 +232,24 @@ export interface ReducePositionResult {
   updatedPosition: Position
   trade: Trade
   cashAfter: number
+  // GROSS (price-based only) — UNCHANGED meaning, still what
+  // trades.realized_pnl / positions.realized_pnl / nav_snapshots.
+  // realized_pnl_cum accumulate, matching this broker's existing,
+  // consistent convention of reporting P&L and fees as separate line
+  // items everywhere else. Do not net fee into this — see
+  // partialRealizedPnlDelta below for the one place that must be net.
   realizedPnl: number
+  // Aggressive V3.1 (2026-09-23) — realizedPnl NET of the fee actually
+  // paid on THIS reduce (slippage is already embedded in realizedPnl via
+  // fillPrice, so only fee needs subtracting here). This is the one
+  // figure that must be economically net, not gross: it accumulates into
+  // positions.partial_realized_pnl_usd, which feeds positionPnlR — the
+  // metric the giveback ratchet protects. A sunk, already-paid fee must
+  // reduce that protected figure; the codebase's gross-realizedPnl
+  // convention above is fine for trade-history reporting but would
+  // silently overstate protected profit here, compounding with every
+  // REDUCE on a position's life.
+  partialRealizedPnlDelta: number
 }
 
 export function reducePosition(input: ReducePositionInput): ReducePositionResult {
@@ -271,12 +288,22 @@ export function reducePosition(input: ReducePositionInput): ReducePositionResult
   const newQuantity = position.quantity - input.reduceQuantity
   const newCostBasis = position.costBasis - costBasisReleased
 
+  // NET of the fee this reduce actually paid — see
+  // ReducePositionResult.partialRealizedPnlDelta's own comment.
+  const partialRealizedPnlDelta = realizedPnl - fee
+
   const updatedPosition: Position = {
     ...position,
     quantity: newQuantity,
     costBasis: newCostBasis,
     // entryPrice UNCHANGED — a partial exit never moves the average
     // entry (only ADD does, and only via a genuine weighted average).
+    // Aggressive V3.1 (2026-09-23) — ACCUMULATED, never replaced: this is
+    // what keeps positionPnlR continuous across more than one REDUCE over
+    // a position's life (`position.partialRealizedPnlUsd` may be
+    // undefined on an older in-memory object — same `?? 0` convention
+    // row-mappers.ts uses at the DB boundary).
+    partialRealizedPnlUsd: (position.partialRealizedPnlUsd ?? 0) + partialRealizedPnlDelta,
   }
 
   const intent = position.direction === 'long' ? 'REDUCE_LONG' as const : 'REDUCE_SHORT' as const
@@ -301,7 +328,7 @@ export function reducePosition(input: ReducePositionInput): ReducePositionResult
     realizedPnl, // populated — this is a realizing fill, unlike OPEN/ADD
   }
 
-  return { updatedPosition, trade, cashAfter, realizedPnl }
+  return { updatedPosition, trade, cashAfter, realizedPnl, partialRealizedPnlDelta }
 }
 
 // --- Close -------------------------------------------------------------
@@ -429,7 +456,7 @@ export function closePosition(input: ClosePositionInput): ClosePositionResult {
     : {
       ...tradeCore,
       decisionId: null,
-      triggerReason: positionCloseReason as 'stop_loss' | 'take_profit' | 'collateral_exhausted',
+      triggerReason: positionCloseReason as 'stop_loss' | 'take_profit' | 'collateral_exhausted' | 'profit_giveback',
       realizedPnl,
     }
 

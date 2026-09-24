@@ -1,9 +1,12 @@
 import { createClient } from '@supabase/supabase-js'
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { CoinGeckoMarketDataProvider } from './providers/coingecko.ts'
+import { CoinGeckoMarketDataProvider, fetchIntradayMarketData } from './providers/coingecko.ts'
 import { RssNewsProvider } from './providers/rss-news.ts'
 import { requestPortfolioDecisions, JEV_QUESTION_VERSION, JEV_VETO_THRESHOLD, MANAGEMENT_QUESTION_VERSION } from './model/jev/provider.ts'
 import type { VetoOutcome, ManagementOutcome } from './model/jev/provider.ts'
+import type { AggressiveManagementContext } from './model/jev/management-question.ts'
+import type { EntryOpportunityInput, EntryOutcome } from './model/jev/entry-question.ts'
+import { ENTRY_QUESTION_VERSION } from './model/jev/entry-question.ts'
 import { buildPortfolioConstraints, buildAssetInput, buildRiskGateContext, checkMarketDataFreshness, aggregateOtherOpenPositionsRisk } from './cycle/build-context.ts'
 import type { PersistedNewsItem } from './cycle/build-context.ts'
 import { evaluateTrendRegime } from './strategy/regime.ts'
@@ -19,6 +22,12 @@ import { rowToPosition, toIsoZ } from './db/row-mappers.ts'
 import { toQuoteRow } from './db/quote-rows.ts'
 import { buildDecisionIdempotencyKey, classifyRunInsertConflict, parseTrigger, staleRunCutoffIso } from './cycle/idempotency.ts'
 import type { CycleTrigger } from './cycle/idempotency.ts'
+import { checkStrategyDataSufficiency, clearsEntryTradeabilityFloor, detectAggressiveOpportunity, intradayFeaturesFor, managementAtrPctFor, protectionForEntry, strategyFor } from './strategy/registry.ts'
+import type { StrategyProfile } from '../../../src/shared/strategy/profiles.ts'
+import type { OpportunitySignal } from './strategy/aggressive/detectors.ts'
+import type { IntradayMarketData } from './strategy/aggressive/types.ts'
+import { stopLossPctFor, takeProfitPctFor } from './strategy/rules.ts'
+import { computePositionPnlR, computePriceR } from './strategy/aggressive/protection.ts'
 import { riskAppetiteThresholds } from '../../../src/shared/risk/appetite-mapping.ts'
 import type { RiskAppetite } from '../../../src/shared/risk/appetite-mapping.ts'
 import type { SlTpBounds } from '../../../src/shared/risk/sl-tp.ts'
@@ -72,6 +81,15 @@ interface Settings {
   // applies to ADD and a partial REDUCE only, never to a full CLOSE.
   minTradeNotionalPct: number
   minTradeNotionalUsd: number
+  // Strategy profiles (2026-09-23) — which strategy generates every
+  // asset's candidate this cycle. Read fresh every run (no in-memory
+  // cache to go stale); resolved once into a full StrategyDefinition via
+  // strategy/registry.ts's strategyFor() immediately below, in
+  // runAgentCycle. Pass 1 of this migration: wiring only — resolving
+  // 'balanced' produces byte-identical behavior to before this column
+  // existed (src/shared/strategy/profiles.ts's own test suite proves
+  // this), so nothing downstream changes yet.
+  strategyProfile: StrategyProfile
 }
 
 async function readSettings(supabase: SupabaseClient): Promise<Settings> {
@@ -102,6 +120,7 @@ async function readSettings(supabase: SupabaseClient): Promise<Settings> {
     managementEnabled: data.management_enabled,
     minTradeNotionalPct: Number(data.min_trade_notional_pct),
     minTradeNotionalUsd: Number(data.min_trade_notional_usd),
+    strategyProfile: data.strategy_profile,
   }
 }
 
@@ -267,11 +286,76 @@ export interface CycleDeps {
   coingeckoApiKey?: string
 }
 
+// Aggressive V3.1 profit recycling (2026-09-23) — assembles the
+// Aggressive-only management context (cycle/collect-candidates.ts's
+// CandidateSource.aggressive, forwarded verbatim into
+// ManagementCandidateInput.aggressive) for one open position, or
+// undefined when it doesn't apply. This is the fix for the diagnosis
+// finding that a real Jev management call previously carried NONE of
+// this state — only the 13 required JevPositionSnapshot fields.
+//
+// undefined (no Aggressive context sent this cycle) whenever:
+//   - the active profile isn't 'aggressive' (Balanced's snapshot must stay
+//     byte-identical — see management-question.test.ts)
+//   - there is no open position for this asset
+//   - no intraday data was fetched for this asset this cycle (mirrors
+//     managementAtrPctFor's own "never silently fall back" discipline)
+//   - the position's immutable ruler was never captured (a legacy
+//     position the guarded backfill excluded because its stop had
+//     already moved before this migration — profile-recycling plan §5.5)
+function buildAggressiveManagementContext(
+  strategyProfile: StrategyProfile,
+  openPosition: Position | null,
+  intraday: IntradayMarketData | undefined,
+  currentPrice: number,
+  feeBps: number,
+  slippageBps: number,
+  nowIso: string,
+): AggressiveManagementContext | undefined {
+  if (strategyProfile !== 'aggressive' || !openPosition || !intraday) return undefined
+  const { initialEntryPrice, initialStopLossPrice, initialRiskUsd } = openPosition
+  if (initialEntryPrice === null || initialEntryPrice === undefined) return undefined
+  if (initialStopLossPrice === null || initialStopLossPrice === undefined) return undefined
+  if (initialRiskUsd === null || initialRiskUsd === undefined) return undefined
+
+  const features = intradayFeaturesFor(intraday)
+  // Deterministic broker round-trip cost for the CURRENT quantity, both
+  // sides — the same formula buildPositionSnapshot's own
+  // estimatedRoundTripCostPct uses, in USD rather than a percentage
+  // (computeCostR's numerator wants an absolute dollar figure against the
+  // immutable initialRiskUsd denominator).
+  const currentRoundTripCostUsd = ((2 * (feeBps + slippageBps)) / 10_000) * openPosition.quantity * currentPrice
+
+  return {
+    initialEntryPrice,
+    initialStopLossPrice,
+    initialRiskUsd,
+    partialRealizedPnlUsd: openPosition.partialRealizedPnlUsd ?? 0,
+    sampledMfeR: openPosition.sampledMfeR ?? null,
+    sampledMaeR: openPosition.sampledMaeR ?? null,
+    minutesSinceEntry: (new Date(nowIso).getTime() - new Date(openPosition.openedAt).getTime()) / 60_000,
+    currentRoundTripCostUsd,
+    ret15mPct: features.ret15mPct,
+    ret30mPct: features.ret30mPct,
+    ret60mPct: features.ret60mPct,
+    realizedVol5m: features.realizedVol5m,
+    volumeTrendRatio: features.volumeTrendRatio,
+    sampledDayHighPct: features.sampledDayHighPct,
+    sampledDayLowPct: features.sampledDayLowPct,
+  }
+}
+
 export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
   const { supabase, typesafeApiKey, nowIso, trigger, coingeckoApiKey } = deps
   const fetchImpl = deps.fetchImpl ?? fetch
 
   const settings = await readSettings(supabase)
+  // Strategy profiles (2026-09-23), Pass 1 — resolved once per cycle,
+  // read fresh from settings every time (no stale in-memory selection
+  // across cycles). `strategy.strategyVersion` is 'v1-regime' for
+  // 'balanced' — the exact pre-existing literal — so this line alone
+  // changes nothing observable yet; see strategy/registry.ts.
+  const strategy = strategyFor(settings.strategyProfile)
 
   const { data: portfolio, error: portfolioError } = await supabase.from('portfolios').select('id, cash').single()
   if (portfolioError || !portfolio) {
@@ -404,7 +488,29 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
       candidate: ModelDecisionProposal
       openPosition: Position | null
       recentStopLossClose: RecentStopLossClose | null
+      // Strategy profiles, Pass 2 — populated ONLY for 'aggressive' cycles,
+      // and only for a FLAT asset where the deterministic opportunity
+      // detector fired AND the result clears the tradeability floor. Never
+      // set for 'balanced' (stays undefined). Consumed by Pass 3 to decide
+      // whether to normalize a Jev ENTER answer into a real OPEN_LONG
+      // candidate — computing it here does NOT itself change what trades;
+      // see cycle/collect-candidates.ts and the batched-call section below,
+      // neither of which reads this field.
+      aggressiveEntryContext?: {
+        opportunity: OpportunitySignal
+        atrTargetDistancePct: number
+        estimatedRoundTripCostPct: number
+      }
     }
+
+    // Strategy profiles, Pass 2 — the additive intraday feed, fetched ONCE
+    // per cycle, ONLY when the selected profile actually needs it. A
+    // 'balanced' cycle makes zero extra requests (intradayByAsset stays
+    // {}), preserving that profile's existing 1+3N CoinGecko cost exactly.
+    const intradayByAsset: Partial<Record<AssetSymbol, IntradayMarketData>> =
+      settings.strategyProfile === 'aggressive'
+        ? await fetchIntradayMarketData(settings.assets, fetchImpl, undefined, coingeckoApiKey)
+        : {}
 
     const passOneResults: PassOneResult[] = []
     for (const asset of settings.assets) {
@@ -456,7 +562,34 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         atrPct: assetInput.market.indicators.atrPct,
       })
 
-      passOneResults.push({ asset, assetMarketData, assetInput, regime, candidate, openPosition, recentStopLossClose })
+      // Strategy profiles, Pass 2 — Aggressive opportunity detection for a
+      // FLAT asset. Entirely additive: computes context Pass 3 may later
+      // use to normalize a real candidate, but does not itself alter
+      // `candidate` (still Balanced's own regime-based value above,
+      // completely unused for entry purposes once profile is aggressive —
+      // Pass 3 is where that gets resolved). Never runs for 'balanced'.
+      // Gated on newsVetoEnabled (not a new, separate setting) — this
+      // question is an entry-side gate exactly like the veto's, sharing
+      // the same underlying news context, so the one existing flag
+      // governs whether ANY entry-quality evaluation happens this cycle.
+      let aggressiveEntryContext: PassOneResult['aggressiveEntryContext']
+      if (settings.strategyProfile === 'aggressive' && settings.newsVetoEnabled && openPosition === null) {
+        const intraday = intradayByAsset[asset]
+        const sufficiency = checkStrategyDataSufficiency('aggressive', assetMarketData, intraday)
+        if (sufficiency.ok && intraday) {
+          const opportunity = detectAggressiveOpportunity(intraday)
+          if (opportunity) {
+            const atr30Pct = managementAtrPctFor('aggressive', assetMarketData, intraday)
+            const { takeProfitPct: atrTargetDistancePct } = protectionForEntry('aggressive', atr30Pct, stopLossPctFor, takeProfitPctFor)
+            const estimatedRoundTripCostPct = (2 * (settings.feeBps + settings.slippageBps)) / 10_000
+            if (clearsEntryTradeabilityFloor('aggressive', atrTargetDistancePct, estimatedRoundTripCostPct)) {
+              aggressiveEntryContext = { opportunity, atrTargetDistancePct, estimatedRoundTripCostPct }
+            }
+          }
+        }
+      }
+
+      passOneResults.push({ asset, assetMarketData, assetInput, regime, candidate, openPosition, recentStopLossClose, aggressiveEntryContext })
     }
 
     // --- Batched veto + management call (Gemini -> Jev migration,
@@ -493,13 +626,57 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         news: r.assetInput.news,
         currentPrice: r.assetMarketData.price,
         atrPct: r.assetInput.market.indicators.atrPct,
+        aggressive: buildAggressiveManagementContext(
+          settings.strategyProfile,
+          r.openPosition,
+          intradayByAsset[r.asset],
+          r.assetMarketData.price,
+          settings.feeBps,
+          settings.slippageBps,
+          nowIso,
+        ),
       })),
-      { newsVetoEnabled: settings.newsVetoEnabled, managementEnabled: settings.managementEnabled, feeBps: settings.feeBps, slippageBps: settings.slippageBps },
+      {
+        newsVetoEnabled: settings.newsVetoEnabled,
+        managementEnabled: settings.managementEnabled,
+        feeBps: settings.feeBps,
+        slippageBps: settings.slippageBps,
+        minStopLossPct: settings.slTpBounds.minStopLossPct,
+      },
       nowIso,
     )
 
+    // Strategy profiles, Pass 2 — the Aggressive-only entry-opportunity
+    // list, built from Pass 1's per-asset context. Empty whenever the
+    // profile is 'balanced' (aggressiveEntryContext is never set on that
+    // path), so requestPortfolioDecisions below receives entryOpportunities
+    // = [] for Balanced — proven byte-identical to this parameter not
+    // existing at all (model/jev/provider.test.ts's 18 pre-existing tests).
+    const entryOpportunities: EntryOpportunityInput[] = passOneResults.flatMap((r) => {
+      if (!r.aggressiveEntryContext) return []
+      const intraday = intradayByAsset[r.asset]
+      if (!intraday) return [] // unreachable — aggressiveEntryContext is only ever set alongside a present intraday fetch
+      const features = intradayFeaturesFor(intraday)
+      return [{
+        asset: r.asset,
+        kind: r.aggressiveEntryContext.opportunity.kind,
+        atrTargetDistancePct: r.aggressiveEntryContext.atrTargetDistancePct,
+        estimatedRoundTripCostPct: r.aggressiveEntryContext.estimatedRoundTripCostPct,
+        ret15mPct: features.ret15mPct,
+        ret30mPct: features.ret30mPct,
+        ret60mPct: features.ret60mPct,
+        realizedVol5m: features.realizedVol5m,
+        volumeTrendRatio: features.volumeTrendRatio,
+        sampledDayHighPct: features.sampledDayHighPct,
+        sampledDayLowPct: features.sampledDayLowPct,
+      }]
+    })
+
     const vetoOutcomeByAsset = new Map<AssetSymbol, VetoOutcome>()
     const managementOutcomeByAsset = new Map<AssetSymbol, ManagementOutcome>()
+    // Strategy profiles, Pass 2 — always empty for 'balanced'. Computed
+    // here but NOT YET consumed to change any candidate (see Pass 3).
+    const entryOutcomeByAsset = new Map<AssetSymbol, EntryOutcome>()
     // Seeded from a news-provider failure, but only when at least one
     // model layer is actually on — disabling BOTH means news stops
     // mattering to the model at all, so a feed outage shouldn't block
@@ -515,7 +692,14 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
     let modelRawRequest: unknown = null
     let modelRawResponse: unknown = null
 
-    if (shouldCallModel(vetoCandidates, managementCandidates, modelCallFailedReason)) {
+    // Strategy profiles, Pass 2 — entryOpportunities can make a call
+    // necessary even when shouldCallModel's own veto/management-only view
+    // says no (e.g. an Aggressive FLAT asset whose Balanced-regime
+    // candidate is HOLD, so it never entered vetoCandidates, yet a
+    // detector fired independently). modelCallFailedReason === null is
+    // checked again explicitly for clarity, though shouldCallModel already
+    // encodes the identical guard for its own two lists.
+    if (shouldCallModel(vetoCandidates, managementCandidates, modelCallFailedReason) || (entryOpportunities.length > 0 && modelCallFailedReason === null)) {
       try {
         // NAV/cash/exposure as of right now (Pass 1 has made no
         // executions yet) — the same instant the existing veto call has
@@ -536,9 +720,12 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
           totalExposurePct,
           typesafeApiKey,
           fetchImpl,
+          {},
+          entryOpportunities,
         )
         for (const outcome of portfolioResult.vetoOutcomes) vetoOutcomeByAsset.set(outcome.asset, outcome)
         for (const outcome of portfolioResult.managementOutcomes) managementOutcomeByAsset.set(outcome.asset, outcome)
+        for (const outcome of portfolioResult.entryOutcomes) entryOutcomeByAsset.set(outcome.asset, outcome)
         modelVersion = portfolioResult.modelVersion
         modelRawRequest = portfolioResult.rawRequest
         modelRawResponse = portfolioResult.rawResponse
@@ -555,7 +742,42 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
     for (const r of passOneResults) {
       const { asset, assetMarketData, assetInput, candidate, openPosition, recentStopLossClose } = r
 
-      let finalProposal: ModelDecisionProposal = candidate
+      // Strategy profiles, Pass 3 — candidate normalization. Balanced's
+      // `candidate` (Pass 1, unchanged) passes straight through as
+      // `effectiveCandidate` and every branch below behaves exactly as
+      // before. For Aggressive, Balanced's own regime-derived OPEN_LONG/
+      // CLOSE signals are neutralized to HOLD here, BEFORE the veto/
+      // management branches (which key on candidate.action) ever see
+      // them — Aggressive must never open on Balanced's 50DMA signal, and
+      // must never auto-close on a regime flip either; its entries come
+      // only from its own opportunity detector (below) and its exits only
+      // from Jev's management judgment + deterministic tightening. The
+      // 50DMA regime stays available as CONTEXT (assetInput.regime is
+      // unchanged either way), never a hard trigger, for this profile.
+      let effectiveCandidate: ModelDecisionProposal = candidate
+      if (settings.strategyProfile === 'aggressive') {
+        if (candidate.action === 'OPEN_LONG') {
+          effectiveCandidate = {
+            asset,
+            action: 'HOLD',
+            confidence: 1,
+            horizonHours: null,
+            reasons: [{ type: 'TECHNICAL', text: 'Aggressive strategy — entries are decided by the short-horizon opportunity detector, not the daily trend regime' }],
+            invalidation: [],
+          }
+        } else if (openPosition && candidate.action === 'CLOSE') {
+          effectiveCandidate = {
+            asset,
+            action: 'HOLD',
+            confidence: 1,
+            horizonHours: null,
+            reasons: [{ type: 'TECHNICAL', text: 'Aggressive strategy — exits are decided by Jev management and deterministic tightening, not the daily trend regime' }],
+            invalidation: [{ text: 'Managed by short-horizon Jev evaluation (HOLD/ADD/REDUCE/CLOSE/MODIFY_PROTECTION), not the daily trend regime' }],
+          }
+        }
+      }
+
+      let finalProposal: ModelDecisionProposal = effectiveCandidate
       let modelVetoedValue: boolean | null = null
       let modelVersionForRow = 'not-called'
       // Which question set this row's prompt_version reflects — veto by
@@ -579,13 +801,33 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
       let takeProfitPriceBeforeForRow: number | null = null
       let takeProfitPriceAfterForRow: number | null = null
       let protectionRejectionReasonForRow: string | null = null
+      // Strategy profiles (2026-09-23) — Aggressive-only, null on every
+      // Balanced row and on any Aggressive row that never reached the
+      // entry-normalization branch below (see migration
+      // 20260923150000_strategy_profiles.sql's own column comments).
+      let expectedMovePctForRow: number | null = null
+      let estimatedRoundTripCostPctForRow: number | null = null
+      let moveToCostRatioForRow: number | null = null
+      // Aggressive V3.1 profit recycling (2026-09-23) — the two R metrics
+      // (never conflated — see protection.ts's own module comment),
+      // profit state at decision time, and the disambiguation field that
+      // resolves "model chose HOLD" vs "model wanted something else and
+      // deterministic code silently normalized it away" (the live ETH
+      // MODIFY_PROTECTION/KEEP-KEEP case the diagnosis surfaced). All null
+      // on every Balanced row.
+      let positionPnlRForRow: number | null = null
+      let priceRForRow: number | null = null
+      let sampledMfeRForRow: number | null = null
+      let givebackRForRow: number | null = null
+      let minutesSinceEntryForRow: number | null = null
+      let actionNormalizationReasonForRow: string | null = null
 
       // Computed once, up front, so both branches below (and the sizing/
       // gate context further down) can reuse the identical value rather
       // than recomputing currentNav() redundantly mid-branch.
       const nav = currentNav()
 
-      if (candidate.action === 'OPEN_LONG') {
+      if (effectiveCandidate.action === 'OPEN_LONG') {
         if (modelCallFailedReason !== null) {
           modelVersionForRow = 'call-failed'
           outputPayloadForRow = { provider: 'typesafe-jev', error: modelCallFailedReason }
@@ -621,7 +863,7 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
             // The ALLOW-is-strict-pass-through guarantee lives in this
             // function, not here — see cycle/apply-veto.ts's own comment
             // and cycle/apply-veto.test.ts for the regression test.
-            finalProposal = applyVetoOutcome(candidate, asset, outcome, assetInput.news.length)
+            finalProposal = applyVetoOutcome(effectiveCandidate, asset, outcome, assetInput.news.length)
           }
           // else: news_veto_enabled is false — this candidate was never
           // collected (cycle/collect-candidates.ts's own veto branch
@@ -629,7 +871,7 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
           // it proceeds unvetoed, and the row correctly records
           // "not-called" / null.
         }
-      } else if (openPosition && candidate.action === 'HOLD') {
+      } else if (openPosition && effectiveCandidate.action === 'HOLD') {
         // Phase 2 — portfolio management. Only reached when Pass 1's own
         // deterministic candidate for this OPEN position is HOLD (the
         // regime is intact) — a regime-flip CLOSE never reaches here, and
@@ -654,16 +896,74 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
             proposedActionForRow = outcome.action
             proposedActionConfidenceForRow = outcome.actionConfidence
 
+            // Strategy profiles (2026-09-23) — MOVE_CLOSER/MOVE_OUT steps
+            // one ATR unit (apply-management.ts's buildTargetProposal), so
+            // this must be the SAME ATR the strategy itself reasons in:
+            // Balanced's 4h figure is unchanged; Aggressive must use its
+            // own 30m ATR (registry.ts's managementAtrPctFor — its own
+            // comment already says the 4-hourly figure is "incoherent" at
+            // this horizon). Falls back to the 4h figure only if 30m data
+            // is momentarily too thin for ATR(14) — a coarser step for
+            // one cycle, not a crash of the whole cycle over one field.
+            let managementAtrPct = assetInput.market.indicators.atrPct
+            if (settings.strategyProfile === 'aggressive') {
+              const intraday = intradayByAsset[asset]
+              if (intraday && intraday.ohlc30m.length >= 15) {
+                managementAtrPct = managementAtrPctFor('aggressive', assetMarketData, intraday)
+              }
+            }
+
             const positionContext: ManagementPositionContext = {
               direction: openPosition.direction,
               entryPrice: openPosition.entryPrice,
               currentPrice: assetMarketData.price,
               stopLossPrice: openPosition.stopLossPrice,
               takeProfitPrice: openPosition.takeProfitPrice,
-              atrPct: assetInput.market.indicators.atrPct,
+              atrPct: managementAtrPct,
               minStopLossPct: settings.slTpBounds.minStopLossPct,
             }
-            finalProposal = applyManagementOutcome(candidate, asset, outcome, positionContext)
+            finalProposal = applyManagementOutcome(effectiveCandidate, asset, outcome, positionContext)
+
+            // Aggressive V3.1 profit recycling (2026-09-23) — the same
+            // context buildAggressiveManagementContext already assembled
+            // for the Jev call above (a pure, cheap-to-recompute
+            // function), read here purely for PROVENANCE: the R metrics
+            // this decision was actually made under.
+            const aggContext = buildAggressiveManagementContext(
+              settings.strategyProfile, openPosition, intradayByAsset[asset], assetMarketData.price, settings.feeBps, settings.slippageBps, nowIso,
+            )
+            if (aggContext) {
+              const unrealizedPnlUsd = openPosition.direction === 'long'
+                ? (assetMarketData.price - openPosition.entryPrice) * openPosition.quantity
+                : (openPosition.entryPrice - assetMarketData.price) * openPosition.quantity
+              positionPnlRForRow = computePositionPnlR(unrealizedPnlUsd, aggContext.partialRealizedPnlUsd, aggContext.initialRiskUsd)
+              priceRForRow = computePriceR(assetMarketData.price, aggContext.initialEntryPrice, aggContext.initialStopLossPrice, openPosition.direction)
+              sampledMfeRForRow = aggContext.sampledMfeR
+              givebackRForRow = aggContext.sampledMfeR === null ? null : Math.max(0, aggContext.sampledMfeR - positionPnlRForRow)
+              minutesSinceEntryForRow = aggContext.minutesSinceEntry
+
+              // profile-recycling plan §4.4 — the remaining_upside answer
+              // finally populates these on a MANAGEMENT row (previously
+              // null on every Aggressive decision; Pass 3 only ever set
+              // them on the entry branch).
+              if (outcome.remainingUpsideExpectedMovePct !== undefined) {
+                const estimatedRoundTripCostPct = (2 * (settings.feeBps + settings.slippageBps)) / 10_000
+                expectedMovePctForRow = outcome.remainingUpsideExpectedMovePct
+                estimatedRoundTripCostPctForRow = estimatedRoundTripCostPct
+                moveToCostRatioForRow = outcome.remainingUpsideExpectedMovePct / estimatedRoundTripCostPct
+              }
+            }
+
+            // The disambiguation the diagnosis showed was previously
+            // impossible without hand-parsing output_payload: Jev chose
+            // MODIFY_PROTECTION but BOTH stopIntent and targetIntent
+            // resolved to "no change" (apply-management.ts's own KEEP/
+            // KEEP normalization), so finalProposal fell back to the
+            // unchanged candidate — action reads HOLD, but this was NOT
+            // the model genuinely choosing HOLD.
+            if (outcome.action === 'MODIFY_PROTECTION' && finalProposal.action !== 'MODIFY_PROTECTION') {
+              actionNormalizationReasonForRow = 'modify_protection_noop_both_intents_keep'
+            }
 
             // Observability-only figures (migration plan §12) — the
             // UNCAPPED amount Jev's magnitude implies, computed via the
@@ -692,7 +992,71 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
           // proceeds unmanaged (HOLD stands), and the row correctly
           // records "not-called" / null.
         }
+      } else if (settings.strategyProfile === 'aggressive' && !openPosition && effectiveCandidate.action === 'HOLD' && r.aggressiveEntryContext) {
+        // Strategy profiles, Pass 3 — Aggressive candidate normalization.
+        // Reached ONLY when Pass 2 detected a genuine opportunity for this
+        // FLAT asset AND it cleared the tradeability floor
+        // (r.aggressiveEntryContext is required) — Jev can only ever ADD
+        // an OPEN_LONG here by answering ENTER; it can never originate one
+        // where no detector fired, the exact same containment discipline
+        // as the veto's ALLOW-is-a-pass-through guarantee
+        // (cycle/apply-veto.ts).
+        promptVersionForRow = ENTRY_QUESTION_VERSION
+        if (modelCallFailedReason !== null) {
+          modelVersionForRow = 'call-failed'
+          outputPayloadForRow = { provider: 'typesafe-jev', error: modelCallFailedReason }
+          // finalProposal stays HOLD (effectiveCandidate) — no entry.
+        } else {
+          const entryOutcome = entryOutcomeByAsset.get(asset)
+          if (entryOutcome) {
+            modelVersionForRow = modelVersion!
+            expectedMovePctForRow = entryOutcome.expectedMovePct
+            estimatedRoundTripCostPctForRow = r.aggressiveEntryContext.estimatedRoundTripCostPct
+            moveToCostRatioForRow = entryOutcome.expectedMovePct / r.aggressiveEntryContext.estimatedRoundTripCostPct
+            outputPayloadForRow = {
+              provider: 'typesafe-jev',
+              request: modelRawRequest,
+              response: modelRawResponse,
+              opportunityKind: r.aggressiveEntryContext.opportunity.kind,
+              entryOutcome,
+            }
+            if (entryOutcome.enter) {
+              const intraday = intradayByAsset[asset]!
+              const atr30Pct = managementAtrPctFor('aggressive', assetMarketData, intraday)
+              const { stopLossPct, takeProfitPct } = protectionForEntry('aggressive', atr30Pct, stopLossPctFor, takeProfitPctFor)
+              finalProposal = {
+                asset,
+                action: 'OPEN_LONG',
+                confidence: entryOutcome.enterConfidence,
+                horizonHours: null,
+                reasons: [{ type: 'TECHNICAL', text: `Aggressive ${r.aggressiveEntryContext.opportunity.kind} detected; Jev judged the opportunity worth entering` }],
+                invalidation: [{ text: 'Managed by short-horizon Jev evaluation (HOLD/ADD/REDUCE/CLOSE/MODIFY_PROTECTION), not the daily trend regime' }],
+                stopLossPct,
+                takeProfitPct,
+              }
+            }
+            // else: entryOutcome.enter === false (SKIP) — finalProposal
+            // stays HOLD.
+          }
+          // else: no entryOutcome — should be unreachable given
+          // r.aggressiveEntryContext was set (the same condition that put
+          // this asset into entryOpportunities in Pass 2), but left as a
+          // safe no-op rather than throwing, matching the veto/management
+          // branches' own equivalent "not collected" fallthrough above.
+        }
       }
+
+      // Deterministic dynamic tightening (the old agent-cycle-only, Jev-
+      // click-gated two-rung schedule) was retired 2026-09-23 — its
+      // profit-locking rung was provably dead code (a stop above entry is
+      // unrepresentable under positions_sl_tp_ordering_valid) and its
+      // surviving rung only approximated breakeven. Superseded by the
+      // monitor-enforced giveback ratchet (position-monitor/giveback.ts),
+      // which runs automatically every 10 minutes instead of only on a
+      // manual "Run agent" click — the direct fix for the diagnosis
+      // finding that R was previously sampled only at decision cycles and
+      // so missed intraday peaks entirely. See strategy/registry.ts's own
+      // comment at the old call site for the full reasoning.
 
       const payload: ModelCallPayload = {
         portfolio: { cash: runningCash, nav, constraints: buildPortfolioConstraints(appetite.minConfidence, settings.slTpBounds) },
@@ -747,13 +1111,21 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         if (gateResult.riskStatus === 'approved' || gateResult.riskStatus === 'clamped') {
           executedAdjustNotionalForRow = gateResult.approvedAdjustNotionalUsd
         } else if (gateResult.riskStatus === 'not_applicable') {
-          finalProposal = candidate
+          // effectiveCandidate, NOT the raw candidate — for an Aggressive
+          // position whose underlying Balanced regime already flipped to
+          // CLOSE this cycle (neutralized to HOLD above), reverting to
+          // the raw candidate here would silently resurrect that
+          // regime-driven CLOSE the moment an ADD comes back too small to
+          // fill, defeating the whole point of the neutralization.
+          finalProposal = effectiveCandidate
+          actionNormalizationReasonForRow = 'add_reduce_below_min_notional'
         }
       } else if (finalProposal.action === 'REDUCE') {
         if (gateResult.riskStatus === 'approved') {
           executedAdjustNotionalForRow = (gateResult.approvedReduceQuantity ?? 0) * assetMarketData.price
         } else if (gateResult.riskStatus === 'not_applicable') {
-          finalProposal = candidate
+          finalProposal = effectiveCandidate
+          actionNormalizationReasonForRow = 'add_reduce_below_min_notional'
         }
       } else if (finalProposal.action === 'MODIFY_PROTECTION') {
         if (gateResult.riskStatus === 'approved') {
@@ -839,8 +1211,23 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         output_payload: outputPayloadForRow,
         prompt_version: promptVersionForRow,
         model_version: modelVersionForRow,
-        strategy_version: 'v1-regime',
+        strategy_version: strategy.strategyVersion,
         model_vetoed: modelVetoedValue,
+        // Strategy profiles, Pass 3 (2026-09-23) — null for Balanced and
+        // for any Aggressive row that isn't an entry-normalization row
+        // (see the aggressiveEntryContext branch above where each is set).
+        expected_move_pct: expectedMovePctForRow,
+        estimated_round_trip_cost_pct: estimatedRoundTripCostPctForRow,
+        move_to_cost_ratio: moveToCostRatioForRow,
+        // Aggressive V3.1 profit recycling (2026-09-23) — null for every
+        // Balanced row (see this file's own aggregate comment at each
+        // local's declaration above).
+        position_pnl_r: positionPnlRForRow,
+        price_r: priceRForRow,
+        sampled_mfe_r: sampledMfeRForRow,
+        giveback_r: givebackRForRow,
+        minutes_since_entry: minutesSinceEntryForRow,
+        action_normalization_reason: actionNormalizationReasonForRow,
         decided_at: nowIso,
       })
       if (decisionInsertError) throw new Error(`could not insert agent_decisions for ${asset}: ${decisionInsertError.message}`)
@@ -881,6 +1268,16 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         // the original insert.
         const { error: linkError } = await supabase.from('agent_decisions').update({ position_id: position.id }).eq('id', decisionId)
         if (linkError) throw new Error(`could not link decision ${decisionId} to its new position ${position.id}: ${linkError.message}`)
+        // The immutable R-ruler (initial_entry_price/initial_stop_loss_
+        // price/initial_risk_usd) and high_water_tracked_from are set
+        // atomically INSIDE open_position_atomic as of 2026-09-23 (the
+        // aggressive profit-recycling migration) — previously a follow-up
+        // UPDATE lived here, which left a permanently null (and so
+        // permanently untracked) ruler if the process crashed between the
+        // RPC call and this line. Set for EVERY new position, Balanced or
+        // Aggressive (migration plan §3.7): high-water state is sampled
+        // regardless of the active profile, only the giveback EXIT is
+        // Aggressive-gated, at monitor-tick time.
       } else if (plan.kind === 'close') {
         const { trade, realizedPnl, closedPosition } = plan.closeResult
         const { data: rpcData, error: rpcError } = await supabase.rpc('close_position_atomic', {
@@ -967,7 +1364,7 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         // quantity/entry_price/cost_basis on the one open row) —
         // p_realized_pnl is populated here (the realized portion), unlike
         // ADD's null.
-        const { updatedPosition, trade, realizedPnl } = plan.reduceResult
+        const { updatedPosition, trade, realizedPnl, partialRealizedPnlDelta } = plan.reduceResult
         const { data: rpcData, error: rpcError } = await supabase.rpc('adjust_position_atomic', {
           p_position_id: updatedPosition.id,
           p_new_quantity: updatedPosition.quantity,
@@ -986,6 +1383,19 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
           p_executed_at: trade.executedAt,
           p_intent: trade.intent,
           p_decision_id: decisionId,
+          // Aggressive V3.1 (2026-09-23) — accumulated into
+          // positions.partial_realized_pnl_usd inside the RPC, never
+          // replaced. This is what keeps positionPnlR continuous across a
+          // REDUCE (protection.ts's computePositionPnlR) — without it, a
+          // deliberate profit harvest would crater the unrealized-only
+          // figure and misreport as giveback. Deliberately the NET figure
+          // (realizedPnl - fee), not the gross `realizedPnl` used for
+          // p_realized_pnl above — positionPnlR is the economic figure
+          // the giveback ratchet protects, and a sunk, already-paid fee
+          // must reduce it; trades.realized_pnl itself stays gross,
+          // matching this codebase's existing convention of reporting
+          // P&L and fees as separate line items.
+          p_partial_realized_pnl_delta: partialRealizedPnlDelta,
         })
         if (rpcError) throw new Error(`adjust_position_atomic (REDUCE) failed for ${asset}: ${rpcError.message}`)
         const outcome = Array.isArray(rpcData) ? rpcData[0] : rpcData

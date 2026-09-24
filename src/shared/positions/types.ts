@@ -14,10 +14,14 @@ export const PositionStatus = z.enum(['open', 'closed'])
 export type PositionStatus = z.infer<typeof PositionStatus>
 
 // agent_close = closed by an OPEN_LONG/OPEN_SHORT/CLOSE decision;
-// stop_loss/take_profit/collateral_exhausted = closed automatically by the
-// position monitor. Mirrors trades.trigger_reason for the trade that
-// closed this position (positions.close_reason column comment).
-export const CloseReason = z.enum(['agent_close', 'stop_loss', 'take_profit', 'collateral_exhausted'])
+// stop_loss/take_profit/collateral_exhausted/profit_giveback = closed
+// automatically (the first three by the position monitor's static
+// bracket check; profit_giveback by the same monitor's Aggressive V3.1
+// giveback ratchet, 2026-09-23 — a discrete, pre-registered, monotone
+// floor evaluated once per tick, NOT a continuously-trailing stop).
+// Mirrors trades.trigger_reason for the trade that closed this position
+// (positions.close_reason column comment).
+export const CloseReason = z.enum(['agent_close', 'stop_loss', 'take_profit', 'collateral_exhausted', 'profit_giveback'])
 export type CloseReason = z.infer<typeof CloseReason>
 
 // FLAT/LONG/SHORT is never a column value — it's derived from whether an
@@ -70,5 +74,50 @@ export const Position = z.object({
 
   openedByDecisionId: z.string().uuid().nullable(),
   closedByDecisionId: z.string().uuid().nullable(),
+
+  // Strategy profiles (2026-09-23) — quantity x |entry - originalStop| AT
+  // ORIGINAL ENTRY, captured once and never redefined by a later ADD/
+  // REDUCE (strategy/aggressive/protection.ts's computePositionPnlR/
+  // computeCostR — the immutable ruler for R-metric tracking, extended
+  // 2026-09-23 by the initialEntryPrice/initialStopLossPrice fields
+  // below into the full immutable triple).
+  // Deliberately `.optional()`, not just `.nullable()`: every position
+  // opened before this migration, and every object literal built by an
+  // existing test fixture or by broker/accounting.ts's own constructors,
+  // may simply omit this field entirely — Balanced never reads it, and
+  // widening this to a REQUIRED field would have forced an edit into
+  // every one of the ~9 files across the codebase that construct a
+  // Position-shaped object directly, for a value only Aggressive's own
+  // tightening logic consumes.
+  initialRiskUsd: z.number().nonnegative().nullable().optional(),
+
+  // Aggressive V3.1 profit recycling (2026-09-23) — the rest of the
+  // immutable ruler triple (initialEntryPrice/initialStopLossPrice, with
+  // initialRiskUsd above) plus resize-neutral P&L and monitor-sampled
+  // high-water state. Same `.optional()` reasoning as initialRiskUsd —
+  // every one of these is populated only from 2026-09-23 onward (or by
+  // the guarded legacy backfill), Balanced never reads any of them, and
+  // making them required would force edits into every direct
+  // Position-literal constructor in the codebase for a value only
+  // Aggressive's giveback ratchet consumes. See the migration's own
+  // column comments (20260923180000_aggressive_profit_recycling.sql) for
+  // the full definition of each.
+  initialEntryPrice: z.number().positive().nullable().optional(),
+  initialStopLossPrice: z.number().positive().nullable().optional(),
+  // Cumulative realized P&L from REDUCE only (never the final CLOSE).
+  // Deliberately NOT `.nullable()` — the DB column is NOT NULL DEFAULT 0,
+  // so every real row always has a concrete number; `.optional()` alone
+  // covers a hand-built test fixture that omits it, treated as 0 by every
+  // reader (positionPnlR's own formula).
+  partialRealizedPnlUsd: z.number().optional(),
+  sampledMfeR: z.number().nullable().optional(),
+  sampledMaeR: z.number().nullable().optional(),
+  peakTotalPnlUsd: z.number().nullable().optional(),
+  peakPnlAt: z.string().datetime().nullable().optional(),
+  givebackFloorR: z.number().positive().nullable().optional(),
+  // NULL = "never tracked" = permanently ineligible for profit_giveback
+  // (plan §5.5) — the sole eligibility gate, not an inference from other
+  // fields.
+  highWaterTrackedFrom: z.string().datetime().nullable().optional(),
 })
 export type Position = z.infer<typeof Position>

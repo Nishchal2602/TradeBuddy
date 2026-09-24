@@ -152,7 +152,7 @@ const reduceProposalFields = {
 
 const modifyProtectionProposalFields = {
   // Deterministically computed ABSOLUTE prices, not intents — the intent
-  // enums (KEEP/TIGHTEN_TO_BREAKEVEN, KEEP/MOVE_CLOSER/MOVE_OUT) are
+  // enums (KEEP/TIGHTEN_TOWARD_ENTRY, KEEP/MOVE_CLOSER/MOVE_OUT) are
   // resolved into these prices by cycle/apply-management.ts BEFORE this
   // proposal is built, the same way strategy/rules.ts resolves the
   // regime rule into stopLossPct/takeProfitPct before the gate ever sees

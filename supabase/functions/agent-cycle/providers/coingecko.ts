@@ -1,5 +1,6 @@
 import { z } from 'zod'
-import type { AssetSymbol, NormalizedMarketData, MarketQuote } from '../../../../src/shared/market-data/types.ts'
+import type { AssetSymbol, NormalizedMarketData, MarketQuote, OhlcCandle } from '../../../../src/shared/market-data/types.ts'
+import type { IntradayMarketData, IntradaySpotPoint } from '../strategy/aggressive/types.ts'
 import { NormalizedMarketData as NormalizedMarketDataSchema, MarketQuote as MarketQuoteSchema } from '../../../../src/shared/market-data/types.ts'
 import type { MarketDataProvider } from '../../../../src/shared/market-data/provider.ts'
 import {
@@ -320,6 +321,70 @@ export async function fetchRecentPricePoints(
       const chart = parseOrThrow(CoinGeckoMarketChartResponse, raw, `/coins/${coinId}/market_chart?days=1`)
       const points = chart.prices.map(([ts, price]) => ({ timestamp: msToIso(ts), price }))
       return [asset, points]
+    }),
+  )
+
+  return Object.fromEntries(entries)
+}
+
+// --- Aggressive strategy intraday feed (v3-jev-intraday-30m) -------------
+//
+// The additive data cost Aggressive pays on top of Balanced's own
+// getMarketData — 2 more requests per asset (1+5N total for N assets vs
+// getMarketData's 1+3N), never a replacement: Aggressive still calls
+// getMarketData too, so the 50DMA stays available as context (see
+// strategy/aggressive's own module comments — never a gate for this
+// profile). Reuses fetchJson/parseOrThrow/COIN_ID/CoinGeckoOhlcResponse/
+// CoinGeckoMarketChartResponse unchanged — no new provider, no new schema
+// beyond what this file already validates.
+//
+// /ohlc?days=1 -> 48 x 30-minute TRUE OHLC (confirmed live,
+// trading-domain-contract.md §5) — the sole ATR source for this profile.
+// Never the 4-hourly /ohlc?days=30 candles getMarketData uses: a 4h ATR
+// is incoherent at a 15-60 minute holding horizon.
+//
+// /market_chart?days=1 -> ~289 x 5-minute spot + volume, the SAME
+// response fetchRecentPricePoints above already knows how to fetch for
+// the position monitor — except that function only ever kept
+// chart.prices and silently discarded chart.total_volumes. Surfacing
+// volume here costs nothing extra: same request, same response, just
+// reading a field that was already being parsed and thrown away.
+// closedPoints(..., 5min) drops the trailing off-grid live point, same
+// as getMarketData already does for its own hourly/daily series.
+export async function fetchIntradayMarketData(
+  assets: AssetSymbol[],
+  fetchImpl: typeof fetch = fetch,
+  baseUrl: string = BASE_URL,
+  apiKey?: string,
+): Promise<Partial<Record<AssetSymbol, IntradayMarketData>>> {
+  if (assets.length === 0) return {}
+
+  const FIVE_MIN_MS = 5 * 60 * 1000
+
+  const entries = await Promise.all(
+    assets.map(async (asset): Promise<[AssetSymbol, IntradayMarketData]> => {
+      const coinId = COIN_ID[asset]
+
+      const [ohlcRaw, chartRaw] = await Promise.all([
+        fetchJson(`${baseUrl}/coins/${coinId}/ohlc?vs_currency=usd&days=1`, fetchImpl, apiKey),
+        fetchJson(`${baseUrl}/coins/${coinId}/market_chart?vs_currency=usd&days=1`, fetchImpl, apiKey),
+      ])
+
+      const ohlc = parseOrThrow(CoinGeckoOhlcResponse, ohlcRaw, `/coins/${coinId}/ohlc?days=1`)
+      const ohlc30m: OhlcCandle[] = ohlc.map(([ts, open, high, low, close]) => ({
+        timestamp: msToIso(ts),
+        open,
+        high,
+        low,
+        close,
+      }))
+
+      const chart = parseOrThrow(CoinGeckoMarketChartResponse, chartRaw, `/coins/${coinId}/market_chart?days=1`)
+      const volumeByTimestamp = new Map(chart.total_volumes.map(([ts, volume]) => [ts, volume]))
+      const rawSpotPoints = chart.prices.map(([ts, price]) => ({ timestamp: msToIso(ts), price, volume: volumeByTimestamp.get(ts) ?? 0 }))
+      const spot5m: IntradaySpotPoint[] = closedPoints(rawSpotPoints, FIVE_MIN_MS)
+
+      return [asset, { asset, ohlc30m, spot5m }]
     }),
   )
 

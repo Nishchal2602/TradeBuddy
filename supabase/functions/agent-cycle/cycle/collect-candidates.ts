@@ -2,7 +2,7 @@ import type { AssetSymbol } from '../../../../src/shared/market-data/types.ts'
 import type { Position } from '../../../../src/shared/positions/types.ts'
 import type { ModelDecisionProposal } from '../../../../src/shared/decisions/types.ts'
 import type { VetoCandidateInput } from '../model/payload.ts'
-import type { ManagementCandidateInput } from '../model/jev/management-question.ts'
+import type { AggressiveManagementContext, ManagementCandidateInput } from '../model/jev/management-question.ts'
 
 // Phase 2.1 (2026-09-23) — extracted out of index.ts's Pass 1/veto-block
 // specifically so the invariant this fix is about ("entry eligibility and
@@ -31,6 +31,13 @@ export interface CandidateSource {
   news: VetoCandidateInput['news']
   currentPrice: number
   atrPct: number
+  // Aggressive V3.1 profit recycling (2026-09-23) — undefined for
+  // Balanced, or whenever the caller has no intraday data for this asset
+  // this cycle. Forwarded verbatim into ManagementCandidateInput.
+  // aggressive; this module has no opinion on strategy profiles itself,
+  // matching its existing "just pass through whatever the caller
+  // computed" pattern for atrPct/currentPrice.
+  aggressive?: AggressiveManagementContext
 }
 
 export interface CandidateFlags {
@@ -47,6 +54,10 @@ export interface CandidateFlags {
   managementEnabled: boolean
   feeBps: number
   slippageBps: number
+  // Shared by both profiles — management-question.ts's
+  // isProtectionActionable needs this to decide whether a legal stop
+  // tighten exists at all before offering MODIFY_PROTECTION.
+  minStopLossPct: number
 }
 
 export interface CollectedCandidates {
@@ -92,6 +103,8 @@ export function collectModelCandidates(
         slippageBps: flags.slippageBps,
         atrPct: source.atrPct,
         news: source.news,
+        minStopLossPct: flags.minStopLossPct,
+        aggressive: source.aggressive,
       })
     }
   }

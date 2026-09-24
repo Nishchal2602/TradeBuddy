@@ -3,6 +3,7 @@ import type { Direction } from '../../../../../src/shared/positions/types.ts'
 import type { JevNewsItem, JevPositionSnapshot, JevState } from './question.ts'
 import type { VetoCandidateInput } from '../payload.ts'
 import { buildJevState } from './question.ts'
+import { computeCostR, computePositionPnlR, computePriceR } from '../../strategy/aggressive/protection.ts'
 
 // Phase 2 (2026-09-22) — "Jev as a portfolio-management decision layer."
 // This module owns the OPEN-position questions only; question.ts's
@@ -58,25 +59,74 @@ export function magnitudeFromScore(score: number, levels: readonly number[]): nu
 // Bumped whenever question wording, the ATR step multiple, or the
 // magnitude tables change — persisted alongside JEV_QUESTION_VERSION in
 // agent_decisions.prompt_version so a historical row stays interpretable
-// under whichever version actually produced it.
-export const MANAGEMENT_QUESTION_VERSION = `jev-management-v1/atr${TP_STEP_ATR_MULTIPLE.toFixed(1)}`
+// under whichever version actually produced it. Bumped 2026-09-23
+// (v1 -> v2) for the profit-recycling reframe: the action question's
+// wording, the TIGHTEN_TOWARD_ENTRY rename, the protectionActionable gate,
+// and the new remaining_upside question all change what a row means.
+export const MANAGEMENT_QUESTION_VERSION = `jev-management-v2/atr${TP_STEP_ATR_MULTIPLE.toFixed(1)}`
 
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 //
-// Field-by-field send/never-send list (migration plan §8):
+// Field-by-field send/never-send list (migration plan §8, extended by the
+// profit-recycling plan §4.1):
 //
 // SENT: direction, entryPrice, currentPrice, quantity, notionalUsd,
 // unrealizedPnlPct/Usd, estimatedRoundTripCostPct, heldHours,
 // stopLossPrice/takeProfitPrice, distanceToStopPct/TakeProfitPct, plus the
 // SAME news evidence the veto question already sends for that asset.
+// Aggressive-only (candidate.aggressive present): priceR, positionPnlR,
+// sampledMfeR/MaeR, givebackR/Ratio, profitState, costR,
+// minutesSinceEntry, atrPct, and the intraday features (ret15m/30m/60m,
+// realizedVol5m, volumeTrendRatio, sampledDayHigh/LowPct).
 //
 // NEVER SENT: API keys, user/portfolio/run/position ids, cash, NAV, or
 // any other-asset's exposure (a management question is scoped to ONE
 // position; cross-asset portfolio context is deliberately NOT given to
 // Jev — the deterministic gate is the sole owner of cross-asset risk,
 // exactly as it already is for OPEN's cross-asset caps).
+
+// Aggressive-only extension to a management candidate — undefined for
+// every Balanced candidate, which keeps buildPositionSnapshot's Balanced
+// output BYTE-IDENTICAL to what it produced before this revision (a
+// dedicated regression test asserts this). See profile-recycling plan
+// §4.1: this is what actually fixes the diagnosis finding that Jev's
+// management context was silently missing every one of these fields —
+// they were declared on JevPositionSnapshot with a comment claiming an
+// Aggressive producer existed, but none did until now.
+export interface AggressiveManagementContext {
+  // The immutable ruler triple (positions.initial_entry_price/
+  // initial_stop_loss_price/initial_risk_usd) — never redefined by a
+  // later ADD/REDUCE.
+  initialEntryPrice: number
+  initialStopLossPrice: number
+  initialRiskUsd: number
+  // Cumulative realized P&L from REDUCE only (positions.
+  // partial_realized_pnl_usd) — what keeps positionPnlR continuous across
+  // a partial exit.
+  partialRealizedPnlUsd: number
+  // Monitor-sampled high-water state (positions.sampled_mfe_r/mae_r) —
+  // null when this position has never been sampled yet (freshly eligible
+  // this very cycle, before the monitor's first tick).
+  sampledMfeR: number | null
+  sampledMaeR: number | null
+  minutesSinceEntry: number
+  // Deterministic broker round-trip cost (fee+slippage, both sides) for
+  // the CURRENT quantity — the numerator computeCostR uses against the
+  // immutable initialRiskUsd denominator.
+  currentRoundTripCostUsd: number
+  // Deterministic short-horizon features (strategy/aggressive/
+  // features.ts), reused from the entry path — never recomputed with a
+  // different formula.
+  ret15mPct: number
+  ret30mPct: number
+  ret60mPct: number
+  realizedVol5m: number
+  volumeTrendRatio: number
+  sampledDayHighPct: number
+  sampledDayLowPct: number
+}
 
 export interface ManagementCandidateInput {
   asset: AssetSymbol
@@ -97,6 +147,20 @@ export interface ManagementCandidateInput {
   // reasoning about volatility is grounded in the same number code uses.
   atrPct: number
   news: VetoCandidateInput['news']
+  // Shared by both profiles — used to decide whether a legal stop tighten
+  // exists at all (protectionActionable below), independent of whether
+  // this candidate also carries aggressive-only profit state.
+  minStopLossPct: number
+  // Undefined for Balanced — see AggressiveManagementContext's own
+  // comment.
+  aggressive?: AggressiveManagementContext
+}
+
+function profitStateFor(sampledMfeR: number | null, givebackRatio: number | null): JevPositionSnapshot['profitState'] {
+  if (sampledMfeR === null || sampledMfeR < 1.0) return 'UNPROVEN'
+  if (givebackRatio === null || givebackRatio < 0.33) return 'PROVEN'
+  if (givebackRatio < 0.66) return 'DETERIORATING'
+  return 'GIVING_BACK'
 }
 
 function buildPositionSnapshot(candidate: ManagementCandidateInput): JevPositionSnapshot {
@@ -116,7 +180,7 @@ function buildPositionSnapshot(candidate: ManagementCandidateInput): JevPosition
   // treating raw unrealizedPnlPct as the whole economic picture.
   const estimatedRoundTripCostPct = (2 * (feeBps + slippageBps)) / 10_000
 
-  return {
+  const base: JevPositionSnapshot = {
     direction,
     entryPrice,
     currentPrice,
@@ -130,6 +194,36 @@ function buildPositionSnapshot(candidate: ManagementCandidateInput): JevPosition
     takeProfitPrice,
     distanceToStopPct: Math.abs(currentPrice - stopLossPrice) / currentPrice,
     distanceToTakeProfitPct: Math.abs(takeProfitPrice - currentPrice) / currentPrice,
+  }
+
+  const agg = candidate.aggressive
+  if (!agg) return base // Balanced — BYTE-IDENTICAL to the pre-2026-09-23 shape, no extension keys at all
+
+  const priceR = computePriceR(currentPrice, agg.initialEntryPrice, agg.initialStopLossPrice, direction)
+  const positionPnlR = computePositionPnlR(unrealizedPnlUsd, agg.partialRealizedPnlUsd, agg.initialRiskUsd)
+  const costR = computeCostR(agg.currentRoundTripCostUsd, agg.initialRiskUsd)
+  const givebackR = agg.sampledMfeR === null ? undefined : Math.max(0, agg.sampledMfeR - positionPnlR)
+  const givebackRatio = givebackR === undefined || agg.sampledMfeR === null || agg.sampledMfeR <= 0 ? undefined : givebackR / agg.sampledMfeR
+
+  return {
+    ...base,
+    priceR,
+    positionPnlR,
+    sampledMfeR: agg.sampledMfeR ?? undefined,
+    sampledMaeR: agg.sampledMaeR ?? undefined,
+    givebackR,
+    givebackRatio,
+    profitState: profitStateFor(agg.sampledMfeR, givebackRatio ?? null),
+    costR,
+    minutesSinceEntry: agg.minutesSinceEntry,
+    atrPct: candidate.atrPct,
+    ret15mPct: agg.ret15mPct,
+    ret30mPct: agg.ret30mPct,
+    ret60mPct: agg.ret60mPct,
+    realizedVol5m: agg.realizedVol5m,
+    volumeTrendRatio: agg.volumeTrendRatio,
+    sampledDayHighPct: agg.sampledDayHighPct,
+    sampledDayLowPct: agg.sampledDayLowPct,
   }
 }
 
@@ -202,6 +296,10 @@ export function stopIntentQuestionId(asset: AssetSymbol): string {
 export function targetIntentQuestionId(asset: AssetSymbol): string {
   return `${assetTag(asset)}_target_intent`
 }
+// Aggressive-only (2026-09-23) — see buildRemainingUpsideQuestion below.
+export function remainingUpsideQuestionId(asset: AssetSymbol): string {
+  return `${assetTag(asset)}_remaining_upside`
+}
 
 const ACTION_CRITERIA: Record<string, string> = {
   HOLD: 'Keep the position exactly as it is — no change to size or protection.',
@@ -211,9 +309,13 @@ const ACTION_CRITERIA: Record<string, string> = {
   MODIFY_PROTECTION: 'Keep the position size unchanged, but tighten the stop-loss and/or move the take-profit.',
 }
 
+// Renamed from TIGHTEN_TO_BREAKEVEN 2026-09-23 — see provider.ts's own
+// comment on the StopIntent type for why, and worded honestly: this lands
+// slightly INSIDE entry, not at true breakeven. Only ever offered when
+// protectionActionable is true (below) — see isProtectionActionable.
 const STOP_INTENT_CRITERIA: Record<string, string> = {
   KEEP: 'Leave the stop-loss exactly where it is.',
-  TIGHTEN_TO_BREAKEVEN: 'Tighten the stop-loss toward the entry price, to protect against giving back the entire position.',
+  TIGHTEN_TOWARD_ENTRY: 'Tighten the stop-loss toward (but not past) the entry price, to reduce how much could still be given back.',
 }
 
 const TARGET_INTENT_CRITERIA: Record<string, string> = {
@@ -234,12 +336,87 @@ const REDUCE_MAGNITUDE_LEVELS = [
   'Exit most of the position — the thesis is largely broken, but not entirely.',
 ]
 
-function buildManagementQuestionsForAsset(asset: AssetSymbol): Record<string, JevManagementQuestionSpec> {
-  return {
+// Reuses entry-question.ts's own EXPECTED_MOVE_PCT_BY_SCORE_LEVEL table —
+// deliberately the SAME levels/mapping the entry path already uses, not a
+// second independent scale, so expected_move_pct means the same thing on
+// an entry row and a management row.
+const REMAINING_UPSIDE_LEVELS = [
+  'Negligible — likely to be consumed by fees and slippage alone.',
+  'Modest — a small further move, comparable in size to the round-trip cost.',
+  'Meaningful — clearly larger than the round-trip cost, worth continuing to hold for.',
+  'Substantial — a large further move relative to typical short-horizon volatility for this asset.',
+]
+
+// A legal tighten exists when the candidate stop (TIGHTEN_TOWARD_ENTRY's
+// own formula) is BOTH strictly tighter than the current stop AND
+// strictly on the safe side of the current price — the exact two checks
+// src/shared/risk/gate.ts's evaluateModifyProtection independently
+// enforces. Mirrors that function's own logic rather than re-deriving a
+// different rule, specifically so a "no" here always agrees with what the
+// gate would have said. This is what fixes the diagnosis finding: an
+// underwater position (candidate stop lands ABOVE current price for a
+// long) previously still offered MODIFY_PROTECTION/TIGHTEN_TO_BREAKEVEN
+// as Jev's only coherent answer whenever it wanted to protect the
+// position, then rejected it — invisibly, since the gate was never
+// reached (apply-management.ts's own KEEP/KEEP no-op normalization fired
+// first).
+export function isProtectionActionable(candidate: ManagementCandidateInput): boolean {
+  const { direction, entryPrice, currentPrice, stopLossPrice, minStopLossPct } = candidate
+  const candidateStop = direction === 'long' ? entryPrice * (1 - minStopLossPct) : entryPrice * (1 + minStopLossPct)
+  const tightens = direction === 'long' ? candidateStop > stopLossPrice : candidateStop < stopLossPrice
+  const wouldStopOutNow = direction === 'long' ? candidateStop >= currentPrice : candidateStop <= currentPrice
+  return tightens && !wouldStopOutNow
+}
+
+// The reframed action question (profile-recycling plan §4.2) — marginal
+// return versus profit already accumulated, not "are you bullish?" (that
+// phrasing anchors reasoning to the broader trend, which is exactly what
+// this strategy's short horizon must NOT do). Balanced's wording is
+// UNCHANGED — this only branches when candidate.aggressive is present.
+function buildActionInstructions(candidate: ManagementCandidateInput): string {
+  const { asset } = candidate
+  const agg = candidate.aggressive
+  if (!agg) {
+    return `Given the current state of the open ${asset} position (its entry, current price, unrealized P&L, protection levels, holding time, and any relevant news), what should happen to it right now?`
+  }
+  const positionPnlR = computePositionPnlR(
+    candidate.direction === 'long'
+      ? (candidate.currentPrice - candidate.entryPrice) * candidate.quantity
+      : (candidate.entryPrice - candidate.currentPrice) * candidate.quantity,
+    agg.partialRealizedPnlUsd,
+    agg.initialRiskUsd,
+  )
+  const priceR = computePriceR(candidate.currentPrice, agg.initialEntryPrice, agg.initialStopLossPrice, candidate.direction)
+  const costR = computeCostR(agg.currentRoundTripCostUsd, agg.initialRiskUsd)
+  const sampledMfeR = agg.sampledMfeR
+  const givebackRatio = sampledMfeR === null || sampledMfeR <= 0 ? null : Math.max(0, sampledMfeR - positionPnlR) / sampledMfeR
+
+  const mfeText = sampledMfeR === null ? 'not yet been sampled' : `reached a best point of ${sampledMfeR.toFixed(2)}R`
+  const givebackText = givebackRatio === null ? '' : `, having given back ${(givebackRatio * 100).toFixed(0)}% of its best gain`
+
+  return `This ${asset} position has ${mfeText} and is now at ${positionPnlR.toFixed(2)}R${givebackText}. `
+    + `Price itself is ${priceR.toFixed(2)}R from the original entry. A full round trip costs ${costR.toFixed(2)}R. `
+    + `Considering the short-horizon momentum, the profit already accumulated, and how much of it is already gone — `
+    + `is continuing to hold the full position better than realizing part or all of it now?`
+}
+
+function buildManagementQuestionsForAsset(candidate: ManagementCandidateInput): Record<string, JevManagementQuestionSpec> {
+  const { asset } = candidate
+  const protectionActionable = isProtectionActionable(candidate)
+
+  // omit MODIFY_PROTECTION entirely when no legal tighten exists — the
+  // action space must never offer a choice the gate is guaranteed to
+  // reject, or Jev's only coherent way to express "protect this" becomes
+  // a silent no-op (profile-recycling plan §4.3).
+  const actionCriteria = protectionActionable
+    ? ACTION_CRITERIA
+    : Object.fromEntries(Object.entries(ACTION_CRITERIA).filter(([action]) => action !== 'MODIFY_PROTECTION'))
+
+  const questions: Record<string, JevManagementQuestionSpec> = {
     [managementActionQuestionId(asset)]: {
       type: 'choice',
-      instructions: `Given the current state of the open ${asset} position (its entry, current price, unrealized P&L, protection levels, holding time, and any relevant news), what should happen to it right now?`,
-      criteria: ACTION_CRITERIA,
+      instructions: buildActionInstructions(candidate),
+      criteria: actionCriteria,
     },
     // Speculative — asked regardless of what the action answer turns out
     // to be, per the documented fan-out pattern; consumed only on the
@@ -265,12 +442,31 @@ function buildManagementQuestionsForAsset(asset: AssetSymbol): Record<string, Je
       criteria: TARGET_INTENT_CRITERIA,
     },
   }
+
+  // Aggressive-only, non-action question (profile-recycling plan §4.4) —
+  // reuses the existing five-action schema rather than adding a parallel
+  // PROTECT_PROFIT/HOLD_FOR_CONTINUATION/TAKE_PARTIAL_PROFIT/EXIT action
+  // space (which would be near-isomorphic to the one above with no
+  // mechanism to reconcile disagreement). This instead populates
+  // expected_move_pct/move_to_cost_ratio on a MANAGEMENT row — previously
+  // null on every Aggressive row, since Pass 3 only ever set them on the
+  // entry branch — giving "did the model see the deterioration?" a
+  // directly measurable answer.
+  if (candidate.aggressive) {
+    questions[remainingUpsideQuestionId(asset)] = {
+      type: 'score',
+      instructions: `If the ${asset} position were left open right now, how large a further favorable move do you expect over the next 15-60 minutes?`,
+      criteria: REMAINING_UPSIDE_LEVELS,
+    }
+  }
+
+  return questions
 }
 
 export function buildManagementQuestions(candidates: ManagementCandidateInput[]): Record<string, JevManagementQuestionSpec> {
   const questions: Record<string, JevManagementQuestionSpec> = {}
   for (const candidate of candidates) {
-    Object.assign(questions, buildManagementQuestionsForAsset(candidate.asset))
+    Object.assign(questions, buildManagementQuestionsForAsset(candidate))
   }
   return questions
 }

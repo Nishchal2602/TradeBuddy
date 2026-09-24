@@ -21,7 +21,7 @@ import type { ManagementOutcome, StopIntent, TargetIntent } from '../model/jev/p
 // an absolute, capped size (src/shared/risk/gate.ts's evaluateAdd/
 // evaluateReduce). For MODIFY_PROTECTION, this function is the
 // "deterministic code computes the price" step: Jev's stop/target
-// INTENT (KEEP/TIGHTEN_TO_BREAKEVEN, KEEP/MOVE_CLOSER/MOVE_OUT) becomes
+// INTENT (KEEP/TIGHTEN_TOWARD_ENTRY, KEEP/MOVE_CLOSER/MOVE_OUT) becomes
 // an absolute price here, which the gate then VALIDATES — never trusts —
 // exactly the same split strategy/rules.ts already applies to a fresh
 // OPEN_LONG's stopLossPct/takeProfitPct.

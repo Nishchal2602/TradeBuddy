@@ -340,7 +340,7 @@ function evaluateReduce(proposal: Extract<ModelDecisionProposal, { action: 'REDU
 }
 
 // Phase 2 (2026-09-22) — Jev never proposes a price; cycle/apply-
-// management.ts already resolved its intent (KEEP/TIGHTEN_TO_BREAKEVEN,
+// management.ts already resolved its intent (KEEP/TIGHTEN_TOWARD_ENTRY,
 // KEEP/MOVE_CLOSER/MOVE_OUT) into these absolute prices. This function's
 // only job is to VALIDATE them — never to compute them — exactly the
 // same split evaluateOpen already applies to a fresh OPEN's SL/TP.

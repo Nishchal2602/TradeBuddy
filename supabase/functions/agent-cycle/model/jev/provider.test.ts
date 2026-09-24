@@ -7,6 +7,7 @@ function managementCandidate(overrides: Partial<ManagementCandidateInput> = {}):
   return {
     asset: 'BTC', direction: 'long', entryPrice: 100, currentPrice: 120, quantity: 10,
     stopLossPrice: 90, takeProfitPrice: 180, heldHours: 12, feeBps: 10, slippageBps: 5, atrPct: 2.5, news: [],
+    minStopLossPct: 0.005,
     ...overrides,
   }
 }
@@ -153,7 +154,7 @@ const FULL_MANAGEMENT_ANSWERS = {
   btc_action: { type: 'choice', choice: 'ADD', confidence: 0.8, probabilities: { HOLD: 0.1, ADD: 0.8, REDUCE: 0.05, CLOSE: 0.03, MODIFY_PROTECTION: 0.02 } },
   btc_add_conviction: { type: 'score', score: 2, confidence: 0.7, legend: { '0': 'a', '1': 'b', '2': 'c' }, probabilities: { '0': 0, '1': 0.1, '2': 0.9 } },
   btc_reduce_magnitude: { type: 'score', score: 0, confidence: 0.6, legend: { '0': 'a', '1': 'b', '2': 'c' }, probabilities: { '0': 0.9, '1': 0.1, '2': 0 } },
-  btc_stop_intent: { type: 'choice', choice: 'KEEP', confidence: 0.9, probabilities: { KEEP: 0.9, TIGHTEN_TO_BREAKEVEN: 0.1 } },
+  btc_stop_intent: { type: 'choice', choice: 'KEEP', confidence: 0.9, probabilities: { KEEP: 0.9, TIGHTEN_TOWARD_ENTRY: 0.1 } },
   btc_target_intent: { type: 'choice', choice: 'MOVE_OUT', confidence: 0.55, probabilities: { KEEP: 0.3, MOVE_CLOSER: 0.15, MOVE_OUT: 0.55 } },
 }
 
@@ -214,5 +215,31 @@ Deno.test('requestPortfolioDecisions: raw confidence and the full probability di
   assertEquals(typeof outcome.actionConfidence, 'number')
   assertEquals(outcome.actionProbabilities.ADD, 0.8)
   assertEquals(Object.keys(outcome.actionProbabilities).length, 5)
+})
+
+// --- Aggressive V3.1 profit recycling: remaining_upside (migration plan
+// §4.4) ----------------------------------------------------------------------
+
+const AGGRESSIVE_CONTEXT = {
+  initialEntryPrice: 100, initialStopLossPrice: 92, initialRiskUsd: 80, partialRealizedPnlUsd: 0,
+  sampledMfeR: 2.0, sampledMaeR: -0.2, minutesSinceEntry: 45, currentRoundTripCostUsd: 3,
+  ret15mPct: 0.2, ret30mPct: 0.4, ret60mPct: 0.6, realizedVol5m: 0.05, volumeTrendRatio: 1.2,
+  sampledDayHighPct: -1.5, sampledDayLowPct: 3.0,
+}
+
+Deno.test('requestPortfolioDecisions: a Balanced management candidate never asks remaining_upside, and the answer key is undefined', async () => {
+  const fetchImpl = mixedFetch(FULL_MANAGEMENT_ANSWERS)
+  const result = await requestPortfolioDecisions([], [managementCandidate()], 10_000, 8_000, 0.3, 'key', fetchImpl)
+  assertEquals(result.managementOutcomes[0]!.remainingUpsideExpectedMovePct, undefined)
+})
+
+Deno.test('requestPortfolioDecisions: an Aggressive management candidate asks remaining_upside and maps the Score through the same table the entry path uses', async () => {
+  const fetchImpl = mixedFetch({
+    ...FULL_MANAGEMENT_ANSWERS,
+    btc_remaining_upside: { type: 'score', score: 2, confidence: 0.6, legend: { '0': 'a', '1': 'b', '2': 'c', '3': 'd' }, probabilities: { '0': 0, '1': 0.1, '2': 0.7, '3': 0.2 } },
+  })
+  const result = await requestPortfolioDecisions([], [managementCandidate({ aggressive: AGGRESSIVE_CONTEXT })], 10_000, 8_000, 0.3, 'key', fetchImpl)
+  // score 2 -> EXPECTED_MOVE_PCT_BY_SCORE_LEVEL[2] = 0.008, same table entry-question.ts uses
+  assertEquals(result.managementOutcomes[0]!.remainingUpsideExpectedMovePct, 0.008)
 })
 
