@@ -3,9 +3,10 @@ import { STRATEGY_PROFILES, StrategyProfile, strategyDefinitionFor } from '../..
 
 // --- The enum itself --------------------------------------------------
 
-Deno.test('StrategyProfile: accepts exactly balanced and aggressive', () => {
+Deno.test('StrategyProfile: accepts exactly balanced, aggressive, and intraday_ls', () => {
   assertEquals(StrategyProfile.parse('balanced'), 'balanced')
   assertEquals(StrategyProfile.parse('aggressive'), 'aggressive')
+  assertEquals(StrategyProfile.parse('intraday_ls'), 'intraday_ls')
 })
 
 Deno.test("StrategyProfile: 'conservative' is rejected, never silently mapped to a real strategy", () => {
@@ -56,20 +57,40 @@ Deno.test("strategyDefinitionFor('aggressive'): risk policy matches the pre-regi
   assertEquals(def.risk.stopOutReentryBlockMinutes, 60)
 })
 
-Deno.test('both profiles: news lookback is identical (195 min) — NOT derived from decisionIntervalMinutes, so a 15m cadence never silently starves the shared news feed', () => {
+Deno.test('all three profiles: news lookback is identical (195 min) — NOT derived from decisionIntervalMinutes, so a fast cadence never silently starves the shared news feed', () => {
   assertEquals(strategyDefinitionFor('balanced').newsLookbackMinutes, 195)
   assertEquals(strategyDefinitionFor('aggressive').newsLookbackMinutes, 195)
+  assertEquals(strategyDefinitionFor('intraday_ls').newsLookbackMinutes, 195)
 })
 
-Deno.test('both profiles: maxDataStalenessMinutes is profile-specific, not a shared global — 30 min for balanced, 10 min for aggressive', () => {
+Deno.test('all three profiles: maxDataStalenessMinutes is profile-specific, not a shared global — 30 min for balanced, 10 min for aggressive and intraday_ls', () => {
   assertEquals(strategyDefinitionFor('balanced').maxDataStalenessMinutes, 30)
   assertEquals(strategyDefinitionFor('aggressive').maxDataStalenessMinutes, 10)
+  assertEquals(strategyDefinitionFor('intraday_ls').maxDataStalenessMinutes, 10)
+})
+
+// --- intraday_ls (Strategy V4, 2026-10-01): long/short intraday ---------
+
+Deno.test("strategyDefinitionFor('intraday_ls'): strategyVersion is 'v4-ls-intraday-30m'", () => {
+  assertEquals(strategyDefinitionFor('intraday_ls').strategyVersion, 'v4-ls-intraday-30m')
+})
+
+Deno.test("strategyDefinitionFor('intraday_ls'): decisionIntervalMinutes matches the LIVE cron (60), not the plan's originally-specified 15", () => {
+  assertEquals(strategyDefinitionFor('intraday_ls').decisionIntervalMinutes, 60)
+})
+
+Deno.test("strategyDefinitionFor('intraday_ls'): risk policy — 0.50% budget, 30%/60% caps, same 60-minute (one-cycle) re-entry block as its own cadence", () => {
+  const def = strategyDefinitionFor('intraday_ls')
+  assertEquals(def.risk.riskBudgetPct, 0.005)
+  assertEquals(def.risk.maxSingleTradePct, 0.30)
+  assertEquals(def.risk.maxTotalNotionalPct, 0.60)
+  assertEquals(def.risk.stopOutReentryBlockMinutes, 60)
 })
 
 // --- Registry completeness ----------------------------------------------
 
-Deno.test('STRATEGY_PROFILES: has exactly the two enum members, no more, no fewer', () => {
-  assertEquals(Object.keys(STRATEGY_PROFILES).sort(), ['aggressive', 'balanced'])
+Deno.test('STRATEGY_PROFILES: has exactly the three enum members, no more, no fewer', () => {
+  assertEquals(Object.keys(STRATEGY_PROFILES).sort(), ['aggressive', 'balanced', 'intraday_ls'])
 })
 
 Deno.test('STRATEGY_PROFILES: every entry is internally consistent — its own .profile field matches its registry key', () => {

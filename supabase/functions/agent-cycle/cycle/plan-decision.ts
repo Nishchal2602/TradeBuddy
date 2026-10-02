@@ -4,6 +4,7 @@ import type { AssetSymbol } from '../../../../src/shared/market-data/types.ts'
 import type { Position } from '../../../../src/shared/positions/types.ts'
 import type { ModelDecisionProposal } from '../../../../src/shared/decisions/types.ts'
 import type { RiskGateResult } from '../../../../src/shared/risk/gate.ts'
+import type { StrategyProfile } from '../../../../src/shared/strategy/profiles.ts'
 
 // Pure: given a proposal and its already-computed risk-gate result, decide
 // whether anything should execute and, if so, compute the full
@@ -26,6 +27,11 @@ export interface DecisionPlanInput {
   startingCash: number
   decisionId: string
   nowIso: string
+  // Strategy V4 (2026-10-01) — threaded into openPosition (frozen onto
+  // the position at origination) and into add/reduce/close (perpetual
+  // funding accrual, broker/accounting.ts's own module comment).
+  strategyProfile: StrategyProfile
+  shortFundingBpsPerDay: number
 }
 
 export type DecisionPlan =
@@ -64,6 +70,7 @@ export function planDecisionExecution(input: DecisionPlanInput): DecisionPlan {
       decisionId: input.decisionId,
       startingCash: input.startingCash,
       nowIso: input.nowIso,
+      shortFundingBpsPerDay: input.shortFundingBpsPerDay,
     })
     return { kind: 'close', closeResult }
   }
@@ -95,6 +102,7 @@ export function planDecisionExecution(input: DecisionPlanInput): DecisionPlan {
       decisionId: input.decisionId,
       startingCash: input.startingCash,
       nowIso: input.nowIso,
+      strategyProfile: input.strategyProfile,
     })
     return { kind: 'open', openResult }
   }
@@ -116,6 +124,7 @@ export function planDecisionExecution(input: DecisionPlanInput): DecisionPlan {
       decisionId: input.decisionId,
       startingCash: input.startingCash,
       nowIso: input.nowIso,
+      shortFundingBpsPerDay: input.shortFundingBpsPerDay,
     })
     return { kind: 'add', addResult }
   }
@@ -140,6 +149,7 @@ export function planDecisionExecution(input: DecisionPlanInput): DecisionPlan {
       decisionId: input.decisionId,
       startingCash: input.startingCash,
       nowIso: input.nowIso,
+      shortFundingBpsPerDay: input.shortFundingBpsPerDay,
     })
     return { kind: 'reduce', reduceResult }
   }

@@ -24,12 +24,14 @@ import type { VetoCandidateInput } from '../payload.ts'
 const candidates: VetoCandidateInput[] = [
   {
     asset: 'BTC',
+    direction: 'long',
     news: [
       { id: '11111111-1111-1111-1111-111111111111', source: 'Cointelegraph', headline: 'Bitcoin ETF sees third straight day of inflows', summary: 'Spot ETFs recorded $210M in net inflows.', publishedAt: new Date(Date.now() - 3_600_000).toISOString(), ageMinutes: 60 },
     ],
   },
   {
     asset: 'ETH',
+    direction: 'long',
     news: [
       { id: '22222222-2222-2222-2222-222222222222', source: 'The Block', headline: 'Major exchange discloses $400M exploit, withdrawals paused', summary: 'The exchange confirmed a smart contract exploit drained a significant share of user funds; withdrawals have been halted pending investigation.', publishedAt: new Date(Date.now() - 1_800_000).toISOString(), ageMinutes: 30 },
     ],

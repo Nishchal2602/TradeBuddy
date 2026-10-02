@@ -7,6 +7,8 @@ import type { VetoOutcome, ManagementOutcome } from './model/jev/provider.ts'
 import type { AggressiveManagementContext } from './model/jev/management-question.ts'
 import type { EntryOpportunityInput, EntryOutcome } from './model/jev/entry-question.ts'
 import { ENTRY_QUESTION_VERSION } from './model/jev/entry-question.ts'
+import type { AdversarialOutcome } from './model/jev/adversarial-question.ts'
+import { ADVERSARIAL_QUESTION_VERSION } from './model/jev/adversarial-question.ts'
 import { buildPortfolioConstraints, buildAssetInput, buildRiskGateContext, checkMarketDataFreshness, aggregateOtherOpenPositionsRisk } from './cycle/build-context.ts'
 import type { PersistedNewsItem } from './cycle/build-context.ts'
 import { evaluateTrendRegime } from './strategy/regime.ts'
@@ -20,6 +22,7 @@ import { derivePrimaryDriver, citedNewsIds } from './cycle/decision-record.ts'
 import { computeNav } from './broker/accounting.ts'
 import { rowToPosition, toIsoZ } from './db/row-mappers.ts'
 import { toQuoteRow } from './db/quote-rows.ts'
+import { marketBarsFromIntradayMarketData, marketBarsFromNormalizedMarketData, upsertMarketBars } from './db/market-bars.ts'
 import { buildDecisionIdempotencyKey, classifyRunInsertConflict, parseTrigger, staleRunCutoffIso } from './cycle/idempotency.ts'
 import type { CycleTrigger } from './cycle/idempotency.ts'
 import { checkStrategyDataSufficiency, clearsEntryTradeabilityFloor, detectAggressiveOpportunity, intradayFeaturesFor, managementAtrPctFor, protectionForEntry, strategyFor } from './strategy/registry.ts'
@@ -28,9 +31,15 @@ import type { OpportunitySignal } from './strategy/aggressive/detectors.ts'
 import type { IntradayMarketData } from './strategy/aggressive/types.ts'
 import { stopLossPctFor, takeProfitPctFor } from './strategy/rules.ts'
 import { computePositionPnlR, computePriceR } from './strategy/aggressive/protection.ts'
+import { evaluateBias } from './strategy/intraday-ls/bias.ts'
+import type { Bias } from './strategy/intraday-ls/bias.ts'
+import { detectIntradayLsOpportunity } from './strategy/intraday-ls/detectors.ts'
+import type { ArmId } from './strategy/intraday-ls/detectors.ts'
+import { shouldEmitOpportunity } from './strategy/intraday-ls/lifecycle.ts'
 import { riskAppetiteThresholds } from '../../../src/shared/risk/appetite-mapping.ts'
-import type { RiskAppetite } from '../../../src/shared/risk/appetite-mapping.ts'
+import type { RiskAppetite, RiskAppetiteThresholds } from '../../../src/shared/risk/appetite-mapping.ts'
 import type { SlTpBounds } from '../../../src/shared/risk/sl-tp.ts'
+import { computeStopLossTakeProfitPrices } from '../../../src/shared/risk/sl-tp.ts'
 import type { RecentStopLossClose } from '../../../src/shared/risk/gate.ts'
 import { evaluateRiskGate } from '../../../src/shared/risk/gate.ts'
 import { deriveRiskBasedNotional } from '../../../src/shared/risk/sizing.ts'
@@ -40,6 +49,16 @@ import type { InvalidationCondition, Action, ModelDecisionProposal } from '../..
 import type { RegimeResult } from '../../../src/shared/strategy/types.ts'
 import type { AssetInput, ModelCallPayload, RecentDecisionInput } from './model/payload.ts'
 import type { NormalizedNewsItem } from '../../../src/shared/news/types.ts'
+import { reconcileClosedBar } from './strategy/closed-bars.ts'
+
+// Strategy V4 (2026-10-03, plan §5-IMPL review item 3) — provisional, not
+// tuned against any data: a round-trip cost (~0.3% at default fee/
+// slippage settings) is the natural floor below which routine spread/
+// slippage noise between the two independently-fetched series would
+// trip this on a healthy day. 0.5% leaves headroom above that while
+// still catching a genuine multi-percent semantics break. See
+// closed-bars.ts's reconcileClosedBar for what this gates.
+const CLOSED_BAR_RECONCILIATION_TOLERANCE = 0.005
 
 // The thin I/O shell around the pure decision core (cycle/build-context.ts,
 // cycle/plan-decision.ts, cycle/decision-record.ts) and every
@@ -90,6 +109,14 @@ interface Settings {
   // existed (src/shared/strategy/profiles.ts's own test suite proves
   // this), so nothing downstream changes yet.
   strategyProfile: StrategyProfile
+  // Strategy V4 (2026-10-01) — perpetual-funding rate for a short
+  // position (broker/accounting.ts's computeFundingAccrual) and the two
+  // new intraday_ls-only monitor exits' own thresholds (plan §4.2/§4.3).
+  // Global settings, not per-profile overrides — same discipline as
+  // feeBps/slippageBps above, which every profile already shares.
+  shortFundingBpsPerDay: number
+  timeStopMinutes: number
+  maxHoldMinutes: number
 }
 
 async function readSettings(supabase: SupabaseClient): Promise<Settings> {
@@ -121,6 +148,9 @@ async function readSettings(supabase: SupabaseClient): Promise<Settings> {
     minTradeNotionalPct: Number(data.min_trade_notional_pct),
     minTradeNotionalUsd: Number(data.min_trade_notional_usd),
     strategyProfile: data.strategy_profile,
+    shortFundingBpsPerDay: Number(data.short_funding_bps_per_day),
+    timeStopMinutes: data.time_stop_minutes,
+    maxHoldMinutes: data.max_hold_minutes,
   }
 }
 
@@ -183,6 +213,27 @@ async function readRecentStopLossClose(supabase: SupabaseClient, portfolioId: st
     .maybeSingle()
   if (error) throw new Error(`could not read recent stop-loss close for ${asset}: ${error.message}`)
   return data ? { direction: data.direction, closedAt: toIsoZ(data.closed_at) } : null
+}
+
+// Strategy V4 (intraday_ls, 2026-10-01) — the consumed-opportunity
+// lifecycle's own state (strategy/intraday-ls/lifecycle.ts): the most
+// recent bar timestamp any PRIOR decision already recorded detecting an
+// opportunity for this asset. Persisting a decision row (any action,
+// including HOLD) IS the act of consuming — see that module's own
+// comment — so this is simply the max over every row ever written, no
+// separate bookkeeping table.
+async function readLastConsumedOpportunityBarTs(supabase: SupabaseClient, portfolioId: string, asset: AssetSymbol): Promise<string | null> {
+  const { data, error } = await supabase
+    .from('agent_decisions')
+    .select('opportunity_bar_ts')
+    .eq('portfolio_id', portfolioId)
+    .eq('asset', asset)
+    .not('opportunity_bar_ts', 'is', null)
+    .order('opportunity_bar_ts', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  if (error) throw new Error(`could not read last consumed opportunity bar for ${asset}: ${error.message}`)
+  return data ? toIsoZ(data.opportunity_bar_ts) : null
 }
 
 // trading-strategy-v1.md §17.3 — the portfolio's own highest-ever NAV.
@@ -382,7 +433,15 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
     .eq('status', 'running')
     .lt('started_at', staleRunCutoffIso(nowIso))
 
-  const idempotencyKey = buildDecisionIdempotencyKey(trigger, nowIso, settings.decisionIntervalMinutes)
+  // Phase 0 wiring fix (2026-10-01, Strategy V4 prep) — reads the
+  // RESOLVED strategy's own decisionIntervalMinutes, not the flat,
+  // profile-agnostic agent_settings column. This was the originally
+  // parked fix from 2026-09-24 (decision_interval_minutes left at a
+  // stale value caused silent duplicate_tick no-ops) — finishing it here
+  // rather than leaving the flat column as the bucket width for every
+  // profile. See src/shared/strategy/profiles.ts's own comment on this
+  // field for why a per-profile value is correct and the flat one isn't.
+  const idempotencyKey = buildDecisionIdempotencyKey(trigger, nowIso, strategy.decisionIntervalMinutes)
   const { data: run, error: runInsertError } = await supabase
     .from('agent_runs')
     .insert({ portfolio_id: portfolio.id, idempotency_key: idempotencyKey, status: 'running', kind: 'decision', started_at: nowIso })
@@ -422,13 +481,30 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
     const { error: quotesError } = await supabase.from('market_quotes').upsert(marketData.map(toQuoteRow), { onConflict: 'asset' })
     if (quotesError) console.error(`agent-cycle: could not upsert market_quotes: ${quotesError.message}`)
 
-    const freshness = checkMarketDataFreshness(marketData, settings.maxDataStalenessMinutes, nowIso)
+    // Phase 0 wiring fix (2026-10-01) — strategy.maxDataStalenessMinutes
+    // (10 for Aggressive, 30 for Balanced) was declared but never read;
+    // every profile has been freshness-gated on the flat, Balanced-shaped
+    // agent_settings column. Live-confirmed before this fix: Aggressive
+    // decisions were tolerating 30-minute-stale data against its own
+    // documented 10-minute tolerance.
+    const freshness = checkMarketDataFreshness(marketData, strategy.maxDataStalenessMinutes, nowIso)
     if (!freshness.fresh) {
       await supabase.from('agent_runs').update({ status: 'skipped', skip_reason: freshness.reason, completed_at: new Date().toISOString() }).eq('id', runId)
       return { status: 'skipped', runId, decisions: [], detail: freshness.reason }
     }
 
-    const lookbackMinutes = settings.decisionIntervalMinutes + settings.newsLookbackOverlapMinutes
+    // Phase 0 wiring fix (2026-10-01) — strategy.newsLookbackMinutes (195
+    // for both profiles, by design — see profiles.ts's own comment) was
+    // declared specifically to AVOID this derivation ("NOT derived from
+    // decisionIntervalMinutes + an overlap constant"), but the forbidden
+    // derivation is exactly what ran anyway. Live-confirmed before this
+    // fix: at the 60-minute cadence, news lookback had silently narrowed
+    // to 75 minutes (60+15) instead of the intended 210 (195+15) —
+    // excluding 135 minutes of news context from every cycle's veto
+    // layer. The overlap minutes themselves are still real and still
+    // added on top; only the base window changes from "this cycle's
+    // cadence" to "this profile's fixed news window."
+    const lookbackMinutes = strategy.newsLookbackMinutes + settings.newsLookbackOverlapMinutes
     // A news-provider failure does NOT fail the whole cycle (trading-
     // strategy-v1.md §12 Failure semantics) — V1's entry decision itself
     // (strategy/regime.ts) never reads news at all, and CLOSE must always
@@ -445,6 +521,34 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
     const persistedByExternalId = await persistNews(supabase, rawNews)
 
     const appetite = riskAppetiteThresholds(settings.riskAppetite)
+
+    // Phase 0 wiring fix (2026-10-01, Strategy V4 prep) — strategy.risk's
+    // per-profile overrides (riskBudgetPct/maxSingleTradePct/
+    // maxTotalNotionalPct/stopOutReentryBlockMinutes, src/shared/strategy/
+    // profiles.ts) were declared but never read anywhere; every decision
+    // under every profile has been sized against the flat,
+    // profile-agnostic agent_settings columns and risk_appetite's mapping
+    // instead. Live-confirmed before this fix: Aggressive's
+    // effective_risk_budget_pct read 0.0050 (risk_appetite='balanced''s
+    // value), not its own declared 0.0075 — Aggressive has been running
+    // on Balanced's risk policy since 2026-09-23.
+    //
+    // riskBudgetPct falls through to appetite.riskBudgetPct when the
+    // profile declares null (Balanced, unchanged — this is precisely why
+    // that field is nullable, see StrategyRiskPolicy's own comment).
+    // maxSingleTradePct/maxTotalNotionalPct are clamped against the
+    // global agent_settings ceiling, the same min(profile, ceiling)
+    // discipline build-context.ts's own comment already documents for
+    // these two caps. stopOutReentryBlockMinutes is read directly, never
+    // clamped — a smaller profile value here is MORE conservative (a
+    // shorter cool-off is the only direction that would need a floor, and
+    // none is declared), so there is no ceiling concept to apply.
+    const effectiveAppetite: RiskAppetiteThresholds = {
+      minConfidence: appetite.minConfidence,
+      riskBudgetPct: strategy.risk.riskBudgetPct ?? appetite.riskBudgetPct,
+    }
+    const effectiveMaxSingleTradePct = Math.min(strategy.risk.maxSingleTradePct, settings.maxSingleTradePct)
+    const effectiveMaxTotalNotionalPct = Math.min(strategy.risk.maxTotalNotionalPct, settings.maxTotalNotionalPct)
     const peakNav = await readPeakNav(supabase, portfolio.id)
 
     // Live view of open positions across the whole cycle, refreshed as
@@ -501,14 +605,50 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         atrTargetDistancePct: number
         estimatedRoundTripCostPct: number
       }
+      // Strategy V4 (intraday_ls, 2026-10-01) — populated ONLY for
+      // 'intraday_ls' cycles, only for a FLAT asset where the six-arm
+      // detector fired, cleared the cost gate (plan §4.1), AND has not
+      // already been consumed by a prior decision row (the lifecycle
+      // check, strategy/intraday-ls/lifecycle.ts). Persisted on every
+      // decision row (arm_id/bias/opportunity_bar_ts) regardless of
+      // whether intradayLsCandidate below is actually set.
+      intradayLsOpportunityContext?: {
+        armId: ArmId
+        bias: Bias
+        direction: 'long' | 'short'
+        opportunityBarTs: string
+      }
+      // Strategy V4 (2026-10-01, §5) — the REAL OPEN_LONG/OPEN_SHORT
+      // proposal built from the context above (protectionForEntry's own
+      // stop/target, §4.1). This is what Pass 2 uses as intraday_ls's
+      // effective candidate BASE (replacing Balanced's regime-sourced
+      // `candidate` entirely for this profile, never neutralizing it the
+      // way Aggressive's own entries are handled) and what the veto
+      // collection below reads to build a direction-aware veto question.
+      // Undefined whenever intradayLsOpportunityContext is — no opportunity
+      // this cycle means no candidate to propose, full stop.
+      intradayLsCandidate?: ModelDecisionProposal
+      // Strategy V4 (2026-10-02, plan §5.1 review item 1) — computed at
+      // candidate-build time, from the SAME stopLossPct/takeProfitPct
+      // intradayLsCandidate carries, so the labeler can simulate a trade
+      // for a candidate that never actually opens (vetoed, risk-rejected,
+      // or merely a SKIP in advisory mode). gateResult.computedStopLossPrice/
+      // computedTakeProfitPrice remain the authoritative figures whenever
+      // the gate actually ran and approved — this is only ever the
+      // fallback for a row the gate rejected or never reached.
+      intradayLsComputedPrices?: { stopLossPrice: number; takeProfitPrice: number }
     }
 
     // Strategy profiles, Pass 2 — the additive intraday feed, fetched ONCE
     // per cycle, ONLY when the selected profile actually needs it. A
     // 'balanced' cycle makes zero extra requests (intradayByAsset stays
     // {}), preserving that profile's existing 1+3N CoinGecko cost exactly.
+    // Strategy V4 (2026-10-01): intraday_ls needs the SAME feed (its six
+    // arms run on the identical 30m/5m series Aggressive's own detectors
+    // and features use) — extended here rather than duplicating the
+    // fetch under a second gate.
     const intradayByAsset: Partial<Record<AssetSymbol, IntradayMarketData>> =
-      settings.strategyProfile === 'aggressive'
+      settings.strategyProfile === 'aggressive' || settings.strategyProfile === 'intraday_ls'
         ? await fetchIntradayMarketData(settings.assets, fetchImpl, undefined, coingeckoApiKey)
         : {}
 
@@ -537,7 +677,10 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         openInvalidation,
         recentDecisions,
         recentStopLossClose,
-        stopOutReentryBlockMinutes: settings.stopOutReentryBlockMinutes,
+        // Phase 0 wiring fix (2026-10-01) — strategy.risk's own value
+        // (60 min for Aggressive, 360 for Balanced), not the flat
+        // settings column every profile was reading before this fix.
+        stopOutReentryBlockMinutes: strategy.risk.stopOutReentryBlockMinutes,
         nowIso,
         regime,
       })
@@ -554,6 +697,36 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         provider: assetMarketData.provider,
         data_as_of: assetMarketData.dataAsOf,
       })
+
+      // Strategy V4 Phase 0.6 (2026-10-01) — market_bars, filled from data
+      // already fetched above (candles/dailyCloseSeries unconditionally;
+      // ohlc30m/spot5m only when intradayByAsset has an entry for this
+      // asset — currently Aggressive-only, same gating as the fetch
+      // itself). Zero extra CoinGecko requests. Non-fatal on failure, the
+      // same "side write to a display-only/analysis-only table, not a
+      // trading action" discipline the market_quotes upsert above
+      // already follows — this must never fail the cycle.
+      const intradayForAsset = intradayByAsset[asset]
+      const marketBars = [
+        ...marketBarsFromNormalizedMarketData(assetMarketData),
+        ...(intradayForAsset ? marketBarsFromIntradayMarketData(intradayForAsset) : []),
+      ]
+      await upsertMarketBars(supabase, marketBars)
+
+      // Strategy V4 (2026-10-03, plan §5-IMPL review item 3) — a cheap
+      // runtime guard on the /ohlc close-time/withheld-in-progress-bar
+      // assumption the 4h bias leg and the 30m signal both depend on. Both
+      // series are already in scope here (same data market_bars just
+      // filled from) — logged only, never a filter and never fail-closed;
+      // see closed-bars.ts's own comment on reconcileClosedBar for why.
+      if (intradayForAsset) {
+        const newestCandle = assetMarketData.candles.at(-1)
+        const check4h = reconcileClosedBar(newestCandle, intradayForAsset.spot5m, CLOSED_BAR_RECONCILIATION_TOLERANCE)
+        if (!check4h.ok) console.error(`[closed-bar-reconciliation] ${asset} 4h candles: ${check4h.reason}`)
+        const newest30m = intradayForAsset.ohlc30m.at(-1)
+        const check30m = reconcileClosedBar(newest30m, intradayForAsset.spot5m, CLOSED_BAR_RECONCILIATION_TOLERANCE)
+        if (!check30m.ok) console.error(`[closed-bar-reconciliation] ${asset} 30m candles: ${check30m.reason}`)
+      }
 
       const candidate = buildCandidateProposal({
         asset,
@@ -589,7 +762,55 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         }
       }
 
-      passOneResults.push({ asset, assetMarketData, assetInput, regime, candidate, openPosition, recentStopLossClose, aggressiveEntryContext })
+      // Strategy V4 (intraday_ls, 2026-10-01, §3+§4.1+§5) — bias + six-arm
+      // detection for a FLAT asset, now building a genuine OPEN_LONG/
+      // OPEN_SHORT proposal once a detected opportunity clears the cost
+      // gate and the consumed-opportunity lifecycle. Gated on data
+      // sufficiency (the union of both other profiles' own requirements,
+      // plus the 4h bias leg — registry.ts).
+      let intradayLsOpportunityContext: PassOneResult['intradayLsOpportunityContext']
+      let intradayLsCandidate: PassOneResult['intradayLsCandidate']
+      let intradayLsComputedPrices: PassOneResult['intradayLsComputedPrices']
+      if (settings.strategyProfile === 'intraday_ls' && openPosition === null) {
+        const intraday = intradayByAsset[asset]
+        const sufficiency = checkStrategyDataSufficiency('intraday_ls', assetMarketData, intraday)
+        if (sufficiency.ok && intraday) {
+          const bias = evaluateBias(assetMarketData.dailyCloseSeries, assetMarketData.candles.map((c) => c.close))
+          if (bias) {
+            const features = intradayFeaturesFor(intraday)
+            const detected = detectIntradayLsOpportunity(
+              bias,
+              intraday.ohlc30m,
+              { ret60mPct: features.ret60mPct, volumeTrendRatio: features.volumeTrendRatio },
+              assetMarketData,
+            )
+            if (detected) {
+              const atr30Pct = managementAtrPctFor('intraday_ls', assetMarketData, intraday)
+              const { stopLossPct, takeProfitPct } = protectionForEntry('intraday_ls', atr30Pct, stopLossPctFor, takeProfitPctFor, detected.armId)
+              const estimatedRoundTripCostPct = (2 * (settings.feeBps + settings.slippageBps)) / 10_000
+              if (clearsEntryTradeabilityFloor('intraday_ls', 0, estimatedRoundTripCostPct, stopLossPct)) {
+                const lastConsumed = await readLastConsumedOpportunityBarTs(supabase, portfolio.id, asset)
+                if (shouldEmitOpportunity(detected.detectedAtBarTs, lastConsumed)) {
+                  intradayLsOpportunityContext = { armId: detected.armId, bias, direction: detected.direction, opportunityBarTs: detected.detectedAtBarTs }
+                  intradayLsCandidate = {
+                    asset,
+                    action: detected.direction === 'long' ? 'OPEN_LONG' : 'OPEN_SHORT',
+                    confidence: 1,
+                    horizonHours: null,
+                    reasons: [{ type: 'TECHNICAL', text: `intraday_ls ${detected.armId} detected under ${bias} bias` }],
+                    invalidation: [{ text: 'Managed by the position-monitor exit set (stop-loss/take-profit/giveback/time-stop), not the daily trend regime' }],
+                    stopLossPct,
+                    takeProfitPct,
+                  }
+                  intradayLsComputedPrices = computeStopLossTakeProfitPrices(detected.direction, assetMarketData.price, stopLossPct, takeProfitPct)
+                }
+              }
+            }
+          }
+        }
+      }
+
+      passOneResults.push({ asset, assetMarketData, assetInput, regime, candidate, openPosition, recentStopLossClose, aggressiveEntryContext, intradayLsOpportunityContext, intradayLsCandidate, intradayLsComputedPrices })
     }
 
     // --- Batched veto + management call (Gemini -> Jev migration,
@@ -621,7 +842,24 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
     const { vetoCandidates, managementCandidates } = collectModelCandidates(
       passOneResults.map((r) => ({
         asset: r.asset,
-        candidate: r.candidate,
+        // Strategy V4 (2026-10-01, §5) — intraday_ls never routes
+        // Balanced's regime-sourced candidate into veto collection at
+        // all (unlike Aggressive, which neutralizes it downstream in
+        // Pass 2 after its own, separate entry-quality path already
+        // decided). V4 reuses this SAME shared veto mechanism Balanced
+        // uses, so what reaches it must be V4's own real candidate —
+        // r.intradayLsCandidate when an opportunity was detected this
+        // cycle, otherwise a plain HOLD (never the daily trend regime).
+        candidate: settings.strategyProfile === 'intraday_ls'
+          ? (r.intradayLsCandidate ?? {
+            asset: r.asset,
+            action: 'HOLD' as const,
+            confidence: 1,
+            horizonHours: null,
+            reasons: [{ type: 'TECHNICAL' as const, text: 'intraday_ls strategy — no opportunity detected this cycle' }],
+            invalidation: [],
+          })
+          : r.candidate,
         openPosition: r.openPosition,
         news: r.assetInput.news,
         currentPrice: r.assetMarketData.price,
@@ -642,6 +880,7 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         feeBps: settings.feeBps,
         slippageBps: settings.slippageBps,
         minStopLossPct: settings.slTpBounds.minStopLossPct,
+        disableAdd: settings.strategyProfile === 'intraday_ls',
       },
       nowIso,
     )
@@ -652,24 +891,54 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
     // path), so requestPortfolioDecisions below receives entryOpportunities
     // = [] for Balanced — proven byte-identical to this parameter not
     // existing at all (model/jev/provider.test.ts's 18 pre-existing tests).
-    const entryOpportunities: EntryOpportunityInput[] = passOneResults.flatMap((r) => {
-      if (!r.aggressiveEntryContext) return []
-      const intraday = intradayByAsset[r.asset]
-      if (!intraday) return [] // unreachable — aggressiveEntryContext is only ever set alongside a present intraday fetch
-      const features = intradayFeaturesFor(intraday)
-      return [{
-        asset: r.asset,
-        kind: r.aggressiveEntryContext.opportunity.kind,
-        atrTargetDistancePct: r.aggressiveEntryContext.atrTargetDistancePct,
-        estimatedRoundTripCostPct: r.aggressiveEntryContext.estimatedRoundTripCostPct,
-        ret15mPct: features.ret15mPct,
-        ret30mPct: features.ret30mPct,
-        ret60mPct: features.ret60mPct,
-        realizedVol5m: features.realizedVol5m,
-        volumeTrendRatio: features.volumeTrendRatio,
-        sampledDayHighPct: features.sampledDayHighPct,
-        sampledDayLowPct: features.sampledDayLowPct,
-      }]
+    // Strategy V4 (2026-10-02, plan §5.1b) — extended to ALSO emit for an
+    // intraday_ls opportunity, which previously contributed nothing here
+    // (the core wiring gap this pass closes: a V4 candidate asked zero
+    // entry_quality/expected_move/failure_risk/failure_mode questions).
+    // atrTargetDistancePct/estimatedRoundTripCostPct reuse the SAME
+    // derivation Aggressive's own branch below does — the cost gate ratio
+    // this state exposes to Jev, not the candidate's own stopLossPct.
+    const entryOpportunities: EntryOpportunityInput[] = passOneResults.flatMap((r): EntryOpportunityInput[] => {
+      if (r.aggressiveEntryContext) {
+        const intraday = intradayByAsset[r.asset]
+        if (!intraday) return [] // unreachable — aggressiveEntryContext is only ever set alongside a present intraday fetch
+        const features = intradayFeaturesFor(intraday)
+        return [{
+          asset: r.asset,
+          kind: r.aggressiveEntryContext.opportunity.kind,
+          atrTargetDistancePct: r.aggressiveEntryContext.atrTargetDistancePct,
+          estimatedRoundTripCostPct: r.aggressiveEntryContext.estimatedRoundTripCostPct,
+          ret15mPct: features.ret15mPct,
+          ret30mPct: features.ret30mPct,
+          ret60mPct: features.ret60mPct,
+          realizedVol5m: features.realizedVol5m,
+          volumeTrendRatio: features.volumeTrendRatio,
+          sampledDayHighPct: features.sampledDayHighPct,
+          sampledDayLowPct: features.sampledDayLowPct,
+        }]
+      }
+      if (r.intradayLsOpportunityContext && r.intradayLsCandidate) {
+        const intraday = intradayByAsset[r.asset]
+        if (!intraday) return [] // unreachable — intradayLsOpportunityContext is only ever set alongside a present intraday fetch
+        const features = intradayFeaturesFor(intraday)
+        const estimatedRoundTripCostPct = (2 * (settings.feeBps + settings.slippageBps)) / 10_000
+        return [{
+          asset: r.asset,
+          atrTargetDistancePct: r.intradayLsCandidate.action === 'OPEN_LONG' || r.intradayLsCandidate.action === 'OPEN_SHORT' ? r.intradayLsCandidate.takeProfitPct : 0,
+          estimatedRoundTripCostPct,
+          ret15mPct: features.ret15mPct,
+          ret30mPct: features.ret30mPct,
+          ret60mPct: features.ret60mPct,
+          realizedVol5m: features.realizedVol5m,
+          volumeTrendRatio: features.volumeTrendRatio,
+          sampledDayHighPct: features.sampledDayHighPct,
+          sampledDayLowPct: features.sampledDayLowPct,
+          armId: r.intradayLsOpportunityContext.armId,
+          direction: r.intradayLsOpportunityContext.direction,
+          bias: r.intradayLsOpportunityContext.bias,
+        }]
+      }
+      return []
     })
 
     const vetoOutcomeByAsset = new Map<AssetSymbol, VetoOutcome>()
@@ -677,6 +946,11 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
     // Strategy profiles, Pass 2 — always empty for 'balanced'. Computed
     // here but NOT YET consumed to change any candidate (see Pass 3).
     const entryOutcomeByAsset = new Map<AssetSymbol, EntryOutcome>()
+    // Strategy V4 (2026-10-02, plan §5.1c) — advisory only, same
+    // emptiness rule as entryOutcomeByAsset (both are built from the same
+    // entryOpportunities list in one call). Never consumed to alter
+    // finalProposal anywhere — only persisted.
+    const adversarialOutcomeByAsset = new Map<AssetSymbol, AdversarialOutcome>()
     // Seeded from a news-provider failure, but only when at least one
     // model layer is actually on — disabling BOTH means news stops
     // mattering to the model at all, so a feed outage shouldn't block
@@ -726,6 +1000,7 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         for (const outcome of portfolioResult.vetoOutcomes) vetoOutcomeByAsset.set(outcome.asset, outcome)
         for (const outcome of portfolioResult.managementOutcomes) managementOutcomeByAsset.set(outcome.asset, outcome)
         for (const outcome of portfolioResult.entryOutcomes) entryOutcomeByAsset.set(outcome.asset, outcome)
+        for (const outcome of portfolioResult.adversarialOutcomes) adversarialOutcomeByAsset.set(outcome.asset, outcome)
         modelVersion = portfolioResult.modelVersion
         modelRawRequest = portfolioResult.rawRequest
         modelRawResponse = portfolioResult.rawResponse
@@ -745,24 +1020,28 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
       // Strategy profiles, Pass 3 — candidate normalization. Balanced's
       // `candidate` (Pass 1, unchanged) passes straight through as
       // `effectiveCandidate` and every branch below behaves exactly as
-      // before. For Aggressive, Balanced's own regime-derived OPEN_LONG/
-      // CLOSE signals are neutralized to HOLD here, BEFORE the veto/
-      // management branches (which key on candidate.action) ever see
-      // them — Aggressive must never open on Balanced's 50DMA signal, and
-      // must never auto-close on a regime flip either; its entries come
-      // only from its own opportunity detector (below) and its exits only
-      // from Jev's management judgment + deterministic tightening. The
+      // before. For Aggressive AND intraday_ls, Balanced's own
+      // regime-derived OPEN_LONG/CLOSE signals are neutralized to HOLD
+      // here, BEFORE the veto/management branches (which key on
+      // candidate.action) ever see them — neither profile may open on
+      // Balanced's 50DMA signal, nor auto-close on a regime flip; the
       // 50DMA regime stays available as CONTEXT (assetInput.regime is
-      // unchanged either way), never a hard trigger, for this profile.
+      // unchanged either way), never a hard trigger, for either profile.
       let effectiveCandidate: ModelDecisionProposal = candidate
-      if (settings.strategyProfile === 'aggressive') {
+      if (settings.strategyProfile === 'aggressive' || settings.strategyProfile === 'intraday_ls') {
+        const entryReasonText = settings.strategyProfile === 'aggressive'
+          ? 'Aggressive strategy — entries are decided by the short-horizon opportunity detector, not the daily trend regime'
+          : 'intraday_ls strategy — entries are decided by the bias-gated six-arm detector, not the daily trend regime'
+        const exitReasonText = settings.strategyProfile === 'aggressive'
+          ? 'Aggressive strategy — exits are decided by Jev management and deterministic tightening, not the daily trend regime'
+          : 'intraday_ls strategy — exits are decided by the position-monitor exit set, not the daily trend regime'
         if (candidate.action === 'OPEN_LONG') {
           effectiveCandidate = {
             asset,
             action: 'HOLD',
             confidence: 1,
             horizonHours: null,
-            reasons: [{ type: 'TECHNICAL', text: 'Aggressive strategy — entries are decided by the short-horizon opportunity detector, not the daily trend regime' }],
+            reasons: [{ type: 'TECHNICAL', text: entryReasonText }],
             invalidation: [],
           }
         } else if (openPosition && candidate.action === 'CLOSE') {
@@ -771,10 +1050,36 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
             action: 'HOLD',
             confidence: 1,
             horizonHours: null,
-            reasons: [{ type: 'TECHNICAL', text: 'Aggressive strategy — exits are decided by Jev management and deterministic tightening, not the daily trend regime' }],
+            reasons: [{ type: 'TECHNICAL', text: exitReasonText }],
             invalidation: [{ text: 'Managed by short-horizon Jev evaluation (HOLD/ADD/REDUCE/CLOSE/MODIFY_PROTECTION), not the daily trend regime' }],
           }
         }
+      }
+
+      // Strategy V4 (intraday_ls, 2026-10-01, §5) — Balanced's regime
+      // candidate is IRRELEVANT for this profile's entries no matter what
+      // it said (the neutralization above already forces its own
+      // OPEN_LONG to HOLD) — the only thing that matters while FLAT is
+      // whether V4's own six-arm detector found something this cycle.
+      // When it did, r.intradayLsCandidate (a genuine OPEN_LONG/
+      // OPEN_SHORT, §4.1's protection formula already applied) REPLACES
+      // whatever effectiveCandidate currently holds, so it — not
+      // Balanced's regime — is what the veto/gate/broker path below
+      // actually acts on. The news veto is now direction-aware (plan
+      // §5.2 point 1: model/jev/question.ts's buildJevQuestion asks about
+      // the correct side), which is what makes routing a genuine short
+      // through this SAME shared veto mechanism correct rather than
+      // silently asking the wrong question.
+      if (settings.strategyProfile === 'intraday_ls' && !openPosition && r.intradayLsCandidate) {
+        effectiveCandidate = r.intradayLsCandidate
+      }
+      let armIdForRow: string | null = null
+      let biasForRow: string | null = null
+      let opportunityBarTsForRow: string | null = null
+      if (r.intradayLsOpportunityContext) {
+        armIdForRow = r.intradayLsOpportunityContext.armId
+        biasForRow = r.intradayLsOpportunityContext.bias
+        opportunityBarTsForRow = r.intradayLsOpportunityContext.opportunityBarTs
       }
 
       let finalProposal: ModelDecisionProposal = effectiveCandidate
@@ -822,12 +1127,62 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
       let minutesSinceEntryForRow: number | null = null
       let actionNormalizationReasonForRow: string | null = null
 
+      // Strategy V4 (2026-10-02, plan §5.1) — advisory candidate
+      // evaluation. decisionTypeForRow is derived purely from position
+      // state, independent of profile or branch, so every row (not just
+      // V4's) carries an honest discriminator going forward —
+      // 'management' whenever an existing position is what this decision
+      // concerns, 'candidate' whenever the asset is FLAT and this is an
+      // entry evaluation. A pre-2026-10-02 row has NULL here (backfill
+      // left deliberately ambiguous rows alone — see the migration).
+      const decisionTypeForRow: 'candidate' | 'management' = openPosition ? 'management' : 'candidate'
+      // 5.1a — promoted out of output_payload JSON into its own column;
+      // null whenever no veto call completed for this asset this cycle
+      // (disabled flag, not a candidate, or a failed call).
+      let jevNewsVetoProbabilityForRow: number | null = null
+      // 5.1b — entry quality + expected move. entryGateModeForRow
+      // distinguishes Aggressive's BLOCKING use of this same question
+      // pair from intraday_ls's ADVISORY use, so the two regimes are
+      // never pooled by accident (plan §5.1's own stated requirement).
+      let entryQualityForRow: string | null = null
+      let entryQualityConfidenceForRow: number | null = null
+      let entryQualityDistributionForRow: Record<string, number> | null = null
+      let entryGateModeForRow: 'advisory' | 'blocking' | null = null
+      let expectedMoveConfidenceForRow: number | null = null
+      let expectedMoveDistributionForRow: Record<string, number> | null = null
+      let expectedMoveHorizonMinutesForRow: number | null = null
+      // 5.1c — adversarial critique. Advisory for every profile that asks
+      // it today (intraday_ls only) — neither field is ever read by
+      // anything that could alter finalProposal.
+      let failureRiskForRow: string | null = null
+      let failureRiskConfidenceForRow: number | null = null
+      let failureRiskDistributionForRow: Record<string, number> | null = null
+      let failureModeForRow: string | null = null
+      let failureModeConfidenceForRow: number | null = null
+      let failureModeDistributionForRow: Record<string, number> | null = null
+      // Three independent per-layer prompt versions (review item: a
+      // single batched call answering more than one question family
+      // could previously only ever record ONE promptVersionForRow) — a
+      // null means "this layer did not run for this row", never "ran
+      // under an earlier version."
+      let vetoPromptVersionForRow: string | null = null
+      let entryPromptVersionForRow: string | null = null
+      let adversarialPromptVersionForRow: string | null = null
+
       // Computed once, up front, so both branches below (and the sizing/
       // gate context further down) can reuse the identical value rather
       // than recomputing currentNav() redundantly mid-branch.
       const nav = currentNav()
 
-      if (effectiveCandidate.action === 'OPEN_LONG') {
+      // Strategy V4 (2026-10-01) — widened to OPEN_SHORT: this branch's own
+      // body (vetoOutcomeByAsset lookup + applyVetoOutcome) is already
+      // direction-agnostic, same as collect-candidates.ts's own veto
+      // collection. Before this fix, an OPEN_SHORT candidate fell through
+      // every branch below untouched — never vetoed, proceeding straight
+      // to the gate. Direction-specific behavior (if any is ever needed)
+      // belongs inside applyVetoOutcome/the veto question, not this dispatch.
+      if (effectiveCandidate.action === 'OPEN_LONG' || effectiveCandidate.action === 'OPEN_SHORT') {
+        vetoPromptVersionForRow = JEV_QUESTION_VERSION
         if (modelCallFailedReason !== null) {
           modelVersionForRow = 'call-failed'
           outputPayloadForRow = { provider: 'typesafe-jev', error: modelCallFailedReason }
@@ -860,6 +1215,7 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
               derivedVeto: outcome.veto,
             }
             modelVetoedValue = outcome.veto
+            jevNewsVetoProbabilityForRow = outcome.noul
             // The ALLOW-is-strict-pass-through guarantee lives in this
             // function, not here — see cycle/apply-veto.ts's own comment
             // and cycle/apply-veto.test.ts for the regression test.
@@ -870,6 +1226,44 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
           // reads only this flag), so no call was ever attempted for it;
           // it proceeds unvetoed, and the row correctly records
           // "not-called" / null.
+        }
+
+        // Strategy V4 (2026-10-02, plan §5.1b/§5.1c) — advisory only.
+        // Neither block below EVER assigns to finalProposal/effectiveCandidate
+        // — that is the structural proof these two layers cannot block a
+        // trade, unlike the veto above. Both are no-ops for Balanced
+        // (entryOutcomeByAsset/adversarialOutcomeByAsset have no entry
+        // for a Balanced asset, since entryOpportunities is never
+        // populated for that profile) and for Aggressive's OWN OPEN_LONG
+        // candidates specifically (Aggressive's effectiveCandidate is
+        // always HOLD by the time this branch runs — its own entry
+        // evaluation happens in a separate, later, BLOCKING branch below).
+        const entryOutcome = entryOutcomeByAsset.get(asset)
+        if (entryOutcome) {
+          entryPromptVersionForRow = ENTRY_QUESTION_VERSION
+          entryGateModeForRow = 'advisory'
+          entryQualityForRow = entryOutcome.enter ? 'ENTER' : 'SKIP'
+          entryQualityConfidenceForRow = entryOutcome.enterConfidence
+          entryQualityDistributionForRow = entryOutcome.enterDistribution
+          expectedMovePctForRow = entryOutcome.expectedMovePct
+          expectedMoveConfidenceForRow = entryOutcome.expectedMoveConfidence
+          expectedMoveDistributionForRow = entryOutcome.expectedMoveDistribution
+          // The pre-registered evaluation horizon (plan §6.3) — the
+          // entry_quality/expected_move questions both ask about "the
+          // next 15-60 minutes"; 60 is the single horizon decision_
+          // outcomes.mfe_r_60m will be evaluated against.
+          expectedMoveHorizonMinutesForRow = 60
+        }
+
+        const adversarialOutcome = adversarialOutcomeByAsset.get(asset)
+        if (adversarialOutcome) {
+          adversarialPromptVersionForRow = ADVERSARIAL_QUESTION_VERSION
+          failureRiskForRow = adversarialOutcome.failureRisk
+          failureRiskConfidenceForRow = adversarialOutcome.failureRiskConfidence
+          failureRiskDistributionForRow = adversarialOutcome.failureRiskDistribution
+          failureModeForRow = adversarialOutcome.failureMode
+          failureModeConfidenceForRow = adversarialOutcome.failureModeConfidence
+          failureModeDistributionForRow = adversarialOutcome.failureModeDistribution
         }
       } else if (openPosition && effectiveCandidate.action === 'HOLD') {
         // Phase 2 — portfolio management. Only reached when Pass 1's own
@@ -972,7 +1366,7 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
             // ACTUAL executed amount (post-cap) is set further below,
             // once the gate result is known.
             if (outcome.action === 'ADD') {
-              const riskBasedMaxAdd = deriveRiskBasedNotional(nav, appetite.riskBudgetPct, assetMarketData.price, openPosition.stopLossPrice)
+              const riskBasedMaxAdd = deriveRiskBasedNotional(nav, effectiveAppetite.riskBudgetPct, assetMarketData.price, openPosition.stopLossPrice)
               proposedAdjustNotionalForRow = riskBasedMaxAdd * outcome.addMagnitude
             } else if (outcome.action === 'REDUCE') {
               proposedAdjustNotionalForRow = outcome.reduceMagnitude * openPosition.quantity * assetMarketData.price
@@ -1002,6 +1396,8 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         // as the veto's ALLOW-is-a-pass-through guarantee
         // (cycle/apply-veto.ts).
         promptVersionForRow = ENTRY_QUESTION_VERSION
+        entryPromptVersionForRow = ENTRY_QUESTION_VERSION
+        entryGateModeForRow = 'blocking'
         if (modelCallFailedReason !== null) {
           modelVersionForRow = 'call-failed'
           outputPayloadForRow = { provider: 'typesafe-jev', error: modelCallFailedReason }
@@ -1010,7 +1406,13 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
           const entryOutcome = entryOutcomeByAsset.get(asset)
           if (entryOutcome) {
             modelVersionForRow = modelVersion!
+            entryQualityForRow = entryOutcome.enter ? 'ENTER' : 'SKIP'
+            entryQualityConfidenceForRow = entryOutcome.enterConfidence
+            entryQualityDistributionForRow = entryOutcome.enterDistribution
             expectedMovePctForRow = entryOutcome.expectedMovePct
+            expectedMoveConfidenceForRow = entryOutcome.expectedMoveConfidence
+            expectedMoveDistributionForRow = entryOutcome.expectedMoveDistribution
+            expectedMoveHorizonMinutesForRow = 60
             estimatedRoundTripCostPctForRow = r.aggressiveEntryContext.estimatedRoundTripCostPct
             moveToCostRatioForRow = entryOutcome.expectedMovePct / r.aggressiveEntryContext.estimatedRoundTripCostPct
             outputPayloadForRow = {
@@ -1068,8 +1470,13 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         asset,
         latestPriceByAsset,
       )
-      const portfolioRiskCeilingUsd = settings.portfolioRiskCeilingMultiplier * appetite.riskBudgetPct * nav
-      const maxTotalNotionalUsd = settings.maxTotalNotionalPct * nav
+      // Phase 0 wiring fix (2026-10-01) — effectiveAppetite/
+      // effectiveMaxSingleTradePct/effectiveMaxTotalNotionalPct are the
+      // profile-resolved values computed once above; see that block's own
+      // comment. stopOutReentryBlockMinutes below reads strategy.risk
+      // directly for the same reason buildAssetInput's call site does.
+      const portfolioRiskCeilingUsd = settings.portfolioRiskCeilingMultiplier * effectiveAppetite.riskBudgetPct * nav
+      const maxTotalNotionalUsd = effectiveMaxTotalNotionalPct * nav
 
       const gateContext = buildRiskGateContext({
         asset,
@@ -1077,11 +1484,11 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         nav,
         cash: runningCash,
         openPosition,
-        appetite,
-        maxSingleTradePct: settings.maxSingleTradePct,
+        appetite: effectiveAppetite,
+        maxSingleTradePct: effectiveMaxSingleTradePct,
         maxAssetExposurePct: settings.maxAssetExposurePct,
         slTpBounds: settings.slTpBounds,
-        stopOutReentryBlockMinutes: settings.stopOutReentryBlockMinutes,
+        stopOutReentryBlockMinutes: strategy.risk.stopOutReentryBlockMinutes,
         recentStopLossClose,
         nowIso,
         portfolioRiskCeilingUsd,
@@ -1156,6 +1563,8 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         startingCash: runningCash,
         decisionId,
         nowIso,
+        strategyProfile: settings.strategyProfile,
+        shortFundingBpsPerDay: settings.shortFundingBpsPerDay,
       })
 
       // For an OPEN, position_id must start null: the position doesn't
@@ -1186,14 +1595,30 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         risk_status: gateResult.riskStatus,
         risk_reason: gateResult.riskReason,
         approved_size_pct: gateResult.approvedSizePct,
-        computed_stop_loss_price: gateResult.computedStopLossPrice,
-        computed_take_profit_price: gateResult.computedTakeProfitPrice,
-        effective_min_confidence: appetite.minConfidence,
-        effective_risk_budget_pct: appetite.riskBudgetPct,
-        effective_single_trade_cap_pct: settings.maxSingleTradePct,
+        // Strategy V4 (2026-10-02, plan §5.1 review item 1) — the gate's
+        // own figures are authoritative whenever it actually approved;
+        // intradayLsComputedPrices is the fallback for a row the gate
+        // rejected, vetoed closed, or never reached at all (a SKIP in
+        // advisory mode still executes today, but a future risk-rejected
+        // or news-vetoed V4 candidate would otherwise persist no levels
+        // at all, and the labeler cannot simulate a trade it has no
+        // levels for).
+        computed_stop_loss_price: gateResult.computedStopLossPrice ?? r.intradayLsComputedPrices?.stopLossPrice ?? null,
+        computed_take_profit_price: gateResult.computedTakeProfitPrice ?? r.intradayLsComputedPrices?.takeProfitPrice ?? null,
+        // Phase 0 wiring fix (2026-10-01) — these four now reflect the
+        // profile-resolved values actually used to gate this decision,
+        // not the flat settings a prior bug persisted here. The point of
+        // denormalizing effective_* onto every row (see AgentDecision's
+        // own comment) was exactly to make a historical row trustworthy
+        // regardless of later config changes — rows from before this fix
+        // genuinely did run under Balanced's policy and should NOT be
+        // reinterpreted; only new rows read the fix.
+        effective_min_confidence: effectiveAppetite.minConfidence,
+        effective_risk_budget_pct: effectiveAppetite.riskBudgetPct,
+        effective_single_trade_cap_pct: effectiveMaxSingleTradePct,
         effective_asset_exposure_cap_pct: settings.maxAssetExposurePct,
-        effective_portfolio_risk_ceiling_pct: settings.portfolioRiskCeilingMultiplier * appetite.riskBudgetPct,
-        effective_max_total_notional_pct: settings.maxTotalNotionalPct,
+        effective_portfolio_risk_ceiling_pct: settings.portfolioRiskCeilingMultiplier * effectiveAppetite.riskBudgetPct,
+        effective_max_total_notional_pct: effectiveMaxTotalNotionalPct,
         size_cap_applied: gateResult.sizeCapApplied,
         // Phase 2 (2026-09-22/23) provenance — null on every pre-Phase-2
         // row and on any row where no management question was ever asked
@@ -1228,6 +1653,34 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         giveback_r: givebackRForRow,
         minutes_since_entry: minutesSinceEntryForRow,
         action_normalization_reason: actionNormalizationReasonForRow,
+        // Strategy V4 (intraday_ls, 2026-10-01) — null for every other
+        // profile and for any intraday_ls row where nothing was detected
+        // (see r.intradayLsOpportunityContext's own comment in Pass 1).
+        arm_id: armIdForRow,
+        bias: biasForRow,
+        opportunity_bar_ts: opportunityBarTsForRow,
+        // Strategy V4 (2026-10-02, plan §5.1) — advisory candidate
+        // evaluation. See each local's own declaration comment above for
+        // exactly when it populates; null means that layer did not run
+        // for this row, not that it ran under an earlier version.
+        decision_type: decisionTypeForRow,
+        jev_news_veto_probability: jevNewsVetoProbabilityForRow,
+        entry_quality: entryQualityForRow,
+        entry_quality_confidence: entryQualityConfidenceForRow,
+        entry_quality_distribution: entryQualityDistributionForRow,
+        entry_gate_mode: entryGateModeForRow,
+        expected_move_confidence: expectedMoveConfidenceForRow,
+        expected_move_distribution: expectedMoveDistributionForRow,
+        expected_move_horizon_minutes: expectedMoveHorizonMinutesForRow,
+        failure_risk: failureRiskForRow,
+        failure_risk_confidence: failureRiskConfidenceForRow,
+        failure_risk_distribution: failureRiskDistributionForRow,
+        failure_mode: failureModeForRow,
+        failure_mode_confidence: failureModeConfidenceForRow,
+        failure_mode_distribution: failureModeDistributionForRow,
+        veto_prompt_version: vetoPromptVersionForRow,
+        entry_prompt_version: entryPromptVersionForRow,
+        adversarial_prompt_version: adversarialPromptVersionForRow,
         decided_at: nowIso,
       })
       if (decisionInsertError) throw new Error(`could not insert agent_decisions for ${asset}: ${decisionInsertError.message}`)
@@ -1259,6 +1712,11 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
           p_executed_at: trade.executedAt,
           p_intent: trade.intent,
           p_decision_id: decisionId,
+          // Strategy V4 (2026-10-01) — required by the RPC (no default);
+          // broker/accounting.ts's openPosition already set this on
+          // `position` itself from the SAME strategyProfile this call's
+          // own caller (planDecisionExecution) threaded through.
+          p_strategy_profile: position.openedUnderStrategyProfile,
         })
         if (rpcError) throw new Error(`open_position_atomic failed for ${asset}: ${rpcError.message}`)
         runningCash = Number((Array.isArray(rpcData) ? rpcData[0] : rpcData)?.cash_after ?? runningCash)
@@ -1299,6 +1757,10 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
           p_intent: trade.intent,
           p_decision_id: decisionId,
           p_trigger_reason: trade.triggerReason,
+          // Strategy V4 (2026-10-01) — has a SQL default (0), so omitting
+          // this would not fail the call, only silently discard a real
+          // nonzero funding charge on a short's closing trade.
+          p_funding_cost: trade.fundingCost,
         })
         if (rpcError) throw new Error(`close_position_atomic failed for ${asset}: ${rpcError.message}`)
         const outcome = Array.isArray(rpcData) ? rpcData[0] : rpcData
@@ -1342,6 +1804,7 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
           p_executed_at: trade.executedAt,
           p_intent: trade.intent,
           p_decision_id: decisionId,
+          p_funding_cost: trade.fundingCost,
         })
         if (rpcError) throw new Error(`adjust_position_atomic (ADD) failed for ${asset}: ${rpcError.message}`)
         const outcome = Array.isArray(rpcData) ? rpcData[0] : rpcData
@@ -1396,6 +1859,7 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
           // matching this codebase's existing convention of reporting
           // P&L and fees as separate line items.
           p_partial_realized_pnl_delta: partialRealizedPnlDelta,
+          p_funding_cost: trade.fundingCost,
         })
         if (rpcError) throw new Error(`adjust_position_atomic (REDUCE) failed for ${asset}: ${rpcError.message}`)
         const outcome = Array.isArray(rpcData) ? rpcData[0] : rpcData

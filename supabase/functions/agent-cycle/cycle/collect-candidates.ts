@@ -58,6 +58,10 @@ export interface CandidateFlags {
   // isProtectionActionable needs this to decide whether a legal stop
   // tighten exists at all before offering MODIFY_PROTECTION.
   minStopLossPct: number
+  // Strategy V4 (2026-10-01, plan §5.2 point 3) — true only when the
+  // active profile is intraday_ls. Forwarded verbatim onto every
+  // management candidate's own disableAdd field.
+  disableAdd: boolean
 }
 
 export interface CollectedCandidates {
@@ -65,9 +69,11 @@ export interface CollectedCandidates {
   managementCandidates: ManagementCandidateInput[]
 }
 
-// Per-asset routing is unchanged from Phase 2, just now a pure, directly
-// testable function rather than an inline loop in index.ts:
-//   FLAT + OPEN_LONG candidate  -> a veto candidate (entry eligibility)
+// Per-asset routing, now also covering V4's short side (2026-10-01):
+//   FLAT + OPEN_LONG/OPEN_SHORT candidate -> a veto candidate (entry
+//     eligibility) — OPEN_SHORT only ever reaches here from intraday_ls;
+//     Balanced never proposes it and Aggressive's own entries bypass this
+//     shared veto path entirely (a separate entry-quality mechanism).
 //   OPEN position + HOLD candidate -> a management candidate (the regime
 //     is intact; a regime-flip CLOSE is authoritative and deliberately
 //     never reaches here — trading-strategy-v1.md's thesis-invalidation
@@ -75,8 +81,9 @@ export interface CollectedCandidates {
 //   Anything else (FLAT + no candidate, OPEN + CLOSE, no position at all)
 //     -> neither list, by construction.
 // A single candidate.action can only route to at most one of the two
-// branches (OPEN_LONG vs HOLD are mutually exclusive on ModelDecisionProposal),
-// so no asset is ever double-counted across both lists.
+// branches (OPEN_LONG/OPEN_SHORT vs HOLD are mutually exclusive on
+// ModelDecisionProposal), so no asset is ever double-counted across both
+// lists.
 export function collectModelCandidates(
   sources: readonly CandidateSource[],
   flags: CandidateFlags,
@@ -86,8 +93,14 @@ export function collectModelCandidates(
   const managementCandidates: ManagementCandidateInput[] = []
 
   for (const source of sources) {
-    if (flags.newsVetoEnabled && source.candidate.action === 'OPEN_LONG') {
-      vetoCandidates.push({ asset: source.asset, news: source.news })
+    if (flags.newsVetoEnabled && (source.candidate.action === 'OPEN_LONG' || source.candidate.action === 'OPEN_SHORT')) {
+      // Direction-aware veto (2026-10-01) — the question itself must ask
+      // about the correct side (model/jev/question.ts's buildJevQuestion);
+      // a long and a short threaten opposite kinds of news, so sending
+      // the wrong direction here would ask Jev the WRONG question, not
+      // just an incomplete one.
+      const direction = source.candidate.action === 'OPEN_LONG' ? 'long' : 'short'
+      vetoCandidates.push({ asset: source.asset, direction, news: source.news })
     } else if (flags.managementEnabled && source.openPosition && source.candidate.action === 'HOLD') {
       const position = source.openPosition
       managementCandidates.push({
@@ -105,6 +118,7 @@ export function collectModelCandidates(
         news: source.news,
         minStopLossPct: flags.minStopLossPct,
         aggressive: source.aggressive,
+        disableAdd: flags.disableAdd,
       })
     }
   }

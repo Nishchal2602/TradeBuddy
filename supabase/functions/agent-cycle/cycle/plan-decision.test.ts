@@ -56,6 +56,8 @@ function baseInput(overrides: Partial<DecisionPlanInput> = {}): DecisionPlanInpu
     startingCash: 10_000,
     decisionId: '44444444-4444-4444-4444-444444444444',
     nowIso: NOW,
+    strategyProfile: 'balanced',
+    shortFundingBpsPerDay: 0,
     ...overrides,
   }
 }

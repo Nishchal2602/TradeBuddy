@@ -45,9 +45,11 @@ const agentCloseFields = {
 const automaticCloseFields = {
   decisionId: z.null(),
   // profit_giveback added 2026-09-23 — the position-monitor's Aggressive
-  // V3.1 giveback ratchet, the same automatic-close shape as
-  // stop_loss/take_profit/collateral_exhausted (decisionId null).
-  triggerReason: z.enum(['stop_loss', 'take_profit', 'collateral_exhausted', 'profit_giveback']),
+  // V3.1 giveback ratchet. time_stop added by Strategy V4 (2026-10-01) —
+  // the two new intraday_ls-only monitor exits (plan §4.2). Both are the
+  // same automatic-close shape as stop_loss/take_profit/
+  // collateral_exhausted (decisionId null).
+  triggerReason: z.enum(['stop_loss', 'take_profit', 'collateral_exhausted', 'profit_giveback', 'time_stop']),
 }
 
 const tradeCoreFields = {
@@ -78,6 +80,15 @@ const tradeCoreFields = {
   // for why CLOSE populating this too (not just REDUCE) was a required
   // correction, not an optional nicety.
   realizedPnl: z.number().nullable(),
+
+  // Strategy V4 (2026-10-01) — perpetual-funding cost charged on THIS
+  // trade, for a short only (always 0 for a long — broker/accounting.ts's
+  // computeFundingAccrual never accrues one). A real, NOT NULL column
+  // (matching the DB default of 0), never folded into `fee`: fee is
+  // load-bearing elsewhere (partialRealizedPnlDelta = realizedPnl - fee),
+  // and overloading it would make it mean two things at exactly the
+  // point that precision was hard-won for the giveback ratchet.
+  fundingCost: z.number().nonnegative(),
 }
 
 const OpenTrade = z.object({ ...tradeCoreFields, intent: z.enum(['OPEN_LONG', 'OPEN_SHORT']), ...openFields }).strict()

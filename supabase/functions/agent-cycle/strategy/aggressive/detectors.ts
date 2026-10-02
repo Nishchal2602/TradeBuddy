@@ -38,8 +38,14 @@ export interface OpportunitySignal {
   detectedAtBarTs: string
 }
 
-const MIN_BARS = 12
-const LOOKBACK_BARS = 8
+// MIN_BARS/LOOKBACK_BARS exported (2026-10-01, Strategy V4) so
+// strategy/intraday-ls/detectors.ts can reuse testMomentumBreakout/
+// testPullbackContinuation/edgeTriggered directly — mirroring the
+// SAME breakout/pullback predicates onto inverted bars for the short
+// arms, rather than a second, drift-prone reimplementation. Zero
+// behavior change here: pure export-surface widening.
+export const MIN_BARS = 12
+export const LOOKBACK_BARS = 8
 const RECENCY_BARS = 4
 const PULLBACK_MIDPOINT = 0.5
 
@@ -51,7 +57,7 @@ const PULLBACK_MIDPOINT = 0.5
 // calls this twice, once on the full window and once with the last bar
 // dropped, so this function itself must stay a pure function of "the
 // last element is current, everything else is history."
-function testMomentumBreakout(bars: readonly OhlcCandle[]): boolean {
+export function testMomentumBreakout(bars: readonly OhlcCandle[]): boolean {
   const n = bars.length
   if (n < LOOKBACK_BARS + 1) return false
   const current = bars[n - 1]!
@@ -77,7 +83,7 @@ function testMomentumBreakout(bars: readonly OhlcCandle[]): boolean {
 //   fire iff current.close < H AND current.close > mid AND
 //            current.close > current.open  (the continuation trigger:
 //            the current bar itself must close green)
-function testPullbackContinuation(bars: readonly OhlcCandle[]): boolean {
+export function testPullbackContinuation(bars: readonly OhlcCandle[]): boolean {
   const n = bars.length
   if (n < LOOKBACK_BARS + 1) return false
   const current = bars[n - 1]!
@@ -110,7 +116,7 @@ function testPullbackContinuation(bars: readonly OhlcCandle[]): boolean {
 // bars.length >= MIN_BARS (12) — one more than either detector's own
 // 9-bar minimum, so the "prior" evaluation always has a full 9-bar
 // window of its own, never a degenerate shorter one.
-function edgeTriggered(bars: readonly OhlcCandle[], test: (b: readonly OhlcCandle[]) => boolean): boolean {
+export function edgeTriggered(bars: readonly OhlcCandle[], test: (b: readonly OhlcCandle[]) => boolean): boolean {
   const n = bars.length
   if (n < MIN_BARS) throw new InsufficientDataError('opportunity detection', MIN_BARS, n)
   const currentTrue = test(bars)

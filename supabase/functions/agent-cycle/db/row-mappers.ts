@@ -56,5 +56,13 @@ export function rowToPosition(row: Record<string, unknown>): Position {
     peakPnlAt: row.peak_pnl_at ? toIsoZ(row.peak_pnl_at as string) : null,
     givebackFloorR: row.giveback_floor_r === null || row.giveback_floor_r === undefined ? null : Number(row.giveback_floor_r),
     highWaterTrackedFrom: row.high_water_tracked_from ? toIsoZ(row.high_water_tracked_from as string) : null,
+    // Strategy V4 (2026-10-01) — same null-vs-value discipline as every
+    // other field above. openedUnderStrategyProfile is a plain string
+    // from PostgREST (already one of the enum's own values by the DB's
+    // own CHECK constraint, so no further validation is needed here);
+    // Position.parse's StrategyProfile.nullable().optional() still
+    // re-validates it against the Zod enum, catching any future drift.
+    openedUnderStrategyProfile: row.opened_under_strategy_profile ?? null,
+    lastFundingAccrualAt: row.last_funding_accrual_at ? toIsoZ(row.last_funding_accrual_at as string) : null,
   })
 }

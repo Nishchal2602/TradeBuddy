@@ -6,7 +6,7 @@ import type { Position } from '../../../../src/shared/positions/types.ts'
 
 const NOW = '2026-09-23T12:00:00.000Z'
 
-const BOTH_ENABLED: CandidateFlags = { newsVetoEnabled: true, managementEnabled: true, feeBps: 10, slippageBps: 5, minStopLossPct: 0.005 }
+const BOTH_ENABLED: CandidateFlags = { newsVetoEnabled: true, managementEnabled: true, feeBps: 10, slippageBps: 5, minStopLossPct: 0.005, disableAdd: false }
 
 function openLongCandidate(overrides: Partial<ModelDecisionProposal> = {}): ModelDecisionProposal {
   return {
@@ -18,6 +18,20 @@ function openLongCandidate(overrides: Partial<ModelDecisionProposal> = {}): Mode
     horizonHours: null,
     reasons: [{ type: 'TECHNICAL', text: 'Daily close above the 50-day MA' }],
     invalidation: [{ text: 'Daily close at or below the 50-day moving average' }],
+    ...overrides,
+  } as ModelDecisionProposal
+}
+
+function openShortCandidate(overrides: Partial<ModelDecisionProposal> = {}): ModelDecisionProposal {
+  return {
+    asset: 'BTC',
+    action: 'OPEN_SHORT',
+    confidence: 1,
+    stopLossPct: 0.012,
+    takeProfitPct: 0.024,
+    horizonHours: null,
+    reasons: [{ type: 'TECHNICAL', text: 'intraday_ls breakout_short detected under SHORT bias' }],
+    invalidation: [{ text: 'Managed by the position-monitor exit set' }],
     ...overrides,
   } as ModelDecisionProposal
 }
@@ -182,6 +196,64 @@ Deno.test('shouldCallModel: FLAT + OPEN_LONG candidate -> a call happens', () =>
   assertEquals(shouldCallModel(vetoCandidates, managementCandidates, null), true)
 })
 
+// --- Strategy V4 (2026-10-01, plan §5.2) — OPEN_SHORT veto routing + disableAdd forwarding
+
+Deno.test('collectModelCandidates: FLAT + OPEN_SHORT candidate -> exactly one veto candidate with direction "short"', () => {
+  const { vetoCandidates, managementCandidates } = collectModelCandidates(
+    [source({ candidate: openShortCandidate(), openPosition: null })],
+    BOTH_ENABLED,
+    NOW,
+  )
+  assertEquals(vetoCandidates.length, 1)
+  assertEquals(vetoCandidates[0]!.asset, 'BTC')
+  assertEquals(vetoCandidates[0]!.direction, 'short')
+  assertEquals(managementCandidates.length, 0)
+})
+
+Deno.test('shouldCallModel: FLAT + OPEN_SHORT candidate -> a call happens (OPEN_SHORT is not silently dropped from the veto path)', () => {
+  const { vetoCandidates, managementCandidates } = collectModelCandidates(
+    [source({ candidate: openShortCandidate(), openPosition: null })],
+    BOTH_ENABLED,
+    NOW,
+  )
+  assertEquals(shouldCallModel(vetoCandidates, managementCandidates, null), true)
+})
+
+Deno.test('collectModelCandidates: OPEN_LONG -> direction "long", OPEN_SHORT -> direction "short", in the same batch', () => {
+  const { vetoCandidates } = collectModelCandidates(
+    [
+      source({ asset: 'BTC', candidate: openLongCandidate(), openPosition: null }),
+      source({ asset: 'ETH', candidate: openShortCandidate({ asset: 'ETH' }), openPosition: null }),
+    ],
+    BOTH_ENABLED,
+    NOW,
+  )
+  assertEquals(vetoCandidates.length, 2)
+  const byAsset = Object.fromEntries(vetoCandidates.map((c) => [c.asset, c.direction]))
+  assertEquals(byAsset.BTC, 'long')
+  assertEquals(byAsset.ETH, 'short')
+})
+
+Deno.test('collectModelCandidates: disableAdd=true on flags is forwarded verbatim onto every management candidate', () => {
+  const flags: CandidateFlags = { ...BOTH_ENABLED, disableAdd: true }
+  const { managementCandidates } = collectModelCandidates(
+    [source({ candidate: intactThesisHold(), openPosition: openPosition() })],
+    flags,
+    NOW,
+  )
+  assertEquals(managementCandidates.length, 1)
+  assertEquals(managementCandidates[0]!.disableAdd, true)
+})
+
+Deno.test('collectModelCandidates: disableAdd=false (pre-V4 default) is forwarded as false, not omitted', () => {
+  const { managementCandidates } = collectModelCandidates(
+    [source({ candidate: intactThesisHold(), openPosition: openPosition() })],
+    BOTH_ENABLED,
+    NOW,
+  )
+  assertEquals(managementCandidates[0]!.disableAdd, false)
+})
+
 // --- CLOSE (regime flip) never reaches either list — Jev cannot override it
 
 Deno.test('collectModelCandidates: an OPEN position whose regime has flipped (CLOSE) never reaches management — the thesis-invalidation rule is not Jev-overridable', () => {
@@ -209,7 +281,7 @@ Deno.test('shouldCallModel: 0 veto, 0 management, no failure -> No', () => {
 })
 
 Deno.test('shouldCallModel: >=1 veto, 0 management, no failure -> Yes', () => {
-  assertEquals(shouldCallModel([{ asset: 'BTC', news: [] }], [], null), true)
+  assertEquals(shouldCallModel([{ asset: 'BTC', direction: 'long', news: [] }], [], null), true)
 })
 
 Deno.test('shouldCallModel: 0 veto, >=1 management, no failure -> Yes', () => {
@@ -219,12 +291,12 @@ Deno.test('shouldCallModel: 0 veto, >=1 management, no failure -> Yes', () => {
 
 Deno.test('shouldCallModel: >=1 veto, >=1 management, no failure -> Yes', () => {
   const mgmt = collectModelCandidates([source({ candidate: intactThesisHold(), openPosition: openPosition() })], BOTH_ENABLED, NOW).managementCandidates
-  assertEquals(shouldCallModel([{ asset: 'BTC', news: [] }], mgmt, null), true)
+  assertEquals(shouldCallModel([{ asset: 'BTC', direction: 'long', news: [] }], mgmt, null), true)
 })
 
 Deno.test('shouldCallModel: any candidates, but a failure reason is set -> No, regardless of what was collected', () => {
   const mgmt = collectModelCandidates([source({ candidate: intactThesisHold(), openPosition: openPosition() })], BOTH_ENABLED, NOW).managementCandidates
-  assertEquals(shouldCallModel([{ asset: 'BTC', news: [] }], mgmt, 'news retrieval failed'), false)
+  assertEquals(shouldCallModel([{ asset: 'BTC', direction: 'long', news: [] }], mgmt, 'news retrieval failed'), false)
   assertEquals(shouldCallModel([], [], 'news retrieval failed'), false)
 })
 
@@ -259,7 +331,7 @@ Deno.test('collectModelCandidates: news_veto_enabled=false collects zero veto ca
 })
 
 Deno.test('collectModelCandidates + shouldCallModel: both flags off -> nothing collected, no call', () => {
-  const flags: CandidateFlags = { newsVetoEnabled: false, managementEnabled: false, feeBps: 10, slippageBps: 5, minStopLossPct: 0.005 }
+  const flags: CandidateFlags = { newsVetoEnabled: false, managementEnabled: false, feeBps: 10, slippageBps: 5, minStopLossPct: 0.005, disableAdd: false }
   const { vetoCandidates, managementCandidates } = collectModelCandidates(
     [
       source({ asset: 'BTC', candidate: openLongCandidate(), openPosition: null }),

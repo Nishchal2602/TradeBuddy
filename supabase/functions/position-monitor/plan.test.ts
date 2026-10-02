@@ -30,11 +30,14 @@ function point(minutesAgo: number, price: number) {
   return { timestamp: new Date(new Date(NOW).getTime() - minutesAgo * 60_000).toISOString(), price }
 }
 
-const BASE_INPUT = { maxDataStalenessMinutes: 20, nowIso: NOW, feeBps: 0, slippageBps: 0, startingCash: 1000, strategyProfile: 'balanced' as const }
+const BASE_INPUT = {
+  maxDataStalenessMinutes: 20, nowIso: NOW, feeBps: 0, slippageBps: 0, startingCash: 1000, strategyProfile: 'balanced' as const,
+  shortFundingBpsPerDay: 0, timeStopMinutes: 480, maxHoldMinutes: 1440,
+}
 
 Deno.test('planMonitorActions: no open positions -> everything empty', () => {
   const result = planMonitorActions({ ...BASE_INPUT, openPositions: [] })
-  assertEquals(result, { closes: [], givebackCloses: [], highWaterUpdates: [], staleAssets: [], remainingOpenPositions: [] })
+  assertEquals(result, { closes: [], givebackCloses: [], timeStopCloses: [], highWaterUpdates: [], staleAssets: [], remainingOpenPositions: [] })
 })
 
 Deno.test('planMonitorActions: fresh data, no trigger -> held, not closed', () => {
@@ -202,4 +205,94 @@ Deno.test('planMonitorActions: no premature exit under Aggressive — a small pu
   const result = planMonitorActions({ ...BASE_INPUT, strategyProfile: 'aggressive', openPositions: [{ position, points: [point(0, 104)] }] }) // +0.5R, unarmed
   assertEquals(result.givebackCloses.length, 0)
   assertEquals(result.remainingOpenPositions.map((p) => p.id), [position.id])
+})
+
+// =========================================================================
+// Strategy V4 (2026-10-01) — the two new intraday_ls-only exits (hard max
+// hold, soft time stop) and the FULL precedence chain: SL/TP -> hard max
+// -> giveback -> soft time stop.
+// =========================================================================
+
+function minutesBeforeNow(minutes: number): string {
+  return new Date(new Date(NOW).getTime() - minutes * 60_000).toISOString()
+}
+
+function intradayLsPosition(overrides: Partial<Position> = {}): Position {
+  return trackedLongPosition({ openedUnderStrategyProfile: 'intraday_ls', ...overrides })
+}
+
+Deno.test('planMonitorActions: intraday_ls position past maxHoldMinutes closes via time_stop, regardless of strongly POSITIVE P&L', () => {
+  const position = intradayLsPosition({ openedAt: minutesBeforeNow(1440) })
+  const result = planMonitorActions({ ...BASE_INPUT, openPositions: [{ position, points: [point(0, 150)] }] }) // +6.25R, strongly profitable
+  assertEquals(result.timeStopCloses.length, 1)
+  assertEquals(result.timeStopCloses[0]!.closedPosition.closeReason, 'time_stop')
+  assertEquals(result.remainingOpenPositions.length, 0)
+})
+
+Deno.test('planMonitorActions: intraday_ls position past timeStopMinutes with weak P&L closes via the soft time stop', () => {
+  const position = intradayLsPosition({ openedAt: minutesBeforeNow(500) })
+  const result = planMonitorActions({ ...BASE_INPUT, openPositions: [{ position, points: [point(0, 100)] }] }) // flat, 0R
+  assertEquals(result.timeStopCloses.length, 1)
+  assertEquals(result.timeStopCloses[0]!.closedPosition.closeReason, 'time_stop')
+})
+
+Deno.test('planMonitorActions: intraday_ls position well before either threshold stays open', () => {
+  const position = intradayLsPosition({ openedAt: minutesBeforeNow(100) })
+  const result = planMonitorActions({ ...BASE_INPUT, openPositions: [{ position, points: [point(0, 100)] }] })
+  assertEquals(result.timeStopCloses.length, 0)
+  assertEquals(result.remainingOpenPositions.map((p) => p.id), [position.id])
+})
+
+Deno.test('planMonitorActions: a position NOT opened under intraday_ls is never time-stopped, even well past maxHoldMinutes', () => {
+  const position = trackedLongPosition({ openedUnderStrategyProfile: 'aggressive', openedAt: minutesBeforeNow(1440) })
+  const result = planMonitorActions({ ...BASE_INPUT, openPositions: [{ position, points: [point(0, 100)] }] })
+  assertEquals(result.timeStopCloses.length, 0)
+  assertEquals(result.remainingOpenPositions.map((p) => p.id), [position.id])
+})
+
+Deno.test('planMonitorActions: time stops are NOT gated on highWaterTrackedFrom — a never-tracked intraday_ls position still gets hard-max-closed', () => {
+  const position = longPosition({
+    openedUnderStrategyProfile: 'intraday_ls',
+    highWaterTrackedFrom: null, // never tracked -- would be permanently giveback-ineligible
+    initialRiskUsd: null, // no ruler at all -- hard max must not need one
+    openedAt: minutesBeforeNow(1440),
+  })
+  const result = planMonitorActions({ ...BASE_INPUT, openPositions: [{ position, points: [point(0, 100)] }] })
+  assertEquals(result.timeStopCloses.length, 1)
+})
+
+Deno.test('planMonitorActions: precedence — SL/TP still wins over hard max for an intraday_ls position breaching both at the same tick', () => {
+  const position = intradayLsPosition({ stopLossPrice: 95, openedAt: minutesBeforeNow(1440) })
+  const result = planMonitorActions({ ...BASE_INPUT, openPositions: [{ position, points: [point(0, 94)] }] }) // breaches SL AND is past maxHoldMinutes
+  assertEquals(result.closes.length, 1)
+  assertEquals(result.closes[0]!.closedPosition.closeReason, 'stop_loss')
+  assertEquals(result.timeStopCloses.length, 0)
+})
+
+Deno.test('planMonitorActions: precedence — hard max wins over giveback when both conditions are met at the same tick', () => {
+  // Same giveback setup as the existing Aggressive giveback test (100 ->
+  // 132 arms the 1.5R floor -> 108 would cross it), but ALSO past
+  // maxHoldMinutes at the final point.
+  const position = intradayLsPosition({ openedAt: minutesBeforeNow(1440) })
+  const result = planMonitorActions({
+    ...BASE_INPUT, strategyProfile: 'aggressive',
+    openPositions: [{ position, points: [point(5, 132), point(0, 108)] }],
+  })
+  assertEquals(result.timeStopCloses.length, 1, 'hard max intercepts before giveback tracking ever runs')
+  assertEquals(result.timeStopCloses[0]!.closedPosition.closeReason, 'time_stop')
+  assertEquals(result.givebackCloses.length, 0)
+})
+
+Deno.test('planMonitorActions: precedence — giveback wins over the soft time stop when both conditions are met at the same tick', () => {
+  // Past timeStopMinutes (500 > 480) but NOT maxHoldMinutes (500 < 1440),
+  // so hard max does not intercept — falls through to giveback, which
+  // must win over the soft time stop per the precedence chain.
+  const position = intradayLsPosition({ openedAt: minutesBeforeNow(500) })
+  const result = planMonitorActions({
+    ...BASE_INPUT, strategyProfile: 'aggressive',
+    openPositions: [{ position, points: [point(5, 132), point(0, 108)] }],
+  })
+  assertEquals(result.givebackCloses.length, 1)
+  assertEquals(result.givebackCloses[0]!.closedPosition.closeReason, 'profit_giveback')
+  assertEquals(result.timeStopCloses.length, 0, 'the soft time stop is never reached once giveback has already closed the position')
 })

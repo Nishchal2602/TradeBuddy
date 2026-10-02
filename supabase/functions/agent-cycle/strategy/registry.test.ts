@@ -90,6 +90,48 @@ Deno.test('checkStrategyDataSufficiency: aggressive with too few 5m points fails
   assertEquals(result.reason?.includes('5m'), true)
 })
 
+// --- checkStrategyDataSufficiency: intraday_ls — the UNION of both profiles'
+// own requirements, plus the 4h bias leg --------------------------------
+
+const FULL_4H_CANDLES = Array.from({ length: 50 }, (_, i) => candle(i, 100))
+
+Deno.test('checkStrategyDataSufficiency: intraday_ls passes with 50 daily, 50 4h, 12+ 30m, 25+ 5m', () => {
+  const result = checkStrategyDataSufficiency('intraday_ls', marketData({ candles: FULL_4H_CANDLES }), intraday())
+  assertEquals(result.ok, true)
+})
+
+Deno.test('checkStrategyDataSufficiency: intraday_ls with a short daily series fails closed — unlike aggressive, the bias regime leg DOES gate this profile', () => {
+  const shortDaily = marketData({ candles: FULL_4H_CANDLES, dailyCloseSeries: Array.from({ length: 5 }, (_, i) => dailyPoint(i, 100)) })
+  const result = checkStrategyDataSufficiency('intraday_ls', shortDaily, intraday())
+  assertEquals(result.ok, false)
+  assertEquals(result.reason?.includes('daily'), true)
+})
+
+Deno.test('checkStrategyDataSufficiency: intraday_ls with fewer than 50 4h candles fails closed — the bias EMA50 leg', () => {
+  const result = checkStrategyDataSufficiency('intraday_ls', marketData({ candles: FULL_4H_CANDLES.slice(0, 20) }), intraday())
+  assertEquals(result.ok, false)
+  assertEquals(result.reason?.includes('4h'), true)
+})
+
+Deno.test('checkStrategyDataSufficiency: intraday_ls with no intraday data at all fails closed', () => {
+  const result = checkStrategyDataSufficiency('intraday_ls', marketData({ candles: FULL_4H_CANDLES }), undefined)
+  assertEquals(result.ok, false)
+})
+
+Deno.test('checkStrategyDataSufficiency: intraday_ls with too few 30m bars fails closed', () => {
+  const thin = intraday({ ohlc30m: Array.from({ length: 5 }, (_, i) => candle(i, 100)) })
+  const result = checkStrategyDataSufficiency('intraday_ls', marketData({ candles: FULL_4H_CANDLES }), thin)
+  assertEquals(result.ok, false)
+  assertEquals(result.reason?.includes('30m'), true)
+})
+
+Deno.test('checkStrategyDataSufficiency: intraday_ls with too few 5m points fails closed', () => {
+  const thin = intraday({ spot5m: Array.from({ length: 5 }, (_, i) => ({ timestamp: new Date(Date.UTC(2026, 8, 23) + i * 300_000).toISOString(), price: 100, volume: 10 })) })
+  const result = checkStrategyDataSufficiency('intraday_ls', marketData({ candles: FULL_4H_CANDLES }), thin)
+  assertEquals(result.ok, false)
+  assertEquals(result.reason?.includes('5m'), true)
+})
+
 // --- regimeContextFor: available as context, computed identically to before
 
 Deno.test('regimeContextFor: a full daily series returns the same RegimeResult evaluateTrendRegime always has', () => {
@@ -124,6 +166,21 @@ Deno.test('managementAtrPctFor: aggressive throws if no intraday data is availab
   assertEquals(threw, true)
 })
 
+Deno.test('managementAtrPctFor: intraday_ls reads the 30m intraday OHLC too, same as aggressive — never the 4-hourly candles', () => {
+  const result = managementAtrPctFor('intraday_ls', marketData(), intraday())
+  assertEquals(typeof result, 'number')
+})
+
+Deno.test('managementAtrPctFor: intraday_ls throws if no intraday data is available', () => {
+  let threw = false
+  try {
+    managementAtrPctFor('intraday_ls', marketData(), undefined)
+  } catch {
+    threw = true
+  }
+  assertEquals(threw, true)
+})
+
 // --- protectionForEntry: origination only, correct formula per profile ----
 
 Deno.test('protectionForEntry: balanced calls the PASSED-IN stopLossPctFor/takeProfitPctFor unchanged — proves registry.ts does not reimplement strategy/rules.ts', () => {
@@ -146,6 +203,26 @@ Deno.test('protectionForEntry: aggressive NEVER calls the passed-in balanced for
   assertAlmostEquals(result.takeProfitPct, 0.024, 1e-12)
 })
 
+Deno.test('protectionForEntry: intraday_ls uses its own formula, keyed on the passed armId — fade gets 1.5x, others get 2.0x', () => {
+  const stopLossPctFor = () => 0.025
+  const takeProfitPctFor = (s: number) => 6 * s
+  const fade = protectionForEntry('intraday_ls', 2.0, stopLossPctFor, takeProfitPctFor, 'fade_long')
+  const breakout = protectionForEntry('intraday_ls', 2.0, stopLossPctFor, takeProfitPctFor, 'breakout_short')
+  assertAlmostEquals(fade.stopLossPct, breakout.stopLossPct, 1e-12) // same stop regardless of arm
+  assertAlmostEquals(fade.takeProfitPct, 1.5 * fade.stopLossPct, 1e-12)
+  assertAlmostEquals(breakout.takeProfitPct, 2.0 * breakout.stopLossPct, 1e-12)
+})
+
+Deno.test('protectionForEntry: intraday_ls throws without an armId — this profile has no default reward:risk', () => {
+  let threw = false
+  try {
+    protectionForEntry('intraday_ls', 2.0, () => 0.025, (s) => 6 * s)
+  } catch {
+    threw = true
+  }
+  assertEquals(threw, true)
+})
+
 // --- clearsEntryTradeabilityFloor: balanced has no such concept -----------
 
 Deno.test('clearsEntryTradeabilityFloor: always true for balanced, regardless of the numbers passed', () => {
@@ -155,6 +232,24 @@ Deno.test('clearsEntryTradeabilityFloor: always true for balanced, regardless of
 Deno.test('clearsEntryTradeabilityFloor: aggressive applies the real K=3 floor', () => {
   assertEquals(clearsEntryTradeabilityFloor('aggressive', 0.016, 0.003), true)
   assertEquals(clearsEntryTradeabilityFloor('aggressive', 0.004, 0.003), false)
+})
+
+Deno.test('clearsEntryTradeabilityFloor: intraday_ls gates against the STOP distance (4th arg), ignoring atrTargetDistancePct entirely', () => {
+  // atrTargetDistancePct(0.0001) would fail Aggressive's own K=3 floor
+  // badly if it were reused here — proving intraday_ls genuinely uses a
+  // different ratio, not a relabeled call to clearsTradeabilityFloor.
+  assertEquals(clearsEntryTradeabilityFloor('intraday_ls', 0.0001, 0.003, 0.012), true) // 0.003/0.012=0.25, boundary
+  assertEquals(clearsEntryTradeabilityFloor('intraday_ls', 100, 0.003, 0.008), false) // 0.003/0.008=0.375 > 0.25
+})
+
+Deno.test('clearsEntryTradeabilityFloor: intraday_ls throws without a stopLossPct — this profile has no target-based fallback', () => {
+  let threw = false
+  try {
+    clearsEntryTradeabilityFloor('intraday_ls', 0.016, 0.003)
+  } catch {
+    threw = true
+  }
+  assertEquals(threw, true)
 })
 
 // deterministicTighteningFor was retired 2026-09-23 — superseded by the

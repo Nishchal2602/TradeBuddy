@@ -15,6 +15,7 @@ function managementCandidate(overrides: Partial<ManagementCandidateInput> = {}):
 function candidate(asset: 'BTC' | 'ETH', overrides: Partial<VetoCandidateInput> = {}): VetoCandidateInput {
   return {
     asset,
+    direction: 'long',
     news: [{ id: 'news-1', source: 'Cointelegraph', headline: 'Exchange hacked, funds drained', summary: 'A major exchange reported a hack.', publishedAt: '2026-09-22T08:00:00.000Z', ageMinutes: 60 }],
     ...overrides,
   }
@@ -241,5 +242,21 @@ Deno.test('requestPortfolioDecisions: an Aggressive management candidate asks re
   const result = await requestPortfolioDecisions([], [managementCandidate({ aggressive: AGGRESSIVE_CONTEXT })], 10_000, 8_000, 0.3, 'key', fetchImpl)
   // score 2 -> EXPECTED_MOVE_PCT_BY_SCORE_LEVEL[2] = 0.008, same table entry-question.ts uses
   assertEquals(result.managementOutcomes[0]!.remainingUpsideExpectedMovePct, 0.008)
+})
+
+// --- Strategy V4 (2026-10-01, plan §5.2 point 3) — disableAdd's safe fallback ---
+
+// Deliberately OMITS btc_add_conviction — exactly what a real API response
+// looks like when disableAdd suppressed that question from being asked at
+// all (management-question.ts never offers it). If provider.ts ever
+// regresses to an unconditional mustFind(addConvictionQuestionId(...)), this
+// throws instead of silently passing.
+const { btc_add_conviction: _omitted, ...MANAGEMENT_ANSWERS_WITHOUT_ADD_CONVICTION } = FULL_MANAGEMENT_ANSWERS
+
+Deno.test('requestPortfolioDecisions: a disableAdd candidate produces addMagnitude 0 without reading a nonexistent add_conviction answer (does not throw)', async () => {
+  const fetchImpl = mixedFetch(MANAGEMENT_ANSWERS_WITHOUT_ADD_CONVICTION)
+  const result = await requestPortfolioDecisions([], [managementCandidate({ disableAdd: true })], 10_000, 8_000, 0.3, 'key', fetchImpl)
+  assertEquals(result.managementOutcomes.length, 1)
+  assertEquals(result.managementOutcomes[0]!.addMagnitude, 0)
 })
 

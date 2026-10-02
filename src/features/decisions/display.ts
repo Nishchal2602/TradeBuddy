@@ -57,6 +57,10 @@ export const CLOSE_REASON_LABEL: Record<CloseReason, string> = {
   take_profit: 'Take profit',
   collateral_exhausted: 'Collateral exhausted',
   profit_giveback: 'Profit protected',
+  // Strategy V4 (2026-10-01) — the two new intraday_ls-only monitor exits
+  // (hard max hold, soft time stop) share this one reason: both are a
+  // deterministic time-based exit, distinct from a price-level breach.
+  time_stop: 'Time stop',
 }
 
 export const CLOSE_REASON_BADGE_VARIANT: Record<CloseReason, NonNullable<BadgeProps['variant']>> = {
@@ -69,4 +73,7 @@ export const CLOSE_REASON_BADGE_VARIANT: Record<CloseReason, NonNullable<BadgePr
   // loss, so it gets its own visual identity rather than being folded
   // into 'success'.
   profit_giveback: 'accent',
+  // Neutral, like agent_close — a time stop is neither a win nor a loss
+  // signal in itself, just the clock running out.
+  time_stop: 'neutral',
 }

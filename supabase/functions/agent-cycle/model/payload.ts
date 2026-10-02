@@ -118,11 +118,14 @@ export interface ModelCallPayload {
 //
 // What the model ACTUALLY receives — deliberately narrower than
 // AssetInput above, and narrower again than the Gemini-era version of
-// this type. Only OPEN_LONG candidates ever reach a veto call (§9's
-// entry trigger table item 5; HOLD needs no veto since it changes
+// this type. Only OPEN_LONG/OPEN_SHORT candidates ever reach a veto call
+// (§9's entry trigger table item 5; HOLD needs no veto since it changes
 // nothing, and CLOSE is never vetoable — trading-domain-contract.md §7:
 // "exits must always be actionable," the exact same reasoning the risk
-// gate already applies to confidence/re-entry/drawdown).
+// gate already applies to confidence/re-entry/drawdown). OPEN_SHORT only
+// ever reaches here via Strategy V4 (intraday_ls) — Balanced never
+// proposes a short and Aggressive's own entries bypass this shared veto
+// path entirely.
 //
 // `regime`/`stopLossPct`/`takeProfitPct` were dropped in the Jev
 // migration (they were on this type only for Gemini's prompt, which
@@ -134,5 +137,11 @@ export interface ModelCallPayload {
 
 export interface VetoCandidateInput {
   asset: AssetSymbol
+  // Strategy V4 (2026-10-01) — which position the candidate would open.
+  // Threaded all the way into buildJevQuestion so the question text and
+  // its true/false criteria match the actual side being proposed (the
+  // material events that threaten a long are the OPPOSITE of the ones
+  // that threaten a short — see question.ts).
+  direction: Direction
   news: NewsInput[]
 }

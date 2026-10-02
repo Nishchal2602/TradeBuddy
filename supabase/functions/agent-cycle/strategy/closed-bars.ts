@@ -45,3 +45,52 @@ export function closedPoints<T extends { timestamp: string }>(
   if (lastGapMs < expectedIntervalMs) return points.slice(0, -1)
   return [...points]
 }
+
+export interface ClosedBarReconciliationResult {
+  ok: boolean
+  reason: string | null
+}
+
+// Strategy V4 (2026-10-03, plan §5-IMPL review item 3) — the /ohlc
+// series' close-time, in-progress-withheld semantics (the module comment
+// above) rested on an upstream assumption whose ONLY recorded evidence
+// was uniform gap spacing — which cannot actually distinguish a
+// close-stamped COMPLETED bar from an open-stamped IN-PROGRESS one (both
+// produce perfectly uniform gaps). Live-reconciled 2026-10-02/03 against
+// this project's own stored 5m spot series instead: the 30m bar stamped
+// 14:30 UTC had open=86551.xx (matching stored spot at 14:00) and
+// close=86116.xx (matching stored spot at 14:30) — proving it covers
+// 14:00->14:30, i.e. timestamps ARE close times and the in-progress bar
+// genuinely IS withheld. This function is the ongoing, cheap runtime
+// version of that one-off manual check: both series are already fetched
+// every cycle an intraday profile runs (market_bars already fills from
+// both), so reconciling costs nothing and would catch an upstream
+// semantics change immediately instead of silently repainting every
+// detector arm.
+//
+// Deliberately a WARNING, never a filter and never a hard fail-closed:
+// filtering `candles`/`ohlc30m` would now be the WRONG fix (they are
+// correctly unfiltered today — coingecko.test.ts's own "candles are
+// never passed through closedPoints" test must keep passing), and a
+// mis-set tolerance must never be able to halt trading on its own.
+export function reconcileClosedBar(
+  newestCandle: { timestamp: string; close: number } | undefined,
+  spotPoints: readonly { timestamp: string; price: number }[],
+  toleranceFraction: number,
+): ClosedBarReconciliationResult {
+  if (!newestCandle) return { ok: true, reason: null } // nothing to reconcile this cycle
+  const matchingSpot = spotPoints.find((p) => p.timestamp === newestCandle.timestamp)
+  // No spot point lands on the EXACT same timestamp this cycle (the two
+  // series are fetched independently, so their grids can drift apart) —
+  // can't check, so don't warn. This is expected on most cycles, not a
+  // defect in the check itself.
+  if (!matchingSpot) return { ok: true, reason: null }
+  const relativeDiff = Math.abs(newestCandle.close - matchingSpot.price) / matchingSpot.price
+  if (relativeDiff > toleranceFraction) {
+    return {
+      ok: false,
+      reason: `newest candle at ${newestCandle.timestamp} has close=${newestCandle.close}, but the spot series' point at the same timestamp is ${matchingSpot.price} (${(relativeDiff * 100).toFixed(2)}% apart, tolerance ${(toleranceFraction * 100).toFixed(2)}%) — the close-time/withheld-in-progress-bar assumption this project depends on may no longer hold`,
+    }
+  }
+  return { ok: true, reason: null }
+}

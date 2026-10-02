@@ -20,6 +20,8 @@ import {
 import type { ManagementCandidateInput } from './management-question.ts'
 import { buildEntryQuestionsForAsset, entryQualityQuestionId, expectedMoveQuestionId, expectedMovePctFromScore } from './entry-question.ts'
 import type { EntryOpportunityInput, EntryOutcome } from './entry-question.ts'
+import { buildAdversarialQuestionsForAsset, failureModeQuestionId, failureRiskQuestionId, ADVERSARIAL_QUESTION_VERSION, VALID_FAILURE_MODES } from './adversarial-question.ts'
+import type { AdversarialOutcome, FailureMode } from './adversarial-question.ts'
 import type { AssetSymbol } from '../../../../../src/shared/market-data/types.ts'
 import type { VetoCandidateInput } from '../payload.ts'
 
@@ -36,7 +38,7 @@ import type { VetoCandidateInput } from '../payload.ts'
 // propagates as JevCallError and the caller fails every affected
 // candidate closed to HOLD. There is no second model to try.
 
-export { JevCallError, JEV_QUESTION_VERSION, JEV_VETO_THRESHOLD, MANAGEMENT_QUESTION_VERSION }
+export { JevCallError, JEV_QUESTION_VERSION, JEV_VETO_THRESHOLD, MANAGEMENT_QUESTION_VERSION, ADVERSARIAL_QUESTION_VERSION }
 
 export interface VetoOutcome {
   asset: AssetSymbol
@@ -180,10 +182,15 @@ export interface ManagementOutcome {
 export interface PortfolioRequestResult {
   vetoOutcomes: VetoOutcome[]
   managementOutcomes: ManagementOutcome[]
-  // Aggressive-only (2026-09-23) — empty whenever entryOpportunities is
-  // empty (every existing Balanced-only or veto-only call site, which
-  // never passes that argument, sees exactly the pre-existing shape).
+  // Empty whenever entryOpportunities is empty (every existing
+  // Balanced-only or veto-only call site, which never passes that
+  // argument, sees exactly the pre-existing shape). Aggressive-only until
+  // Strategy V4 (2026-10-02, plan §5.1b) started also populating this.
   entryOutcomes: EntryOutcome[]
+  // Strategy V4 (intraday_ls, 2026-10-02, plan §5.1c) — advisory only,
+  // same emptiness rule as entryOutcomes (one list of opportunities
+  // drives both question families, built in the same loop below).
+  adversarialOutcomes: AdversarialOutcome[]
   modelVersion: string
   rawRequest: unknown
   rawResponse: unknown
@@ -196,6 +203,22 @@ function asEntryAction(value: string, asset: AssetSymbol): 'ENTER' | 'SKIP' {
     throw new JevCallError(`Jev returned an unrecognized entry_quality answer "${value}" for ${asset}`)
   }
   return value as 'ENTER' | 'SKIP'
+}
+
+const VALID_FAILURE_RISKS = ['LOW', 'MEDIUM', 'HIGH'] as const
+
+function asFailureRisk(value: string, asset: AssetSymbol): 'LOW' | 'MEDIUM' | 'HIGH' {
+  if (!(VALID_FAILURE_RISKS as readonly string[]).includes(value)) {
+    throw new JevCallError(`Jev returned an unrecognized failure_risk answer "${value}" for ${asset}`)
+  }
+  return value as 'LOW' | 'MEDIUM' | 'HIGH'
+}
+
+function asFailureMode(value: string, asset: AssetSymbol): FailureMode {
+  if (!(VALID_FAILURE_MODES as readonly string[]).includes(value)) {
+    throw new JevCallError(`Jev returned an unrecognized failure_mode answer "${value}" for ${asset}`)
+  }
+  return value as FailureMode
 }
 
 export async function requestPortfolioDecisions(
@@ -239,13 +262,30 @@ export async function requestPortfolioDecisions(
         volumeTrendRatio: opp.volumeTrendRatio,
         sampledDayHighPct: opp.sampledDayHighPct,
         sampledDayLowPct: opp.sampledDayLowPct,
+        // Strategy V4 only — undefined for Aggressive, matching every
+        // other optional field on EntryOpportunityInput/JevOpportunitySnapshot.
+        armId: opp.armId,
+        direction: opp.direction,
+        bias: opp.bias,
       },
     }
   }
 
   const entryQuestions: Record<string, ReturnType<typeof buildEntryQuestionsForAsset>[string]> = {}
-  for (const opp of entryOpportunities) Object.assign(entryQuestions, buildEntryQuestionsForAsset(opp.asset))
-  const questions = { ...buildJevQuestions(vetoCandidates), ...buildManagementQuestions(managementCandidates), ...entryQuestions }
+  for (const opp of entryOpportunities) Object.assign(entryQuestions, buildEntryQuestionsForAsset(opp))
+  // Strategy V4 (2026-10-02, plan §5.1c) — the adversarial critique
+  // questions ride the SAME entryOpportunities list (one opportunity
+  // drives entry_quality/expected_move AND failure_risk/failure_mode),
+  // so Aggressive's entryOpportunities: [] produces zero adversarial
+  // questions too, with no separate gate needed.
+  const adversarialQuestions: Record<string, ReturnType<typeof buildAdversarialQuestionsForAsset>[string]> = {}
+  for (const opp of entryOpportunities) Object.assign(adversarialQuestions, buildAdversarialQuestionsForAsset(opp))
+  const questions = {
+    ...buildJevQuestions(vetoCandidates),
+    ...buildManagementQuestions(managementCandidates),
+    ...entryQuestions,
+    ...adversarialQuestions,
+  }
 
   const result = await callJev(JEV_MODEL_ID, state, questions, apiKey, fetchImpl, options)
   const answerById = new Map<string, JevAnswer>(result.answers.map((a) => [a.questionId, a]))
@@ -265,7 +305,12 @@ export async function requestPortfolioDecisions(
 
   const managementOutcomes: ManagementOutcome[] = managementCandidates.map((candidate) => {
     const action = expectChoice(mustFind(managementActionQuestionId(candidate.asset)))
-    const addConviction = expectScore(mustFind(addConvictionQuestionId(candidate.asset)))
+    // intraday_ls only (candidate.disableAdd, plan §5.2 point 3) — the
+    // question is never built for this candidate (management-question.ts's
+    // own conditional), so mustFind would throw; 0 is a safe placeholder
+    // since ADD is also absent from actionCriteria, so Jev's own `action`
+    // answer can never actually be 'ADD' here for this to matter.
+    const addConviction = candidate.disableAdd ? null : expectScore(mustFind(addConvictionQuestionId(candidate.asset)))
     const reduceMagnitude = expectScore(mustFind(reduceMagnitudeQuestionId(candidate.asset)))
     const stopIntent = expectChoice(mustFind(stopIntentQuestionId(candidate.asset)))
     const targetIntent = expectChoice(mustFind(targetIntentQuestionId(candidate.asset)))
@@ -283,7 +328,7 @@ export async function requestPortfolioDecisions(
       action: asManagementAction(action.choice, candidate.asset),
       actionConfidence: action.confidence,
       actionProbabilities: action.probabilities,
-      addMagnitude: magnitudeFromScore(addConviction.score, ADD_MAGNITUDE_BY_SCORE_LEVEL),
+      addMagnitude: addConviction ? magnitudeFromScore(addConviction.score, ADD_MAGNITUDE_BY_SCORE_LEVEL) : 0,
       reduceMagnitude: magnitudeFromScore(reduceMagnitude.score, REDUCE_MAGNITUDE_BY_SCORE_LEVEL),
       stopIntent: asStopIntent(stopIntent.choice, candidate.asset),
       targetIntent: asTargetIntent(targetIntent.choice, candidate.asset),
@@ -295,7 +340,9 @@ export async function requestPortfolioDecisions(
   // candidate — this function does not enforce that (it merely reports
   // both raw outcomes); strategy/registry.ts's buildCandidate is where
   // "either can only remove, neither can grant" is actually applied,
-  // mirroring cycle/apply-veto.ts's own containment discipline.
+  // mirroring cycle/apply-veto.ts's own containment discipline. For
+  // intraday_ls specifically, index.ts's Pass 2 reads these outcomes
+  // without ever touching finalProposal at all — advisory, not removal.
   const entryOutcomes: EntryOutcome[] = entryOpportunities.map((opp) => {
     const entryQuality = expectChoice(mustFind(entryQualityQuestionId(opp.asset)))
     const expectedMove = expectScore(mustFind(expectedMoveQuestionId(opp.asset)))
@@ -303,7 +350,27 @@ export async function requestPortfolioDecisions(
       asset: opp.asset,
       enter: asEntryAction(entryQuality.choice, opp.asset) === 'ENTER',
       enterConfidence: entryQuality.confidence,
+      enterDistribution: entryQuality.probabilities,
       expectedMovePct: expectedMovePctFromScore(expectedMove.score),
+      expectedMoveConfidence: expectedMove.confidence,
+      expectedMoveDistribution: expectedMove.probabilities,
+    }
+  })
+
+  // Adversarial critique (plan §5.1c) — advisory only, same list drives
+  // both this and entryOutcomes above; neither answer is ever read by
+  // anything that could remove or alter a candidate.
+  const adversarialOutcomes: AdversarialOutcome[] = entryOpportunities.map((opp) => {
+    const failureRisk = expectChoice(mustFind(failureRiskQuestionId(opp.asset)))
+    const failureMode = expectChoice(mustFind(failureModeQuestionId(opp.asset)))
+    return {
+      asset: opp.asset,
+      failureRisk: asFailureRisk(failureRisk.choice, opp.asset),
+      failureRiskConfidence: failureRisk.confidence,
+      failureRiskDistribution: failureRisk.probabilities,
+      failureMode: asFailureMode(failureMode.choice, opp.asset),
+      failureModeConfidence: failureMode.confidence,
+      failureModeDistribution: failureMode.probabilities,
     }
   })
 
@@ -311,6 +378,7 @@ export async function requestPortfolioDecisions(
     vetoOutcomes,
     managementOutcomes,
     entryOutcomes,
+    adversarialOutcomes,
     modelVersion: result.modelVersion,
     rawRequest: { model: JEV_MODEL_ID, state, questions },
     rawResponse: result.rawResponse,

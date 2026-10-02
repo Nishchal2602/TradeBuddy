@@ -45,6 +45,11 @@ function closeResultToRpcParams(result: ClosePositionResult, expectedQuantity?: 
     p_intent: result.trade.intent,
     p_decision_id: result.trade.decisionId,
     p_trigger_reason: result.trade.triggerReason,
+    // Strategy V4 (2026-10-01) — perpetual-funding cost charged on this
+    // closing trade (0 for a long, or for any close where funding was
+    // never wired — accounting.ts's own computeFundingAccrual already
+    // defaults to 0 whenever it isn't applicable).
+    p_funding_cost: result.fundingCost,
     // Aggressive V3.1 (2026-09-23) — the optimistic-concurrency guard
     // (close_position_atomic's own p_expected_quantity). Undefined for
     // every SL/TP close (the pre-existing call site below never passes
@@ -70,6 +75,10 @@ export interface MonitorRunSummary {
   // glance, matching how staleAssetCount is already its own field rather
   // than folded into closedCount.
   givebackClosedCount: number
+  // Strategy V4 (2026-10-01) — the two new intraday_ls-only exits (hard
+  // max hold, soft time stop), same "its own field" reasoning as
+  // givebackClosedCount above.
+  timeStopClosedCount: number
   detail?: string
 }
 
@@ -93,10 +102,10 @@ export async function runPositionMonitor(deps: MonitorDeps): Promise<MonitorRunS
 
   const { data: settings, error: settingsError } = await supabase
     .from('agent_settings')
-    .select('monitor_interval_minutes, max_data_staleness_minutes, fee_bps, slippage_bps, strategy_profile')
+    .select('monitor_interval_minutes, max_data_staleness_minutes, fee_bps, slippage_bps, strategy_profile, short_funding_bps_per_day, time_stop_minutes, max_hold_minutes')
     .single()
   if (settingsError || !settings) {
-    return { status: 'failed', openPositionCount: 0, closedCount: 0, lostRaceCount: 0, staleAssetCount: 0, givebackClosedCount: 0, detail: `could not read agent_settings: ${settingsError?.message}` }
+    return { status: 'failed', openPositionCount: 0, closedCount: 0, lostRaceCount: 0, staleAssetCount: 0, givebackClosedCount: 0, timeStopClosedCount: 0, detail: `could not read agent_settings: ${settingsError?.message}` }
   }
 
   const { data: portfolio, error: portfolioError } = await supabase
@@ -104,7 +113,7 @@ export async function runPositionMonitor(deps: MonitorDeps): Promise<MonitorRunS
     .select('id, cash')
     .single()
   if (portfolioError || !portfolio) {
-    return { status: 'failed', openPositionCount: 0, closedCount: 0, lostRaceCount: 0, staleAssetCount: 0, givebackClosedCount: 0, detail: `could not read portfolio: ${portfolioError?.message}` }
+    return { status: 'failed', openPositionCount: 0, closedCount: 0, lostRaceCount: 0, staleAssetCount: 0, givebackClosedCount: 0, timeStopClosedCount: 0, detail: `could not read portfolio: ${portfolioError?.message}` }
   }
 
   // Step 1 (architecture.md): acquire idempotency. A retried invocation of
@@ -125,9 +134,9 @@ export async function runPositionMonitor(deps: MonitorDeps): Promise<MonitorRunS
       // "still running" from "already completed" — correctly so, since a
       // retry of the same scheduled tick must not redo the work either
       // way. Not treated as an error.
-      return { status: 'duplicate_tick', openPositionCount: 0, closedCount: 0, lostRaceCount: 0, staleAssetCount: 0, givebackClosedCount: 0, detail: 'this tick was already handled by another invocation (in progress or completed)' }
+      return { status: 'duplicate_tick', openPositionCount: 0, closedCount: 0, lostRaceCount: 0, staleAssetCount: 0, givebackClosedCount: 0, timeStopClosedCount: 0, detail: 'this tick was already handled by another invocation (in progress or completed)' }
     }
-    return { status: 'failed', openPositionCount: 0, closedCount: 0, lostRaceCount: 0, staleAssetCount: 0, givebackClosedCount: 0, detail: `could not create agent_runs row: ${runInsertError.message}` }
+    return { status: 'failed', openPositionCount: 0, closedCount: 0, lostRaceCount: 0, staleAssetCount: 0, givebackClosedCount: 0, timeStopClosedCount: 0, detail: `could not create agent_runs row: ${runInsertError.message}` }
   }
   const runId: string = run.id
 
@@ -145,7 +154,7 @@ export async function runPositionMonitor(deps: MonitorDeps): Promise<MonitorRunS
     // reason most monitor ticks cost zero API calls.
     if (openPositions.length === 0) {
       await supabase.from('agent_runs').update({ status: 'completed', completed_at: nowIso }).eq('id', runId)
-      return { status: 'completed', runId, openPositionCount: 0, closedCount: 0, lostRaceCount: 0, staleAssetCount: 0, givebackClosedCount: 0 }
+      return { status: 'completed', runId, openPositionCount: 0, closedCount: 0, lostRaceCount: 0, staleAssetCount: 0, givebackClosedCount: 0, timeStopClosedCount: 0 }
     }
 
     // Step 2: replay every point since the last completed monitor run, not
@@ -188,6 +197,9 @@ export async function runPositionMonitor(deps: MonitorDeps): Promise<MonitorRunS
       slippageBps: settings.slippage_bps,
       startingCash: Number(portfolio.cash),
       strategyProfile: settings.strategy_profile,
+      shortFundingBpsPerDay: Number(settings.short_funding_bps_per_day),
+      timeStopMinutes: settings.time_stop_minutes,
+      maxHoldMinutes: settings.max_hold_minutes,
     })
 
     // Step 5: execute through the shared broker via the conditional-update
@@ -227,6 +239,28 @@ export async function runPositionMonitor(deps: MonitorDeps): Promise<MonitorRunS
         console.log(`position-monitor: lost the giveback-close race for position ${closeResult.closedPosition.id} (${closeResult.closedPosition.asset}) — quantity or status changed since the ratchet triggered`)
       } else {
         console.log(`position-monitor: closed position ${closeResult.closedPosition.id} (${closeResult.closedPosition.asset}) via profit_giveback`)
+      }
+    }
+
+    // Strategy V4 (2026-10-01) — the two new intraday_ls-only exits (hard
+    // max hold, soft time stop). Same optimistic-concurrency guard as
+    // giveback above, and for the identical reason: both are computed
+    // from a snapshot the monitor read at the top of this tick, so an
+    // intervening ADD/REDUCE must lose the race rather than close a
+    // position whose economics have since moved.
+    let timeStopLostRaceCount = 0
+    for (const closeResult of plan.timeStopCloses) {
+      const { data: rpcData, error: rpcError } = await supabase.rpc(
+        'close_position_atomic',
+        closeResultToRpcParams(closeResult, closeResult.closedPosition.quantity),
+      )
+      if (rpcError) throw new Error(`close_position_atomic (time_stop) failed for position ${closeResult.closedPosition.id}: ${rpcError.message}`)
+      const outcome = Array.isArray(rpcData) ? rpcData[0] : rpcData
+      if (!outcome?.won_race) {
+        timeStopLostRaceCount++
+        console.log(`position-monitor: lost the time-stop-close race for position ${closeResult.closedPosition.id} (${closeResult.closedPosition.asset}) — quantity or status changed since the exit triggered`)
+      } else {
+        console.log(`position-monitor: closed position ${closeResult.closedPosition.id} (${closeResult.closedPosition.asset}) via time_stop`)
       }
     }
 
@@ -273,7 +307,7 @@ export async function runPositionMonitor(deps: MonitorDeps): Promise<MonitorRunS
       const current = latestPriceByAsset.get(p.asset) ?? p.entryPrice
       return sum + (p.direction === 'long' ? (current - p.entryPrice) * p.quantity : (p.entryPrice - current) * p.quantity)
     }, 0)
-    const realizedPnlThisRun = [...plan.closes, ...plan.givebackCloses].reduce((sum, c) => sum + c.realizedPnl, 0)
+    const realizedPnlThisRun = [...plan.closes, ...plan.givebackCloses, ...plan.timeStopCloses].reduce((sum, c) => sum + c.realizedPnl, 0)
 
     // realized_pnl_cum is a running total across every run that has ever
     // written a nav_snapshot for this portfolio (decision cycle or
@@ -316,9 +350,10 @@ export async function runPositionMonitor(deps: MonitorDeps): Promise<MonitorRunS
       runId,
       openPositionCount: openPositions.length,
       closedCount: plan.closes.length,
-      lostRaceCount: lostRaceCount + givebackLostRaceCount,
+      lostRaceCount: lostRaceCount + givebackLostRaceCount + timeStopLostRaceCount,
       staleAssetCount: plan.staleAssets.length,
       givebackClosedCount: plan.givebackCloses.length,
+      timeStopClosedCount: plan.timeStopCloses.length,
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -327,7 +362,7 @@ export async function runPositionMonitor(deps: MonitorDeps): Promise<MonitorRunS
     // the RPC before the failure remain closed (each was its own atomic
     // transaction) — only the run's own bookkeeping is marked failed.
     await supabase.from('agent_runs').update({ status: 'failed', error_detail: message, completed_at: nowIso }).eq('id', runId)
-    return { status: 'failed', runId, openPositionCount: 0, closedCount: 0, lostRaceCount: 0, staleAssetCount: 0, givebackClosedCount: 0, detail: message }
+    return { status: 'failed', runId, openPositionCount: 0, closedCount: 0, lostRaceCount: 0, staleAssetCount: 0, givebackClosedCount: 0, timeStopClosedCount: 0, detail: message }
   }
 }
 

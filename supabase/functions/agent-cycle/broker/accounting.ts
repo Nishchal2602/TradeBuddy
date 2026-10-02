@@ -2,6 +2,7 @@ import { exhaustionPrice } from '../../../../src/shared/risk/sl-tp.ts'
 import type { AssetSymbol } from '../../../../src/shared/market-data/types.ts'
 import type { CloseReason, Direction, Position } from '../../../../src/shared/positions/types.ts'
 import type { Trade, TradeSide } from '../../../../src/shared/trades/types.ts'
+import type { StrategyProfile } from '../../../../src/shared/strategy/profiles.ts'
 
 // The paper broker — deterministic code shared by the agent cycle and the
 // position monitor (invariant 12: one owner, never two implementations).
@@ -27,6 +28,38 @@ export function applySlippage(referencePrice: number, side: TradeSide, slippageB
   return side === 'BUY' ? referencePrice * (1 + factor) : referencePrice * (1 - factor)
 }
 
+// --- Perpetual funding (Strategy V4, 2026-10-01) ---------------------------
+//
+// Charged ONLY on a short (always 0 for a long — models real perpetual
+// funding, which a 1x synthetic LONG never pays). Settles on the quantity
+// and entry price AS THEY WERE BEFORE this event, over the time elapsed
+// since the position's own lastFundingAccrualAt — "at any OPEN/ADD/
+// REDUCE/CLOSE on a short... set positions.last_funding_accrual_at = t"
+// (plan §4.3). This is what avoids double-charging across more than one
+// partial exit: open 1.0 @ t0, reduce 0.5 @ t0+8h accrues 1.0x8h and
+// resets the clock, close 0.5 @ t0+16h accrues only 0.5x8h — never the
+// full 1.0 over the full 16h span.
+//
+// lastFundingAccrualAt is null for every position opened before this
+// column existed (and any hand-built fixture that omits it) — returns 0
+// rather than guessing a start time from nothing, the same "never invent
+// a number the data doesn't support" discipline computePositionPnlR's own
+// initialRiskUsd<=0 guard already uses.
+export function computeFundingAccrual(
+  direction: Direction,
+  quantityBeforeEvent: number,
+  entryPriceBeforeEvent: number,
+  shortFundingBpsPerDay: number,
+  lastFundingAccrualAt: string | null | undefined,
+  nowIso: string,
+): number {
+  if (direction === 'long') return 0
+  if (!lastFundingAccrualAt) return 0
+  const elapsedDays = (new Date(nowIso).getTime() - new Date(lastFundingAccrualAt).getTime()) / 86_400_000
+  if (elapsedDays <= 0) return 0
+  return quantityBeforeEvent * entryPriceBeforeEvent * (shortFundingBpsPerDay / 10_000) * elapsedDays
+}
+
 // --- Open ------------------------------------------------------------
 
 export interface OpenPositionInput {
@@ -42,6 +75,9 @@ export interface OpenPositionInput {
   decisionId: string
   startingCash: number
   nowIso: string
+  // Strategy V4 (2026-10-01) — frozen onto the position at origination,
+  // never redefined (Position.openedUnderStrategyProfile's own comment).
+  strategyProfile: StrategyProfile
 }
 
 export interface OpenPositionResult {
@@ -87,6 +123,10 @@ export function openPosition(input: OpenPositionInput): OpenPositionResult {
     closeReason: null,
     openedByDecisionId: input.decisionId,
     closedByDecisionId: null,
+    openedUnderStrategyProfile: input.strategyProfile,
+    // The funding clock starts now — zero elapsed time means zero accrued
+    // funding at the instant of opening, for either direction.
+    lastFundingAccrualAt: input.nowIso,
   }
 
   const trade: Trade = {
@@ -108,6 +148,7 @@ export function openPosition(input: OpenPositionInput): OpenPositionResult {
     decisionId: input.decisionId,
     triggerReason: null,
     realizedPnl: null, // nothing realized on an OPEN
+    fundingCost: 0, // zero elapsed time at the instant of opening
   }
 
   return { position, trade, cashAfter }
@@ -132,6 +173,11 @@ export interface AddToPositionInput {
   decisionId: string
   startingCash: number
   nowIso: string
+  // Strategy V4 (2026-10-01) — only ever nonzero for a short (position.
+  // direction==='long' makes computeFundingAccrual return 0 regardless of
+  // this value), but still required so a caller never forgets to thread
+  // agent_settings.short_funding_bps_per_day through.
+  shortFundingBpsPerDay: number
 }
 
 export interface AddToPositionResult {
@@ -154,7 +200,13 @@ export function addToPosition(input: AddToPositionInput): AddToPositionResult {
   const fee = grossValue * (input.feeBps / 10_000)
   const slippageCost = Math.abs(fillPrice - input.referencePrice) * addQuantity
 
-  const netCashDelta = -(grossValue + fee) // identical shape to an OPEN's cash effect
+  // Settles on the PRE-add quantity/entry (the position as it was before
+  // this event) — accounting.ts's own module comment on
+  // computeFundingAccrual explains why this is what prevents double-
+  // charging across a position's life.
+  const fundingCost = computeFundingAccrual(position.direction, position.quantity, position.entryPrice, input.shortFundingBpsPerDay, position.lastFundingAccrualAt, input.nowIso)
+
+  const netCashDelta = -(grossValue + fee + fundingCost) // identical shape to an OPEN's cash effect, plus any accrued funding
   const cashAfter = input.startingCash + netCashDelta
 
   const newQuantity = position.quantity + addQuantity
@@ -173,6 +225,7 @@ export function addToPosition(input: AddToPositionInput): AddToPositionResult {
     // stopLossPrice/takeProfitPrice deliberately UNCHANGED — the gate
     // already proved they remain valid under this new entry before
     // approving the ADD; this function has no authority to touch them.
+    lastFundingAccrualAt: input.nowIso,
   }
 
   const trade: Trade = {
@@ -194,6 +247,7 @@ export function addToPosition(input: AddToPositionInput): AddToPositionResult {
     decisionId: input.decisionId,
     triggerReason: null,
     realizedPnl: null, // nothing realized on an ADD
+    fundingCost,
   }
 
   return { updatedPosition, trade, cashAfter }
@@ -226,6 +280,8 @@ export interface ReducePositionInput {
   decisionId: string
   startingCash: number
   nowIso: string
+  // Strategy V4 (2026-10-01) — see AddToPositionInput's own comment.
+  shortFundingBpsPerDay: number
 }
 
 export interface ReducePositionResult {
@@ -250,6 +306,12 @@ export interface ReducePositionResult {
   // silently overstate protected profit here, compounding with every
   // REDUCE on a position's life.
   partialRealizedPnlDelta: number
+  // Strategy V4 (2026-10-01) — the perpetual-funding cost charged on THIS
+  // reduce (0 for a long). Already subtracted out of partialRealizedPnlDelta
+  // below; surfaced here too for the same reason realizedPnl/fee are both
+  // already visible on this result — so a caller logging or reporting on
+  // this reduce never has to re-derive it.
+  fundingCost: number
 }
 
 export function reducePosition(input: ReducePositionInput): ReducePositionResult {
@@ -280,17 +342,21 @@ export function reducePosition(input: ReducePositionInput): ReducePositionResult
   // (the 100%-reduce-equals-close identity accounting.test.ts proves).
   const costBasisReleased = position.costBasis * (input.reduceQuantity / position.quantity)
 
-  const netCashDelta = position.direction === 'long'
+  // Settles on the PRE-reduce quantity/entry — see computeFundingAccrual's
+  // own module comment for why this is the event that resets the clock.
+  const fundingCost = computeFundingAccrual(position.direction, position.quantity, position.entryPrice, input.shortFundingBpsPerDay, position.lastFundingAccrualAt, input.nowIso)
+
+  const netCashDelta = (position.direction === 'long'
     ? grossValue - fee
-    : costBasisReleased + realizedPnl - fee
+    : costBasisReleased + realizedPnl - fee) - fundingCost
   const cashAfter = input.startingCash + netCashDelta
 
   const newQuantity = position.quantity - input.reduceQuantity
   const newCostBasis = position.costBasis - costBasisReleased
 
-  // NET of the fee this reduce actually paid — see
+  // NET of the fee AND the funding cost this reduce actually paid — see
   // ReducePositionResult.partialRealizedPnlDelta's own comment.
-  const partialRealizedPnlDelta = realizedPnl - fee
+  const partialRealizedPnlDelta = realizedPnl - fee - fundingCost
 
   const updatedPosition: Position = {
     ...position,
@@ -304,6 +370,7 @@ export function reducePosition(input: ReducePositionInput): ReducePositionResult
     // undefined on an older in-memory object — same `?? 0` convention
     // row-mappers.ts uses at the DB boundary).
     partialRealizedPnlUsd: (position.partialRealizedPnlUsd ?? 0) + partialRealizedPnlDelta,
+    lastFundingAccrualAt: input.nowIso,
   }
 
   const intent = position.direction === 'long' ? 'REDUCE_LONG' as const : 'REDUCE_SHORT' as const
@@ -326,9 +393,10 @@ export function reducePosition(input: ReducePositionInput): ReducePositionResult
     decisionId: input.decisionId,
     triggerReason: null,
     realizedPnl, // populated — this is a realizing fill, unlike OPEN/ADD
+    fundingCost,
   }
 
-  return { updatedPosition, trade, cashAfter, realizedPnl, partialRealizedPnlDelta }
+  return { updatedPosition, trade, cashAfter, realizedPnl, partialRealizedPnlDelta, fundingCost }
 }
 
 // --- Close -------------------------------------------------------------
@@ -358,6 +426,8 @@ export interface ClosePositionInput {
   decisionId: string | null
   startingCash: number
   nowIso: string
+  // Strategy V4 (2026-10-01) — see AddToPositionInput's own comment.
+  shortFundingBpsPerDay: number
 }
 
 export interface ClosePositionResult {
@@ -365,6 +435,9 @@ export interface ClosePositionResult {
   trade: Trade
   cashAfter: number
   realizedPnl: number
+  // Strategy V4 (2026-10-01) — the perpetual-funding cost charged on this
+  // closing trade (0 for a long).
+  fundingCost: number
 }
 
 export function closePosition(input: ClosePositionInput): ClosePositionResult {
@@ -400,12 +473,18 @@ export function closePosition(input: ClosePositionInput): ClosePositionResult {
     ? (fillPrice - position.entryPrice) * position.quantity
     : (position.entryPrice - fillPrice) * position.quantity
 
+  // Settles on the PRE-close quantity/entry — the position as it was
+  // immediately before this, its final, mutation.
+  const fundingCost = computeFundingAccrual(position.direction, position.quantity, position.entryPrice, input.shortFundingBpsPerDay, position.lastFundingAccrualAt, input.nowIso)
+
   // Close cash (trading-domain-contract.md §2):
   //   long:  cash += Q*X - fee                    == grossValue - fee
   //   short: cash += N + (E-X)*Q - fee             == costBasis + realizedPnl - fee
-  const netCashDelta = position.direction === 'long'
+  // Strategy V4 (2026-10-01): a final funding accrual is charged on the
+  // closing trade too, same as every other mutating event.
+  const netCashDelta = (position.direction === 'long'
     ? grossValue - fee
-    : position.costBasis + realizedPnl - fee
+    : position.costBasis + realizedPnl - fee) - fundingCost
   const cashAfter = input.startingCash + netCashDelta
 
   const closedPosition: Position = {
@@ -437,6 +516,7 @@ export function closePosition(input: ClosePositionInput): ClosePositionResult {
     cashAfter,
     executedAt: input.nowIso,
     intent,
+    fundingCost,
   }
 
   // See ClosePositionInput.decisionId's comment: the trade's
@@ -456,11 +536,11 @@ export function closePosition(input: ClosePositionInput): ClosePositionResult {
     : {
       ...tradeCore,
       decisionId: null,
-      triggerReason: positionCloseReason as 'stop_loss' | 'take_profit' | 'collateral_exhausted' | 'profit_giveback',
+      triggerReason: positionCloseReason as 'stop_loss' | 'take_profit' | 'collateral_exhausted' | 'profit_giveback' | 'time_stop',
       realizedPnl,
     }
 
-  return { closedPosition, trade, cashAfter, realizedPnl }
+  return { closedPosition, trade, cashAfter, realizedPnl, fundingCost }
 }
 
 // --- Portfolio valuation --------------------------------------------------

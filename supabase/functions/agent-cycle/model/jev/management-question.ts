@@ -63,7 +63,12 @@ export function magnitudeFromScore(score: number, levels: readonly number[]): nu
 // (v1 -> v2) for the profit-recycling reframe: the action question's
 // wording, the TIGHTEN_TOWARD_ENTRY rename, the protectionActionable gate,
 // and the new remaining_upside question all change what a row means.
-export const MANAGEMENT_QUESTION_VERSION = `jev-management-v2/atr${TP_STEP_ATR_MULTIPLE.toFixed(1)}`
+// Bumped again 2026-10-02 (v2 -> v3, Strategy V4 plan §5.2 point 3,
+// landed 2026-10-01 but the version constant was never bumped for it —
+// caught while revising §5.1): disableAdd removes 'ADD' from the action
+// question's criteria and omits add_conviction entirely for intraday_ls,
+// which changes what the question set means for that profile's rows.
+export const MANAGEMENT_QUESTION_VERSION = `jev-management-v3/atr${TP_STEP_ATR_MULTIPLE.toFixed(1)}`
 
 // ---------------------------------------------------------------------------
 // State
@@ -154,6 +159,12 @@ export interface ManagementCandidateInput {
   // Undefined for Balanced — see AggressiveManagementContext's own
   // comment.
   aggressive?: AggressiveManagementContext
+  // Strategy V4 (2026-10-01, plan §5.2 point 3) — intraday_ls only. ADD
+  // blends two entry prices into one position, muddying the per-arm R
+  // the reward loop depends on — removed from the offered action space
+  // entirely (and add_conviction is never asked) for this profile.
+  // Balanced and Aggressive leave this undefined/false and keep ADD.
+  disableAdd?: boolean
 }
 
 function profitStateFor(sampledMfeR: number | null, givebackRatio: number | null): JevPositionSnapshot['profitState'] {
@@ -407,24 +418,23 @@ function buildManagementQuestionsForAsset(candidate: ManagementCandidateInput): 
   // omit MODIFY_PROTECTION entirely when no legal tighten exists — the
   // action space must never offer a choice the gate is guaranteed to
   // reject, or Jev's only coherent way to express "protect this" becomes
-  // a silent no-op (profile-recycling plan §4.3).
-  const actionCriteria = protectionActionable
+  // a silent no-op (profile-recycling plan §4.3). Strategy V4 (2026-10-01):
+  // also omit ADD for intraday_ls (plan §5.2 point 3) — a genuinely
+  // different reason (preserving the per-arm R the reward loop depends
+  // on, not a gate-rejection concern), composed independently of the
+  // protection filter above.
+  let actionCriteria = protectionActionable
     ? ACTION_CRITERIA
     : Object.fromEntries(Object.entries(ACTION_CRITERIA).filter(([action]) => action !== 'MODIFY_PROTECTION'))
+  if (candidate.disableAdd) {
+    actionCriteria = Object.fromEntries(Object.entries(actionCriteria).filter(([action]) => action !== 'ADD'))
+  }
 
   const questions: Record<string, JevManagementQuestionSpec> = {
     [managementActionQuestionId(asset)]: {
       type: 'choice',
       instructions: buildActionInstructions(candidate),
       criteria: actionCriteria,
-    },
-    // Speculative — asked regardless of what the action answer turns out
-    // to be, per the documented fan-out pattern; consumed only on the
-    // ADD/REDUCE branch, never on the others.
-    [addConvictionQuestionId(asset)]: {
-      type: 'score',
-      instructions: `If the ${asset} position were increased right now, how strong is the conviction behind adding to it?`,
-      criteria: ADD_CONVICTION_LEVELS,
     },
     [reduceMagnitudeQuestionId(asset)]: {
       type: 'score',
@@ -441,6 +451,19 @@ function buildManagementQuestionsForAsset(candidate: ManagementCandidateInput): 
       instructions: `Should the take-profit on the open ${asset} position move?`,
       criteria: TARGET_INTENT_CRITERIA,
     },
+  }
+
+  // Speculative — asked regardless of what the action answer turns out
+  // to be, per the documented fan-out pattern; consumed only on the ADD
+  // branch, never on the others. Omitted entirely when ADD itself is
+  // disabled (intraday_ls, plan §5.2 point 3) — asking a conviction-level
+  // question for an action that was never offered would be nonsensical.
+  if (!candidate.disableAdd) {
+    questions[addConvictionQuestionId(asset)] = {
+      type: 'score',
+      instructions: `If the ${asset} position were increased right now, how strong is the conviction behind adding to it?`,
+      criteria: ADD_CONVICTION_LEVELS,
+    }
   }
 
   // Aggressive-only, non-action question (profile-recycling plan §4.4) —

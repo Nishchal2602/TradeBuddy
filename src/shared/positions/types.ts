@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { AssetSymbol } from '../market-data/types.ts'
+import { StrategyProfile } from '../strategy/profiles.ts'
 
 // One net position per asset — FLAT/LONG/SHORT, no lots, no pyramiding, no
 // partial exits (trading-domain-contract.md §1; DB-enforced by
@@ -19,9 +20,12 @@ export type PositionStatus = z.infer<typeof PositionStatus>
 // bracket check; profit_giveback by the same monitor's Aggressive V3.1
 // giveback ratchet, 2026-09-23 — a discrete, pre-registered, monotone
 // floor evaluated once per tick, NOT a continuously-trailing stop).
-// Mirrors trades.trigger_reason for the trade that closed this position
+// time_stop added by Strategy V4 (2026-10-01) — the position-monitor's
+// two new intraday_ls-only exits (hard max hold at 1,440 min; a soft
+// time stop at 480 min when positionPnlR < 0.5) — see plan §4.2. Mirrors
+// trades.trigger_reason for the trade that closed this position
 // (positions.close_reason column comment).
-export const CloseReason = z.enum(['agent_close', 'stop_loss', 'take_profit', 'collateral_exhausted', 'profit_giveback'])
+export const CloseReason = z.enum(['agent_close', 'stop_loss', 'take_profit', 'collateral_exhausted', 'profit_giveback', 'time_stop'])
 export type CloseReason = z.infer<typeof CloseReason>
 
 // FLAT/LONG/SHORT is never a column value — it's derived from whether an
@@ -119,5 +123,27 @@ export const Position = z.object({
   // (plan §5.5) — the sole eligibility gate, not an inference from other
   // fields.
   highWaterTrackedFrom: z.string().datetime().nullable().optional(),
+
+  // Strategy V4 (intraday_ls, 2026-10-01) — the STRATEGY THAT ORIGINATED
+  // this position, frozen at open_position_atomic and never redefined —
+  // same "immutable at origination" discipline as initialEntryPrice
+  // above, and for the same reason: the position-monitor's two new
+  // intraday_ls-only exits (hard max hold, soft time stop) must be scoped
+  // to positions THIS strategy opened, never to "whatever profile happens
+  // to be globally active right now" (unlike the giveback ratchet's own
+  // EXIT, which deliberately DOES key on the current global profile —
+  // see position-monitor/plan.ts's own comment on why that precedent does
+  // NOT generalize to a blanket time-based force-close). NULL for every
+  // position opened before this column existed — never backfilled with a
+  // guess beyond what agent_decisions.strategy_version directly maps to.
+  openedUnderStrategyProfile: StrategyProfile.nullable().optional(),
+  // Strategy V4 (2026-10-01) — perpetual-funding accrual clock for a
+  // SHORT position (broker/accounting.ts's computeFundingAccrual; meaningless
+  // for a long, which never accrues). Set to openedAt at origination and
+  // advanced to the executedAt of every OPEN/ADD/REDUCE/CLOSE thereafter —
+  // "settles on the whole open quantity at every event that changes it"
+  // (plan §4.3), not prorated per-trade, which is what avoids double-
+  // charging across more than one partial exit.
+  lastFundingAccrualAt: z.string().datetime().nullable().optional(),
 })
 export type Position = z.infer<typeof Position>

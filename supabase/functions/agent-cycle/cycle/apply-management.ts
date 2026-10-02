@@ -2,6 +2,7 @@ import type { ModelDecisionProposal } from '../../../../src/shared/decisions/typ
 import type { AssetSymbol } from '../../../../src/shared/market-data/types.ts'
 import type { Direction } from '../../../../src/shared/positions/types.ts'
 import type { ManagementOutcome, StopIntent, TargetIntent } from '../model/jev/provider.ts'
+import { TP_STEP_ATR_MULTIPLE } from '../model/jev/management-question.ts'
 
 // Phase 2 (2026-09-22) — the single place a Jev management decision turns
 // into a ModelDecisionProposal, mirroring cycle/apply-veto.ts's role
@@ -62,9 +63,16 @@ function buildStopProposal(intent: StopIntent, position: ManagementPositionConte
 // (1.10 means 1.10%), so the /100 conversion is real and deliberate, the
 // same unit conversion strategy/rules.ts's stopLossPctFor already
 // performs (and the same class of error a dedicated test guards there).
+// TP_STEP_ATR_MULTIPLE (management-question.ts) was previously declared
+// but never actually multiplied in here — found 2026-10-01 while
+// sweeping for the same dead-wiring pattern as strategy.risk/
+// decisionIntervalMinutes. Its value is 1.0, so this was behaviorally
+// silent until now, but the constant's own comment explicitly invites
+// tuning it ("confirm/adjust... before treating this as settled"), which
+// would have had zero effect with the multiply missing.
 function buildTargetProposal(intent: TargetIntent, position: ManagementPositionContext): number | null {
   if (intent === 'KEEP') return null
-  const atrPrice = (position.atrPct / 100) * position.currentPrice
+  const atrPrice = (position.atrPct / 100) * position.currentPrice * TP_STEP_ATR_MULTIPLE
   if (position.direction === 'long') {
     return intent === 'MOVE_CLOSER' ? position.takeProfitPrice - atrPrice : position.takeProfitPrice + atrPrice
   }

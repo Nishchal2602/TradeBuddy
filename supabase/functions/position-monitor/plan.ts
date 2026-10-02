@@ -6,6 +6,7 @@ import type { StrategyProfile } from '../../../src/shared/strategy/profiles.ts'
 import { findFirstTrigger, resolveFillPrice } from './triggers.ts'
 import type { PricePoint } from './triggers.ts'
 import { trackGivebackForPosition } from './giveback.ts'
+import { findHardMaxHoldExit, findSoftTimeStopExit } from './time-exits.ts'
 
 // Pure decision core for one monitor tick — no I/O, no Supabase client, no
 // fetch. index.ts's job is reduced to: read this input from the database,
@@ -49,6 +50,12 @@ export interface MonitorPlanInput {
   // so switching back to Aggressive later resumes with intact history
   // rather than a reset ratchet.
   strategyProfile: StrategyProfile
+  // Strategy V4 (2026-10-01) — threaded into every closePosition call
+  // (perpetual funding accrual, broker/accounting.ts's own module
+  // comment) and the two new intraday_ls-only exits' own thresholds.
+  shortFundingBpsPerDay: number
+  timeStopMinutes: number
+  maxHoldMinutes: number
 }
 
 // One eligible, still-open position's high-water state as of this tick —
@@ -86,6 +93,14 @@ export interface MonitorPlanResult {
   // Sampled high-water state for every eligible, still-open position —
   // see HighWaterUpdate's own comment.
   highWaterUpdates: HighWaterUpdate[]
+  // Strategy V4 (2026-10-01) — positions closed by the hard max hold or
+  // the soft time stop this tick (plan §4.2). Kept SEPARATE from `closes`
+  // and `givebackCloses`, same reasoning as those two already being
+  // distinct buckets — index.ts's own logging can tell the three triggers
+  // apart. Both new exits share this one bucket (both persist
+  // close_reason='time_stop'; nothing downstream needs to know which of
+  // the two actually fired).
+  timeStopCloses: ClosePositionResult[]
 }
 
 function latestPointAgeMinutes(points: PricePoint[], nowIso: string): number | null {
@@ -97,6 +112,7 @@ function latestPointAgeMinutes(points: PricePoint[], nowIso: string): number | n
 export function planMonitorActions(input: MonitorPlanInput): MonitorPlanResult {
   const closes: ClosePositionResult[] = []
   const givebackCloses: ClosePositionResult[] = []
+  const timeStopCloses: ClosePositionResult[] = []
   const highWaterUpdates: HighWaterUpdate[] = []
   const staleAssets: StaleAsset[] = []
   const remainingOpenPositions: Position[] = []
@@ -111,6 +127,13 @@ export function planMonitorActions(input: MonitorPlanInput): MonitorPlanResult {
       continue
     }
 
+    // Precedence (plan §4.2, pre-registered): SL/TP -> hard max hold ->
+    // giveback -> soft time stop. SL/TP wins first because it's a price
+    // event at a specific replayed point a real system would already
+    // have acted on; hard max is absolute and checked next; giveback
+    // outranks the soft time stop (both can fire at the same tick —
+    // MFE>=1.0 then retraced below 0.5 after 8h — and profit_giveback is
+    // the more informative reason); soft time stop is the fallback.
     const trigger = findFirstTrigger(position.direction, position.stopLossPrice, position.takeProfitPrice, points)
     if (trigger.triggered) {
       const result = closePosition({
@@ -122,14 +145,43 @@ export function planMonitorActions(input: MonitorPlanInput): MonitorPlanResult {
         decisionId: null, // automatic exit — trades_provenance_valid requires this
         startingCash: cash,
         nowIso: input.nowIso,
+        shortFundingBpsPerDay: input.shortFundingBpsPerDay,
       })
       closes.push(result)
       cash = result.cashAfter
       // Closed, not held — deliberately excluded from remainingOpenPositions
-      // and never reaches giveback tracking below (SL/TP always wins the
-      // race, unchanged — the giveback ratchet is only ever evaluated for
-      // a position that did NOT breach its static bracket this tick).
+      // and never reaches anything below (SL/TP always wins the race,
+      // unchanged — every other exit is only ever evaluated for a
+      // position that did NOT breach its static bracket this tick).
       continue
+    }
+
+    // Strategy V4 (2026-10-01) — hard max hold. Gated on the position's
+    // OWN originating profile (openedUnderStrategyProfile), never the
+    // currently-active global one — unlike the giveback EXIT below,
+    // which deliberately DOES key on the active profile (see that
+    // block's own comment for why that precedent does not generalize
+    // here). Explicitly NOT gated on highWaterTrackedFrom either (plan
+    // §4.2: "time stops apply to every intraday_ls position regardless
+    // of high_water_tracked_from").
+    if (position.openedUnderStrategyProfile === 'intraday_ls') {
+      const hardMax = findHardMaxHoldExit(position, points, input.maxHoldMinutes)
+      if (hardMax) {
+        const result = closePosition({
+          position,
+          attemptedFillPrice: hardMax.observedPrice,
+          feeBps: input.feeBps,
+          slippageBps: input.slippageBps,
+          closeReason: 'time_stop',
+          decisionId: null,
+          startingCash: cash,
+          nowIso: input.nowIso,
+          shortFundingBpsPerDay: input.shortFundingBpsPerDay,
+        })
+        timeStopCloses.push(result)
+        cash = result.cashAfter
+        continue
+      }
     }
 
     // Aggressive V3.1 profit recycling (2026-09-23) — only for a position
@@ -155,6 +207,7 @@ export function planMonitorActions(input: MonitorPlanInput): MonitorPlanResult {
           decisionId: null,
           startingCash: cash,
           nowIso: input.nowIso,
+          shortFundingBpsPerDay: input.shortFundingBpsPerDay,
         })
         givebackCloses.push(result)
         cash = result.cashAfter
@@ -175,8 +228,31 @@ export function planMonitorActions(input: MonitorPlanInput): MonitorPlanResult {
       })
     }
 
+    // Strategy V4 (2026-10-01) — soft time stop. Same eligibility gate as
+    // hard max above; checked LAST, after giveback, per the precedence
+    // comment at the top of this loop.
+    if (position.openedUnderStrategyProfile === 'intraday_ls') {
+      const softStop = findSoftTimeStopExit(position, points, input.timeStopMinutes)
+      if (softStop) {
+        const result = closePosition({
+          position,
+          attemptedFillPrice: softStop.observedPrice,
+          feeBps: input.feeBps,
+          slippageBps: input.slippageBps,
+          closeReason: 'time_stop',
+          decisionId: null,
+          startingCash: cash,
+          nowIso: input.nowIso,
+          shortFundingBpsPerDay: input.shortFundingBpsPerDay,
+        })
+        timeStopCloses.push(result)
+        cash = result.cashAfter
+        continue
+      }
+    }
+
     remainingOpenPositions.push(position)
   }
 
-  return { closes, givebackCloses, highWaterUpdates, staleAssets, remainingOpenPositions }
+  return { closes, givebackCloses, timeStopCloses, highWaterUpdates, staleAssets, remainingOpenPositions }
 }

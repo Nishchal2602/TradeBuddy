@@ -1,4 +1,7 @@
 import type { AssetSymbol } from '../../../../../src/shared/market-data/types.ts'
+import type { Direction } from '../../../../../src/shared/positions/types.ts'
+import type { ArmId } from '../../strategy/intraday-ls/detectors.ts'
+import type { Bias } from '../../strategy/intraday-ls/bias.ts'
 import type { VetoCandidateInput } from '../payload.ts'
 
 // Gemini → Jev migration (2026-09-22, full removal — Jev is the sole
@@ -59,7 +62,13 @@ export const JEV_VETO_THRESHOLD = 0.70
 // historical row stays interpretable under whichever question/threshold
 // pair actually produced it. Format mirrors the threshold in the version
 // string itself for quick human legibility in a decisions list.
-export const JEV_QUESTION_VERSION = `jev-veto-v1/t${JEV_VETO_THRESHOLD.toFixed(2)}`
+// v2 (2026-10-01) — direction-aware wording + criteria (plan §5.2 point
+// 1): the instructions now name long/short explicitly, and a short's
+// true-criteria describes positive/bullish events instead of the
+// long-side negative/bearish ones. Every pre-v2 row asked only about
+// "a new long position," which is what it actually was at the time
+// (Balanced/Aggressive never proposed a short) — not reinterpreted.
+export const JEV_QUESTION_VERSION = `jev-veto-v2/t${JEV_VETO_THRESHOLD.toFixed(2)}`
 
 // ---------------------------------------------------------------------------
 // State — deliberately narrower than what Gemini received
@@ -179,16 +188,20 @@ export interface JevPositionSnapshot {
   sampledDayLowPct?: number
 }
 
-// Aggressive-only (2026-09-23) — sent alongside a FLAT asset's news
-// whenever a deterministic opportunity detector fired (strategy/
-// aggressive/detectors.ts). `kind` tells Jev WHAT was objectively
-// detected (never why to act on it — that judgement is entirely Jev's
-// own, via the entry_quality/expected_move questions in
-// model/jev/entry-question.ts). Balanced never sets this field — a FLAT
-// Balanced candidate's assets[asset] entry has no `opportunity` key at
-// all, not merely an undefined one.
+// Aggressive-only (2026-09-23), extended for Strategy V4 (intraday_ls,
+// 2026-10-02, plan §5.1b/§5.2 point 2) — sent alongside a FLAT asset's
+// news whenever a deterministic opportunity detector fired (strategy/
+// aggressive/detectors.ts or strategy/intraday-ls/detectors.ts). `kind`
+// tells Jev WHAT was objectively detected (never why to act on it — that
+// judgement is entirely Jev's own, via the entry_quality/expected_move
+// questions in model/jev/entry-question.ts, and now also the failure_risk/
+// failure_mode questions in model/jev/adversarial-question.ts). Balanced
+// never sets this field — a FLAT Balanced candidate's assets[asset] entry
+// has no `opportunity` key at all, not merely an undefined one.
 export interface JevOpportunitySnapshot {
-  kind: 'MOMENTUM_BREAKOUT' | 'PULLBACK_CONTINUATION'
+  // Aggressive-only — absent for intraday_ls, which has no detector
+  // 'kind', only armId/direction/bias below.
+  kind?: 'MOMENTUM_BREAKOUT' | 'PULLBACK_CONTINUATION'
   atrTargetDistancePct: number
   estimatedRoundTripCostPct: number
   ret15mPct: number
@@ -198,6 +211,13 @@ export interface JevOpportunitySnapshot {
   volumeTrendRatio: number
   sampledDayHighPct: number
   sampledDayLowPct: number
+  // Strategy V4 only — all three present together or not at all. Without
+  // these the entry_quality/adversarial questions would ask about a V4
+  // short direction-blind, the same class of defect §5.1a's veto fix
+  // already closed on the noul question.
+  armId?: ArmId
+  direction?: Direction
+  bias?: Bias
 }
 
 export interface JevState {
@@ -237,6 +257,28 @@ export interface JevQuestionSpec {
   criteria: { true: string; false: string }
 }
 
+// Strategy V4 (2026-10-01, plan §5.2 point 1) — direction-aware. The
+// material events that threaten a LONG (negative/bearish: a hack,
+// regulatory ban, exchange failure, protocol bug) are the OPPOSITE of
+// the ones that threaten a SHORT (positive/bullish: a regulatory
+// approval, a major adoption or partnership announcement, a protocol
+// upgrade succeeding). Reusing the long-side criteria for a short
+// candidate would ask Jev to veto on the wrong valence of news entirely
+// — not merely an incomplete question, a WRONG one. The exclusion list
+// (false) is direction-agnostic and stays identical for both.
+const EXCLUSION_CRITERIA = 'Price commentary, generic market commentary, analyst opinion, ordinary volatility, technical weakness, prediction or speculation, or restatement of the price move itself.'
+
+const CRITERIA_BY_DIRECTION: Record<Direction, JevQuestionSpec['criteria']> = {
+  long: {
+    true: 'A specific, named, material event with credible evidence, directly relevant to the asset or its ability to trade — hack or exploit, regulatory action or ban, exchange failure, critical protocol bug.',
+    false: EXCLUSION_CRITERIA,
+  },
+  short: {
+    true: 'A specific, named, material POSITIVE event with credible evidence, directly relevant to the asset — a regulatory approval, a major adoption or partnership announcement, or a significant protocol upgrade succeeding.',
+    false: EXCLUSION_CRITERIA,
+  },
+}
+
 // Deterministic, not asset-derived-at-parse-time — provider.ts looks the
 // answer back up by this exact id, so the same mapping function is used
 // on both the build side and the read side.
@@ -244,23 +286,18 @@ export function vetoQuestionId(asset: AssetSymbol): string {
   return `veto_${asset.toLowerCase()}`
 }
 
-const CRITERIA: JevQuestionSpec['criteria'] = {
-  true: 'A specific, named, material event with credible evidence, directly relevant to the asset or its ability to trade — hack or exploit, regulatory action or ban, exchange failure, critical protocol bug.',
-  false: 'Price commentary, generic market commentary, analyst opinion, ordinary volatility, technical weakness, prediction or speculation, or restatement of the price move itself.',
-}
-
-function buildJevQuestion(asset: AssetSymbol): JevQuestionSpec {
+function buildJevQuestion(asset: AssetSymbol, direction: Direction): JevQuestionSpec {
   return {
     type: 'noul',
-    instructions: `Does the supplied news evidence contain a material, known, exogenous event specific to ${asset} that should prevent opening a new long position right now?`,
-    criteria: CRITERIA,
+    instructions: `Does the supplied news evidence contain a material, known, exogenous event specific to ${asset} that should prevent opening a new ${direction} position right now?`,
+    criteria: CRITERIA_BY_DIRECTION[direction],
   }
 }
 
 export function buildJevQuestions(candidates: VetoCandidateInput[]): Record<string, JevQuestionSpec> {
   const questions: Record<string, JevQuestionSpec> = {}
   for (const candidate of candidates) {
-    questions[vetoQuestionId(candidate.asset)] = buildJevQuestion(candidate.asset)
+    questions[vetoQuestionId(candidate.asset)] = buildJevQuestion(candidate.asset, candidate.direction)
   }
   return questions
 }

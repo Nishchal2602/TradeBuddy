@@ -1,5 +1,5 @@
 import { assertAlmostEquals, assertEquals } from 'jsr:@std/assert@1'
-import { addToPosition, applySlippage, closePosition, computeNav, computePositionValue, openPosition, reducePosition } from './accounting.ts'
+import { addToPosition, applySlippage, closePosition, computeFundingAccrual, computeNav, computePositionValue, openPosition, reducePosition } from './accounting.ts'
 import { ACCOUNTING_SCENARIOS } from '../domain/contract.fixtures.ts'
 import type { Position } from '../../../../src/shared/positions/types.ts'
 
@@ -24,6 +24,7 @@ Deno.test('accounting: every Step 0 ACCOUNTING_SCENARIOS fixture reproduces exac
     const feeBps = scenario.feeRate * 10_000
 
     const opened = openPosition({
+      strategyProfile: 'balanced',
       asset: 'BTC',
       direction: scenario.direction,
       referencePrice: scenario.entryPrice,
@@ -45,6 +46,7 @@ Deno.test('accounting: every Step 0 ACCOUNTING_SCENARIOS fixture reproduces exac
 
     const attemptedFillPrice = scenario.observedPrice ?? scenario.fillPrice
     const closed = closePosition({
+      shortFundingBpsPerDay: 0,
       position: opened.position,
       attemptedFillPrice,
       feeBps,
@@ -66,6 +68,7 @@ Deno.test('accounting: every Step 0 ACCOUNTING_SCENARIOS fixture reproduces exac
 Deno.test('accounting: automatic exhaustion exit — both closeReason AND trigger_reason become collateral_exhausted', () => {
   const gapScenario = ACCOUNTING_SCENARIOS.find((s) => s.name.includes('GAP THROUGH'))!
   const opened = openPosition({
+    strategyProfile: 'balanced',
     asset: 'BTC', direction: 'short', referencePrice: gapScenario.entryPrice, notionalUsd: gapScenario.notional,
     stopLossPrice: gapScenario.entryPrice * 1.5, takeProfitPrice: gapScenario.entryPrice * 0.5,
     feeBps: gapScenario.feeRate * 10_000, slippageBps: 0,
@@ -73,6 +76,7 @@ Deno.test('accounting: automatic exhaustion exit — both closeReason AND trigge
   })
 
   const closed = closePosition({
+    shortFundingBpsPerDay: 0,
     position: opened.position,
     attemptedFillPrice: gapScenario.observedPrice!,
     feeBps: gapScenario.feeRate * 10_000,
@@ -98,6 +102,7 @@ Deno.test('accounting: agent-initiated close that happens to gap past exhaustion
   // impossible.
   const gapScenario = ACCOUNTING_SCENARIOS.find((s) => s.name.includes('GAP THROUGH'))!
   const opened = openPosition({
+    strategyProfile: 'balanced',
     asset: 'BTC', direction: 'short', referencePrice: gapScenario.entryPrice, notionalUsd: gapScenario.notional,
     stopLossPrice: gapScenario.entryPrice * 1.5, takeProfitPrice: gapScenario.entryPrice * 0.5,
     feeBps: gapScenario.feeRate * 10_000, slippageBps: 0,
@@ -105,6 +110,7 @@ Deno.test('accounting: agent-initiated close that happens to gap past exhaustion
   })
 
   const closed = closePosition({
+    shortFundingBpsPerDay: 0,
     position: opened.position,
     attemptedFillPrice: gapScenario.observedPrice!, // price has already gapped past exhaustion
     feeBps: gapScenario.feeRate * 10_000,
@@ -132,12 +138,14 @@ Deno.test('accounting: agent-initiated close that happens to gap past exhaustion
 
 Deno.test('accounting: a long position never triggers the exhaustion clamp, even at a large loss', () => {
   const opened = openPosition({
+    strategyProfile: 'balanced',
     asset: 'BTC', direction: 'long', referencePrice: 100, notionalUsd: 2000,
     stopLossPrice: 1, takeProfitPrice: 200, // deliberately permissive bounds for this test
     feeBps: 10, slippageBps: 0, portfolioId: PORTFOLIO_ID, decisionId: OPEN_DECISION_ID,
     startingCash: 10000, nowIso: T0,
   })
   const closed = closePosition({
+    shortFundingBpsPerDay: 0,
     position: opened.position,
     attemptedFillPrice: 5, // a 95% drawdown
     feeBps: 10, slippageBps: 0, closeReason: 'agent_close', decisionId: CLOSE_DECISION_ID,
@@ -162,6 +170,7 @@ Deno.test('accounting: a full long round trip with real slippage matches an inde
   // prove the slippage-adjustment layer Step 4 adds on top of Step 0's
   // proven formulas.
   const opened = openPosition({
+    strategyProfile: 'balanced',
     asset: 'BTC', direction: 'long', referencePrice: 200, notionalUsd: 4000,
     stopLossPrice: 150, takeProfitPrice: 250, feeBps: 10, slippageBps: 5,
     portfolioId: PORTFOLIO_ID, decisionId: OPEN_DECISION_ID, startingCash: 10000, nowIso: T0,
@@ -171,6 +180,7 @@ Deno.test('accounting: a full long round trip with real slippage matches an inde
   assertAlmostEquals(opened.cashAfter, 5993.998, 1e-6)
 
   const closed = closePosition({
+    shortFundingBpsPerDay: 0,
     position: opened.position, attemptedFillPrice: 220, feeBps: 10, slippageBps: 5,
     closeReason: 'agent_close', decisionId: CLOSE_DECISION_ID, startingCash: opened.cashAfter, nowIso: T1,
   })
@@ -194,6 +204,7 @@ Deno.test('accounting: a full long round trip with real slippage matches an inde
 
 Deno.test('accounting: an OPEN trade has decisionId set and triggerReason null (matches trades_provenance_valid)', () => {
   const opened = openPosition({
+    strategyProfile: 'balanced',
     asset: 'ETH', direction: 'long', referencePrice: 2000, notionalUsd: 1000,
     stopLossPrice: 1900, takeProfitPrice: 2200, feeBps: 10, slippageBps: 5,
     portfolioId: PORTFOLIO_ID, decisionId: OPEN_DECISION_ID, startingCash: 10000, nowIso: T0,
@@ -206,6 +217,7 @@ Deno.test('accounting: an OPEN trade has decisionId set and triggerReason null (
 
 Deno.test('accounting: a SHORT open trade has side SELL, a SHORT close trade has side BUY', () => {
   const opened = openPosition({
+    strategyProfile: 'balanced',
     asset: 'ETH', direction: 'short', referencePrice: 2000, notionalUsd: 1000,
     stopLossPrice: 2200, takeProfitPrice: 1800, feeBps: 10, slippageBps: 0,
     portfolioId: PORTFOLIO_ID, decisionId: OPEN_DECISION_ID, startingCash: 10000, nowIso: T0,
@@ -214,6 +226,7 @@ Deno.test('accounting: a SHORT open trade has side SELL, a SHORT close trade has
   assertEquals(opened.trade.intent, 'OPEN_SHORT')
 
   const closed = closePosition({
+    shortFundingBpsPerDay: 0,
     position: opened.position, attemptedFillPrice: 1900, feeBps: 10, slippageBps: 0,
     closeReason: 'agent_close', decisionId: CLOSE_DECISION_ID, startingCash: opened.cashAfter, nowIso: T1,
   })
@@ -262,6 +275,7 @@ const ADD_REDUCE_DECISION_ID = '44444444-4444-4444-4444-444444444444'
 
 Deno.test('addToPosition: multiple ADDs produce a true weighted-average entry', () => {
   const opened = openPosition({
+    strategyProfile: 'balanced',
     asset: 'BTC', direction: 'long', referencePrice: 100, notionalUsd: 1000,
     stopLossPrice: 50, takeProfitPrice: 200, feeBps: 0, slippageBps: 0,
     portfolioId: PORTFOLIO_ID, decisionId: OPEN_DECISION_ID, startingCash: 10_000, nowIso: T0,
@@ -270,6 +284,7 @@ Deno.test('addToPosition: multiple ADDs produce a true weighted-average entry', 
   assertAlmostEquals(opened.position.entryPrice, 100, 1e-9)
 
   const add1 = addToPosition({
+    shortFundingBpsPerDay: 0,
     position: opened.position, referencePrice: 120, addNotionalUsd: 600,
     feeBps: 0, slippageBps: 0, decisionId: ADD_REDUCE_DECISION_ID, startingCash: opened.cashAfter, nowIso: T1,
   })
@@ -284,6 +299,7 @@ Deno.test('addToPosition: multiple ADDs produce a true weighted-average entry', 
   assertAlmostEquals(add1.updatedPosition.takeProfitPrice, 200, 1e-9)
 
   const add2 = addToPosition({
+    shortFundingBpsPerDay: 0,
     position: add1.updatedPosition, referencePrice: 140, addNotionalUsd: 700,
     feeBps: 0, slippageBps: 0, decisionId: ADD_REDUCE_DECISION_ID, startingCash: add1.cashAfter, nowIso: T1,
   })
@@ -295,11 +311,13 @@ Deno.test('addToPosition: multiple ADDs produce a true weighted-average entry', 
 
 Deno.test('addToPosition + reducePosition: a profitable round trip realizes P&L only on the reduced portion, remainder stays open at the same entry', () => {
   const opened = openPosition({
+    strategyProfile: 'balanced',
     asset: 'BTC', direction: 'long', referencePrice: 100, notionalUsd: 1000,
     stopLossPrice: 50, takeProfitPrice: 200, feeBps: 10, slippageBps: 0,
     portfolioId: PORTFOLIO_ID, decisionId: OPEN_DECISION_ID, startingCash: 10_000, nowIso: T0,
   })
   const added = addToPosition({
+    shortFundingBpsPerDay: 0,
     position: opened.position, referencePrice: 110, addNotionalUsd: 550,
     feeBps: 10, slippageBps: 0, decisionId: ADD_REDUCE_DECISION_ID, startingCash: opened.cashAfter, nowIso: T1,
   })
@@ -308,6 +326,7 @@ Deno.test('addToPosition + reducePosition: a profitable round trip realizes P&L 
   assertAlmostEquals(added.updatedPosition.entryPrice, 1550 / 15, 1e-9)
 
   const reduced = reducePosition({
+    shortFundingBpsPerDay: 0,
     position: added.updatedPosition, attemptedFillPrice: 130, reduceQuantity: 5,
     feeBps: 10, slippageBps: 0, decisionId: ADD_REDUCE_DECISION_ID, startingCash: added.cashAfter, nowIso: T1,
   })
@@ -326,11 +345,13 @@ Deno.test('addToPosition + reducePosition: a profitable round trip realizes P&L 
 
 Deno.test('addToPosition + reducePosition: a losing round trip realizes a negative P&L on the reduced portion', () => {
   const opened = openPosition({
+    strategyProfile: 'balanced',
     asset: 'BTC', direction: 'long', referencePrice: 100, notionalUsd: 1000,
     stopLossPrice: 50, takeProfitPrice: 200, feeBps: 0, slippageBps: 0,
     portfolioId: PORTFOLIO_ID, decisionId: OPEN_DECISION_ID, startingCash: 10_000, nowIso: T0,
   })
   const added = addToPosition({
+    shortFundingBpsPerDay: 0,
     position: opened.position, referencePrice: 90, addNotionalUsd: 450,
     feeBps: 0, slippageBps: 0, decisionId: ADD_REDUCE_DECISION_ID, startingCash: opened.cashAfter, nowIso: T1,
   })
@@ -338,6 +359,7 @@ Deno.test('addToPosition + reducePosition: a losing round trip realizes a negati
   assertAlmostEquals(added.updatedPosition.entryPrice, 1450 / 15, 1e-9)
 
   const reduced = reducePosition({
+    shortFundingBpsPerDay: 0,
     position: added.updatedPosition, attemptedFillPrice: 80, reduceQuantity: 6,
     feeBps: 0, slippageBps: 0, decisionId: ADD_REDUCE_DECISION_ID, startingCash: added.cashAfter, nowIso: T1,
   })
@@ -352,6 +374,7 @@ Deno.test('reducePosition: fees can turn a nominally profitable reduce net-negat
   // together exceed it, so the trade is a net loser despite looking
   // "profitable" if you only read realizedPnl in isolation.
   const opened = openPosition({
+    strategyProfile: 'balanced',
     asset: 'BTC', direction: 'long', referencePrice: 100, notionalUsd: 10_000,
     stopLossPrice: 50, takeProfitPrice: 200, feeBps: 100, slippageBps: 0,
     portfolioId: PORTFOLIO_ID, decisionId: OPEN_DECISION_ID, startingCash: 20_000, nowIso: T0,
@@ -359,6 +382,7 @@ Deno.test('reducePosition: fees can turn a nominally profitable reduce net-negat
   assertAlmostEquals(opened.trade.fee, 100, 1e-9) // 1% of 10,000
 
   const reduced = reducePosition({
+    shortFundingBpsPerDay: 0,
     position: opened.position, attemptedFillPrice: 100.5, reduceQuantity: opened.position.quantity,
     feeBps: 100, slippageBps: 0, decisionId: ADD_REDUCE_DECISION_ID, startingCash: opened.cashAfter, nowIso: T1,
   })
@@ -377,11 +401,13 @@ Deno.test('reducePosition: fees can turn a nominally profitable reduce net-negat
 
 Deno.test('reducePosition: partialRealizedPnlDelta is realizedPnl NET of the fee this reduce actually paid — realizedPnl itself stays gross', () => {
   const opened = openPosition({
+    strategyProfile: 'balanced',
     asset: 'BTC', direction: 'long', referencePrice: 100, notionalUsd: 10_000,
     stopLossPrice: 50, takeProfitPrice: 200, feeBps: 100, slippageBps: 0,
     portfolioId: PORTFOLIO_ID, decisionId: OPEN_DECISION_ID, startingCash: 20_000, nowIso: T0,
   })
   const reduced = reducePosition({
+    shortFundingBpsPerDay: 0,
     position: opened.position, attemptedFillPrice: 100.5, reduceQuantity: opened.position.quantity,
     feeBps: 100, slippageBps: 0, decisionId: ADD_REDUCE_DECISION_ID, startingCash: opened.cashAfter, nowIso: T1,
   })
@@ -395,11 +421,13 @@ Deno.test('reducePosition: partialRealizedPnlDelta is realizedPnl NET of the fee
 
 Deno.test('reducePosition: updatedPosition.partialRealizedPnlUsd accumulates the NET figure, not the gross realizedPnl', () => {
   const opened = openPosition({
+    strategyProfile: 'balanced',
     asset: 'BTC', direction: 'long', referencePrice: 100, notionalUsd: 10_000,
     stopLossPrice: 50, takeProfitPrice: 200, feeBps: 100, slippageBps: 0,
     portfolioId: PORTFOLIO_ID, decisionId: OPEN_DECISION_ID, startingCash: 20_000, nowIso: T0,
   })
   const reduced = reducePosition({
+    shortFundingBpsPerDay: 0,
     position: opened.position, attemptedFillPrice: 100.5, reduceQuantity: opened.position.quantity / 2,
     feeBps: 100, slippageBps: 0, decisionId: ADD_REDUCE_DECISION_ID, startingCash: opened.cashAfter, nowIso: T1,
   })
@@ -409,15 +437,18 @@ Deno.test('reducePosition: updatedPosition.partialRealizedPnlUsd accumulates the
 
 Deno.test('reducePosition: partialRealizedPnlDelta accumulates correctly (net) across two successive REDUCEs on the same position', () => {
   const opened = openPosition({
+    strategyProfile: 'balanced',
     asset: 'BTC', direction: 'long', referencePrice: 100, notionalUsd: 10_000,
     stopLossPrice: 50, takeProfitPrice: 200, feeBps: 100, slippageBps: 0,
     portfolioId: PORTFOLIO_ID, decisionId: OPEN_DECISION_ID, startingCash: 20_000, nowIso: T0,
   })
   const firstReduce = reducePosition({
+    shortFundingBpsPerDay: 0,
     position: opened.position, attemptedFillPrice: 105, reduceQuantity: 30,
     feeBps: 100, slippageBps: 0, decisionId: ADD_REDUCE_DECISION_ID, startingCash: opened.cashAfter, nowIso: T1,
   })
   const secondReduce = reducePosition({
+    shortFundingBpsPerDay: 0,
     position: firstReduce.updatedPosition, attemptedFillPrice: 108, reduceQuantity: 30,
     feeBps: 100, slippageBps: 0, decisionId: ADD_REDUCE_DECISION_ID, startingCash: firstReduce.cashAfter, nowIso: T1,
   })
@@ -429,16 +460,19 @@ Deno.test('reducePosition: partialRealizedPnlDelta accumulates correctly (net) a
 
 Deno.test('reducePosition: a 100% reduce is arithmetically IDENTICAL to closePosition — the same trade/cash numbers, proving REDUCE-to-zero is safe to treat as a close', () => {
   const opened = openPosition({
+    strategyProfile: 'balanced',
     asset: 'BTC', direction: 'long', referencePrice: 100, notionalUsd: 1000,
     stopLossPrice: 50, takeProfitPrice: 200, feeBps: 10, slippageBps: 5,
     portfolioId: PORTFOLIO_ID, decisionId: OPEN_DECISION_ID, startingCash: 10_000, nowIso: T0,
   })
 
   const reduced = reducePosition({
+    shortFundingBpsPerDay: 0,
     position: opened.position, attemptedFillPrice: 120, reduceQuantity: opened.position.quantity,
     feeBps: 10, slippageBps: 5, decisionId: ADD_REDUCE_DECISION_ID, startingCash: opened.cashAfter, nowIso: T1,
   })
   const closed = closePosition({
+    shortFundingBpsPerDay: 0,
     position: opened.position, attemptedFillPrice: 120,
     feeBps: 10, slippageBps: 5, closeReason: 'agent_close', decisionId: ADD_REDUCE_DECISION_ID, startingCash: opened.cashAfter, nowIso: T1,
   })
@@ -465,12 +499,14 @@ Deno.test('reducePosition: a 100% reduce is arithmetically IDENTICAL to closePos
 
 Deno.test('reducePosition: a short reduce applies the same exhaustion clamp as closePosition', () => {
   const opened = openPosition({
+    strategyProfile: 'balanced',
     asset: 'BTC', direction: 'short', referencePrice: 100, notionalUsd: 1000,
     stopLossPrice: 190, takeProfitPrice: 50, feeBps: 0, slippageBps: 0,
     portfolioId: PORTFOLIO_ID, decisionId: OPEN_DECISION_ID, startingCash: 10_000, nowIso: T0,
   })
   // Price gaps past 2x entry (200) — exhaustion clamp must fire, same as closePosition's.
   const reduced = reducePosition({
+    shortFundingBpsPerDay: 0,
     position: opened.position, attemptedFillPrice: 250, reduceQuantity: opened.position.quantity,
     feeBps: 0, slippageBps: 0, decisionId: ADD_REDUCE_DECISION_ID, startingCash: opened.cashAfter, nowIso: T1,
   })
@@ -479,15 +515,107 @@ Deno.test('reducePosition: a short reduce applies the same exhaustion clamp as c
 
 Deno.test('addToPosition + reducePosition: type check — a Position produced by either function still satisfies the Position shape (spot-check via field access)', () => {
   const opened = openPosition({
+    strategyProfile: 'balanced',
     asset: 'ETH', direction: 'long', referencePrice: 50, notionalUsd: 500,
     stopLossPrice: 25, takeProfitPrice: 100, feeBps: 0, slippageBps: 0,
     portfolioId: PORTFOLIO_ID, decisionId: OPEN_DECISION_ID, startingCash: 10_000, nowIso: T0,
   })
   const added = addToPosition({
+    shortFundingBpsPerDay: 0,
     position: opened.position, referencePrice: 55, addNotionalUsd: 110,
     feeBps: 0, slippageBps: 0, decisionId: ADD_REDUCE_DECISION_ID, startingCash: opened.cashAfter, nowIso: T1,
   })
   const position: Position = added.updatedPosition
   assertEquals(position.status, 'open')
   assertEquals(position.asset, 'ETH')
+})
+
+// =========================================================================
+// Strategy V4 (2026-10-01) — perpetual funding, charged only on shorts.
+// =========================================================================
+
+Deno.test('computeFundingAccrual: a long never accrues, regardless of rate or elapsed time', () => {
+  assertEquals(computeFundingAccrual('long', 100, 50_000, 3, T0, T1), 0)
+})
+
+Deno.test('computeFundingAccrual: null lastFundingAccrualAt returns 0 — never guesses a start time', () => {
+  assertEquals(computeFundingAccrual('short', 1, 100, 3, null, T1), 0)
+  assertEquals(computeFundingAccrual('short', 1, 100, 3, undefined, T1), 0)
+})
+
+Deno.test('computeFundingAccrual: zero or negative elapsed time accrues nothing', () => {
+  assertEquals(computeFundingAccrual('short', 1, 100, 3, T0, T0), 0)
+  assertEquals(computeFundingAccrual('short', 1, 100, 3, T1, T0), 0) // nowIso before the clock -- never negative
+})
+
+Deno.test('computeFundingAccrual: a short accrues quantity x entryPrice x (bps/10000) x elapsedDays', () => {
+  // 1 unit @ 100, 3 bps/day, exactly 1 day elapsed: 1*100*0.0003*1 = 0.03.
+  const oneDayLater = new Date(new Date(T0).getTime() + 86_400_000).toISOString()
+  assertAlmostEquals(computeFundingAccrual('short', 1, 100, 3, T0, oneDayLater), 0.03, 1e-12)
+})
+
+Deno.test('computeFundingAccrual: the review\'s worked example end to end — open 1.0, reduce 0.5 at +8h, close 0.5 at +16h accrues exactly 1.0x8h + 0.5x8h, never double-charged, never gapped', () => {
+  const T0h = '2026-09-18T00:00:00.000Z'
+  const T8h = '2026-09-18T08:00:00.000Z'
+  const T16h = '2026-09-18T16:00:00.000Z'
+  const RATE_BPS = 3
+
+  const opened = openPosition({
+    strategyProfile: 'intraday_ls',
+    asset: 'BTC', direction: 'short', referencePrice: 100, notionalUsd: 100,
+    stopLossPrice: 150, takeProfitPrice: 50, feeBps: 0, slippageBps: 0,
+    portfolioId: PORTFOLIO_ID, decisionId: OPEN_DECISION_ID, startingCash: 10_000, nowIso: T0h,
+  })
+  assertAlmostEquals(opened.position.quantity, 1, 1e-9)
+  assertEquals(opened.trade.fundingCost, 0, 'zero elapsed time at the instant of opening')
+  assertEquals(opened.position.lastFundingAccrualAt, T0h)
+
+  // Reduce by half at +8h: accrues on the PRE-reduce quantity (1.0) over
+  // the 8h since open. 1.0 * 100 * (3/10_000) * (8/24) = 0.01 exactly.
+  const reduced = reducePosition({
+    shortFundingBpsPerDay: RATE_BPS,
+    position: opened.position, attemptedFillPrice: 100, reduceQuantity: 0.5,
+    feeBps: 0, slippageBps: 0, decisionId: ADD_REDUCE_DECISION_ID, startingCash: opened.cashAfter, nowIso: T8h,
+  })
+  assertAlmostEquals(reduced.trade.fundingCost, 0.01, 1e-12, 'accrued on the full 1.0 quantity over the first 8h')
+  assertAlmostEquals(reduced.updatedPosition.quantity, 0.5, 1e-9)
+  assertEquals(reduced.updatedPosition.lastFundingAccrualAt, T8h, 'the clock resets here, not left at T0h')
+
+  // Close the remaining 0.5 at +16h (another 8h elapsed): accrues on the
+  // PRE-close quantity (0.5, not 1.0) over this second 8h window only —
+  // the clock reset at the reduce is what prevents re-charging the first
+  // 8h a second time.
+  const closed = closePosition({
+    shortFundingBpsPerDay: RATE_BPS,
+    position: reduced.updatedPosition, attemptedFillPrice: 100, closeReason: 'agent_close',
+    feeBps: 0, slippageBps: 0, decisionId: CLOSE_DECISION_ID, startingCash: reduced.cashAfter, nowIso: T16h,
+  })
+  assertAlmostEquals(closed.trade.fundingCost, 0.005, 1e-12, 'accrued on only the remaining 0.5 quantity over the second 8h')
+
+  // Total charged across the whole lifecycle: 1.0x8h + 0.5x8h, matching
+  // the plan's own worked example exactly — never the full 1.0 over the
+  // full 16h span (0.02, which would double-charge the second half), and
+  // never a gap (0.005 alone, which would silently drop the first half).
+  const totalFundingCharged = reduced.trade.fundingCost + closed.trade.fundingCost
+  assertAlmostEquals(totalFundingCharged, 0.015, 1e-12)
+})
+
+Deno.test('reducePosition: fundingCost is subtracted from partialRealizedPnlDelta, alongside fee — both sunk costs reduce the protected profit figure', () => {
+  const opened = openPosition({
+    strategyProfile: 'intraday_ls',
+    asset: 'BTC', direction: 'short', referencePrice: 100, notionalUsd: 100,
+    stopLossPrice: 150, takeProfitPrice: 50, feeBps: 0, slippageBps: 0,
+    portfolioId: PORTFOLIO_ID, decisionId: OPEN_DECISION_ID, startingCash: 10_000, nowIso: T0,
+  })
+  const oneDayLater = new Date(new Date(T0).getTime() + 86_400_000).toISOString()
+  const reduced = reducePosition({
+    shortFundingBpsPerDay: 3,
+    position: opened.position, attemptedFillPrice: 100, reduceQuantity: 1,
+    feeBps: 0, slippageBps: 0, decisionId: ADD_REDUCE_DECISION_ID, startingCash: opened.cashAfter, nowIso: oneDayLater,
+  })
+  // realizedPnl stays GROSS (price-only, 0 here since fillPrice==entryPrice);
+  // partialRealizedPnlDelta must net out the 0.03 funding charge on top.
+  assertAlmostEquals(reduced.realizedPnl, 0, 1e-12)
+  assertAlmostEquals(reduced.trade.fundingCost, 0.03, 1e-12)
+  assertAlmostEquals(reduced.updatedPosition.partialRealizedPnlUsd!, -0.03, 1e-12)
 })

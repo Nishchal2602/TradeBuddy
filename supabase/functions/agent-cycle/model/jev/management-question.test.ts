@@ -61,6 +61,7 @@ function aggressiveContext(overrides: Partial<AggressiveManagementContext> = {})
 function vetoCandidate(overrides: Partial<VetoCandidateInput> = {}): VetoCandidateInput {
   return {
     asset: 'ETH',
+    direction: 'long',
     news: [{ id: 'news-1', source: 'Cointelegraph', headline: 'Test', summary: null, publishedAt: '2026-09-22T08:00:00.000Z', ageMinutes: 60 }],
     ...overrides,
   }
@@ -179,7 +180,7 @@ Deno.test('buildManagementQuestions: two candidates produce 10 questions total, 
 // --- version constant -----------------------------------------------------
 
 Deno.test('MANAGEMENT_QUESTION_VERSION encodes the ATR step multiple, so a later change is visible in persisted provenance', () => {
-  assertEquals(MANAGEMENT_QUESTION_VERSION, `jev-management-v2/atr${TP_STEP_ATR_MULTIPLE.toFixed(1)}`)
+  assertEquals(MANAGEMENT_QUESTION_VERSION, `jev-management-v3/atr${TP_STEP_ATR_MULTIPLE.toFixed(1)}`)
   assertEquals(TP_STEP_ATR_MULTIPLE, 1.0)
 })
 
@@ -274,6 +275,35 @@ Deno.test('buildManagementQuestions: MODIFY_PROTECTION is present when a legal t
   const action = questions[managementActionQuestionId('BTC')]!
   assertEquals(action.type, 'choice')
   if (action.type === 'choice') assertEquals(Object.keys(action.criteria).sort(), ['ADD', 'CLOSE', 'HOLD', 'MODIFY_PROTECTION', 'REDUCE'])
+})
+
+// --- Strategy V4 (2026-10-01, plan §5.2 point 3) — ADD disabled for intraday_ls ---
+
+Deno.test('buildManagementQuestions: disableAdd=true removes ADD from the action criteria AND omits the add_conviction question entirely', () => {
+  const questions = buildManagementQuestions([managementCandidate({ disableAdd: true })])
+  const action = questions[managementActionQuestionId('BTC')]!
+  assertEquals(action.type, 'choice')
+  if (action.type === 'choice') assertEquals(Object.keys(action.criteria).sort(), ['CLOSE', 'HOLD', 'MODIFY_PROTECTION', 'REDUCE'])
+  assertEquals(addConvictionQuestionId('BTC') in questions, false)
+})
+
+Deno.test('buildManagementQuestions: disableAdd=false/undefined preserves existing (pre-V4) behavior unchanged — ADD offered, add_conviction asked', () => {
+  const withFalse = buildManagementQuestions([managementCandidate({ disableAdd: false })])
+  const withUndefined = buildManagementQuestions([managementCandidate()])
+  for (const questions of [withFalse, withUndefined]) {
+    const action = questions[managementActionQuestionId('BTC')]!
+    assertEquals(action.type, 'choice')
+    if (action.type === 'choice') assertEquals(Object.keys(action.criteria).includes('ADD'), true)
+    assertEquals(addConvictionQuestionId('BTC') in questions, true)
+  }
+})
+
+Deno.test('buildManagementQuestions: disableAdd composes independently with the MODIFY_PROTECTION filter — both ADD and MODIFY_PROTECTION can be absent at once', () => {
+  const underwaterAndDisableAdd = managementCandidate({ entryPrice: 100, stopLossPrice: 97, currentPrice: 98, minStopLossPct: 0.005, disableAdd: true })
+  const questions = buildManagementQuestions([underwaterAndDisableAdd])
+  const action = questions[managementActionQuestionId('BTC')]!
+  assertEquals(action.type, 'choice')
+  if (action.type === 'choice') assertEquals(Object.keys(action.criteria).sort(), ['CLOSE', 'HOLD', 'REDUCE'])
 })
 
 // --- The reframed action question (migration plan §4.2) --------------------

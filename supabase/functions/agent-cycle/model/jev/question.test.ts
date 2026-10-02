@@ -5,6 +5,7 @@ import type { VetoCandidateInput } from '../payload.ts'
 function candidate(overrides: Partial<VetoCandidateInput> = {}): VetoCandidateInput {
   return {
     asset: 'BTC',
+    direction: 'long',
     news: [
       { id: 'news-uuid-1', source: 'Cointelegraph', headline: 'Bitcoin ETF sees inflows', summary: 'Spot ETFs recorded net inflows.', publishedAt: '2026-09-22T08:00:00.000Z', ageMinutes: 60 },
     ],
@@ -84,6 +85,34 @@ Deno.test('buildJevQuestions: zero candidates produces zero questions (the zero-
   assertEquals(buildJevQuestions([]), {})
 })
 
+// --- Strategy V4 (2026-10-01, plan §5.2 point 1) — direction-aware veto ---
+
+Deno.test('buildJevQuestions: a short candidate asks about preventing a new SHORT position, not a long one', () => {
+  const questions = buildJevQuestions([candidate({ asset: 'BTC', direction: 'short' })])
+  assertEquals(questions.veto_btc!.instructions.includes('short'), true)
+  assertEquals(questions.veto_btc!.instructions.includes('long'), false)
+})
+
+Deno.test('buildJevQuestions: a long candidate asks about preventing a new LONG position', () => {
+  const questions = buildJevQuestions([candidate({ asset: 'BTC', direction: 'long' })])
+  assertEquals(questions.veto_btc!.instructions.includes('long'), true)
+  assertEquals(questions.veto_btc!.instructions.includes('short'), false)
+})
+
+Deno.test("buildJevQuestions: short criteria.true is positive/bullish-framed (regulatory approval/adoption), never the long side's negative events", () => {
+  const questions = buildJevQuestions([candidate({ asset: 'BTC', direction: 'short' })])
+  const trueCriteria = questions.veto_btc!.criteria.true.toLowerCase()
+  assertEquals(trueCriteria.includes('approval') || trueCriteria.includes('adoption'), true)
+  assertEquals(trueCriteria.includes('hack'), false)
+})
+
+Deno.test('buildJevQuestions: long vs short produce different criteria.true but IDENTICAL criteria.false (the exclusion list is direction-agnostic)', () => {
+  const longQuestions = buildJevQuestions([candidate({ asset: 'BTC', direction: 'long' })])
+  const shortQuestions = buildJevQuestions([candidate({ asset: 'BTC', direction: 'short' })])
+  assertNotEquals(longQuestions.veto_btc!.criteria.true, shortQuestions.veto_btc!.criteria.true)
+  assertEquals(longQuestions.veto_btc!.criteria.false, shortQuestions.veto_btc!.criteria.false)
+})
+
 // --- vetoQuestionId -------------------------------------------------------
 
 Deno.test('vetoQuestionId: deterministic, lowercase, asset-prefixed', () => {
@@ -98,7 +127,7 @@ Deno.test('JEV_VETO_THRESHOLD: is the documented provisional starting value', ()
 })
 
 Deno.test('JEV_QUESTION_VERSION: encodes the threshold, so a later threshold change is visible in persisted provenance', () => {
-  assertEquals(JEV_QUESTION_VERSION, 'jev-veto-v1/t0.70')
+  assertEquals(JEV_QUESTION_VERSION, 'jev-veto-v2/t0.70')
 })
 
 Deno.test('JEV_QUESTION_VERSION and JEV_VETO_THRESHOLD stay in sync (regression guard against editing one without the other)', () => {

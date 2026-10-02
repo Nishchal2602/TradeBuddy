@@ -23,7 +23,17 @@ import { z } from 'zod'
 // strategy and must never silently map to one — every call site that
 // reads agent_settings.strategy_profile fails closed on anything outside
 // this enum, Conservative included.
-export const StrategyProfile = z.enum(['balanced', 'aggressive'])
+//
+// 'intraday_ls' added 2026-10-01 — Strategy V4, a long/short intraday
+// profile with its own six-arm bias-gated detector set (strategy/
+// intraday-ls/) and a reward loop measuring each arm's expectancy
+// (falsification hypothesis H7 — H6 remains Aggressive's and never
+// started). Every exhaustive profile-dispatch switch in registry.ts
+// became a compile error the moment this value was added — that is the
+// point: a third profile can never silently fall through into
+// Aggressive's branch (strategy/registry.ts's own module comment
+// explains the precedent this closes).
+export const StrategyProfile = z.enum(['balanced', 'aggressive', 'intraday_ls'])
 export type StrategyProfile = z.infer<typeof StrategyProfile>
 
 // Per-profile risk-policy overrides layered on top of the existing,
@@ -124,6 +134,26 @@ export const STRATEGY_PROFILES: Record<StrategyProfile, StrategyDefinition> = {
       // goes stale far faster than a weeks-long one. Principled shrink,
       // not a weakened safety control: still a real cool-off, just sized
       // to this profile's own horizon.
+      stopOutReentryBlockMinutes: 60,
+    },
+  },
+  intraday_ls: {
+    profile: 'intraday_ls',
+    strategyVersion: 'v4-ls-intraday-30m',
+    // 60, matching the live cron (agent-cycle-60min) — this field is
+    // actually read now (index.ts's Phase 0 wiring fix), so it must match
+    // reality, not the plan's originally-specified 15. Window-scanned
+    // detection (strategy/intraday-ls/detectors.ts's scanForEdge) is what
+    // makes a 60-minute cadence safe over 30-minute bars despite the
+    // mismatch — see that module's own comment, and H7's own stated
+    // limitation in the plan.
+    decisionIntervalMinutes: 60,
+    newsLookbackMinutes: 195,
+    maxDataStalenessMinutes: 10,
+    risk: {
+      riskBudgetPct: 0.005,
+      maxSingleTradePct: 0.30,
+      maxTotalNotionalPct: 0.60,
       stopOutReentryBlockMinutes: 60,
     },
   },
