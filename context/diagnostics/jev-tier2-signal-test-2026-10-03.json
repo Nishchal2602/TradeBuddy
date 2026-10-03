@@ -1,0 +1,382 @@
+{
+  "runAt": "2026-10-03T14:21:13.910Z",
+  "repeatability": {
+    "n": 20,
+    "samples": {
+      "noul": [
+        0.03,
+        0.03,
+        0.03,
+        0.03,
+        0.03,
+        0.03,
+        0.03,
+        0.03,
+        0.03,
+        0.03,
+        0.03,
+        0.03,
+        0.04,
+        0.03,
+        0.03,
+        0.03,
+        0.03,
+        0.03,
+        0.03,
+        0.03
+      ],
+      "enterProb": [
+        0.71,
+        0.71,
+        0.73,
+        0.69,
+        0.73,
+        0.68,
+        0.68,
+        0.74,
+        0.7,
+        0.69,
+        0.71,
+        0.69,
+        0.74,
+        0.71,
+        0.73,
+        0.67,
+        0.7,
+        0.72,
+        0.7,
+        0.69
+      ],
+      "moveScore": [
+        2.28,
+        2.25,
+        2.29,
+        2.22,
+        2.28,
+        2.24,
+        2.31,
+        2.26,
+        2.26,
+        2.27,
+        2.29,
+        2.28,
+        2.26,
+        2.28,
+        2.23,
+        2.24,
+        2.25,
+        2.26,
+        2.29,
+        2.27
+      ],
+      "highProb": [
+        0.16,
+        0.18,
+        0.17,
+        0.16,
+        0.14,
+        0.16,
+        0.16,
+        0.16,
+        0.16,
+        0.17,
+        0.17,
+        0.16,
+        0.13,
+        0.17,
+        0.14,
+        0.17,
+        0.16,
+        0.17,
+        0.16,
+        0.15
+      ],
+      "failureProbs": {
+        "STRUCTURE_BREAK": [
+          0.29000000000000004,
+          0.25,
+          0.26,
+          0.26,
+          0.26,
+          0.26,
+          0.26,
+          0.27,
+          0.25,
+          0.28,
+          0.25,
+          0.26,
+          0.27,
+          0.26,
+          0.24,
+          0.25,
+          0.26,
+          0.23,
+          0.26,
+          0.25
+        ],
+        "RANGE_COMPRESSION": [
+          0.08,
+          0.09,
+          0.07,
+          0.08,
+          0.09,
+          0.08,
+          0.07,
+          0.08,
+          0.08,
+          0.08,
+          0.08,
+          0.07,
+          0.08,
+          0.08,
+          0.08,
+          0.09,
+          0.09,
+          0.1,
+          0.08,
+          0.08
+        ],
+        "NONE": [
+          0.21,
+          0.19,
+          0.21,
+          0.2,
+          0.21,
+          0.21,
+          0.22,
+          0.21,
+          0.22,
+          0.18,
+          0.22,
+          0.21,
+          0.24,
+          0.2,
+          0.23,
+          0.21,
+          0.21,
+          0.22,
+          0.22,
+          0.22
+        ],
+        "COUNTER_TREND_PRESSURE": [
+          0.25,
+          0.29,
+          0.27,
+          0.27,
+          0.26,
+          0.26,
+          0.26,
+          0.25,
+          0.27,
+          0.27,
+          0.29000000000000004,
+          0.25,
+          0.24,
+          0.27,
+          0.25,
+          0.27,
+          0.27,
+          0.27,
+          0.26,
+          0.26
+        ],
+        "MOMENTUM_EXHAUSTION": [
+          0.16,
+          0.17,
+          0.18,
+          0.18,
+          0.17,
+          0.18,
+          0.18,
+          0.18,
+          0.16,
+          0.17,
+          0.15,
+          0.2,
+          0.16,
+          0.18,
+          0.19,
+          0.17,
+          0.16,
+          0.17,
+          0.17,
+          0.18
+        ],
+        "WEAK_VOLUME_CONFIRMATION": [
+          0.01,
+          0.01,
+          0.01,
+          0.01,
+          0.01,
+          0.01,
+          0.01,
+          0.01,
+          0.02,
+          0.01,
+          0.01,
+          0.01,
+          0.01,
+          0.01,
+          0.01,
+          0.01,
+          0.01,
+          0.01,
+          0.01,
+          0.01
+        ]
+      }
+    },
+    "noiseFloor": {
+      "noul": 0.0021794494717703367,
+      "enterProb": 0.020099751242241774,
+      "moveScore": 0.02224297641953518,
+      "highProb": 0.011832159566199232
+    }
+  },
+  "matrix": {
+    "long-strong-confirmed": {
+      "enterProb": 0.69,
+      "enterChoice": "ENTER",
+      "moveScore": 2.28,
+      "highProb": 0.17,
+      "failureMode": "COUNTER_TREND_PRESSURE"
+    },
+    "long-strong-weakvol": {
+      "enterProb": 0.52,
+      "enterChoice": "ENTER",
+      "moveScore": 2.19,
+      "highProb": 0.24,
+      "failureMode": "WEAK_VOLUME_CONFIRMATION"
+    },
+    "long-weak-confirmed": {
+      "enterProb": 0.61,
+      "enterChoice": "ENTER",
+      "moveScore": 1.95,
+      "highProb": 0.15,
+      "failureMode": "COUNTER_TREND_PRESSURE"
+    },
+    "long-weak-weakvol": {
+      "enterProb": 0.4,
+      "enterChoice": "SKIP",
+      "moveScore": 1.9,
+      "highProb": 0.24,
+      "failureMode": "WEAK_VOLUME_CONFIRMATION"
+    },
+    "short-strong-confirmed": {
+      "enterProb": 0.57,
+      "enterChoice": "ENTER",
+      "moveScore": 1.87,
+      "highProb": 0.42,
+      "failureMode": "COUNTER_TREND_PRESSURE"
+    },
+    "short-strong-weakvol": {
+      "enterProb": 0.53,
+      "enterChoice": "ENTER",
+      "moveScore": 1.9,
+      "highProb": 0.36,
+      "failureMode": "WEAK_VOLUME_CONFIRMATION"
+    },
+    "short-weak-confirmed": {
+      "enterProb": 0.44,
+      "enterChoice": "SKIP",
+      "moveScore": 1.81,
+      "highProb": 0.28,
+      "failureMode": "COUNTER_TREND_PRESSURE"
+    },
+    "short-weak-weakvol": {
+      "enterProb": 0.36,
+      "enterChoice": "SKIP",
+      "moveScore": 1.75,
+      "highProb": 0.24,
+      "failureMode": "WEAK_VOLUME_CONFIRMATION"
+    }
+  },
+  "degeneracy": {
+    "enterProbs": [
+      0.69,
+      0.52,
+      0.61,
+      0.4,
+      0.57,
+      0.53,
+      0.44,
+      0.36
+    ],
+    "spread": 0.32999999999999996,
+    "threshold": 0.06029925372672532,
+    "pass": true
+  },
+  "discrimination": {
+    "long": {
+      "direction": "long",
+      "strong": 0.69,
+      "weak": 0.61,
+      "diff": 0.07999999999999996,
+      "pass": true
+    },
+    "short": {
+      "direction": "short",
+      "strong": 0.57,
+      "weak": 0.44,
+      "diff": 0.12999999999999995,
+      "pass": true
+    }
+  },
+  "featureSensitivityVolume": {
+    "long": {
+      "direction": "long",
+      "confirmed": 0.69,
+      "weakVol": 0.52,
+      "diff": 0.16999999999999993,
+      "pass": true
+    },
+    "short": {
+      "direction": "short",
+      "confirmed": 0.57,
+      "weakVol": 0.53,
+      "diff": 0.039999999999999925,
+      "pass": false
+    }
+  },
+  "coherenceFlags": [],
+  "crossAssetIsolation": {
+    "btcCombinedNoul": 0.84,
+    "ethBaselineNoul": 0.03,
+    "ethCombinedNoul": 0.04,
+    "diff": 0.010000000000000002,
+    "threshold": 0.02,
+    "pass": true
+  },
+  "directionFlip": {
+    "longNoul": 0.68,
+    "shortNoul": 0.14,
+    "diff": 0.54,
+    "threshold": 0.02,
+    "pass": true
+  },
+  "newsAblation": {
+    "materialNoul": 0.68,
+    "emptyNoul": 0.04,
+    "diff": 0.64,
+    "threshold": 0.02,
+    "pass": true
+  },
+  "exclusionListInjection": {
+    "emptyNoul": 0.04,
+    "commentaryNoul": 0.03,
+    "diff": 0.010000000000000002,
+    "threshold": 0.02,
+    "pass": true
+  },
+  "verdict": {
+    "degeneracy": true,
+    "discriminationLong": true,
+    "discriminationShort": true,
+    "featureSensitivityVolumeLong": true,
+    "featureSensitivityVolumeShort": false,
+    "crossAssetIsolation": true,
+    "directionFlip": true,
+    "newsAblation": true,
+    "exclusionListInjection": true
+  }
+}
