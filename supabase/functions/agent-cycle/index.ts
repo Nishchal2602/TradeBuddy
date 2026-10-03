@@ -5,6 +5,7 @@ import { RssNewsProvider } from './providers/rss-news.ts'
 import { requestPortfolioDecisions, JEV_QUESTION_VERSION, JEV_VETO_THRESHOLD, MANAGEMENT_QUESTION_VERSION } from './model/jev/provider.ts'
 import type { VetoOutcome, ManagementOutcome, JevRawRequest } from './model/jev/provider.ts'
 import { projectJevRequestForAsset } from './model/jev/request-projection.ts'
+import { computeCaseId, computeEvaluationId, caseInputFromRequestProjection } from './model/jev/case-identity.ts'
 import type { JevRequestProjection } from './model/jev/request-projection.ts'
 import type { AggressiveManagementContext } from './model/jev/management-question.ts'
 import type { EntryOpportunityInput, EntryOutcome } from './model/jev/entry-question.ts'
@@ -1166,6 +1167,17 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
       // genuine call happened AND this asset actually had a slice of it
       // (see that computation's own guard, right before the insert).
       let jevRequestProjectionForRow: JevRequestProjection | null = null
+      // Tier 0/1 provenance (2026-10-03, plan §6B P0 item 3) — computed
+      // ONLY alongside a successfully-built jevRequestProjectionForRow
+      // above (case_id/evaluation_id are both derived FROM that
+      // projection — a case/evaluation cannot exist without one). "A
+      // case is the input. An evaluation is one model's answer to it."
+      // — case_id depends only on the market situation and is identical
+      // across a future champion/challenger pair; evaluation_id folds in
+      // the model + prompt fingerprints + config and differs between
+      // them. See case-identity.ts's own header for the full reasoning.
+      let jevCaseIdForRow: string | null = null
+      let jevEvaluationIdForRow: string | null = null
       // Phase 2 (2026-09-22/23) provenance — null unless this asset was a
       // management candidate this cycle (see agent_decisions' own new
       // columns, migration 20260923060000).
@@ -1633,8 +1645,16 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
       if (modelRawRequest !== null && asset in modelRawRequest.state.assets) {
         try {
           jevRequestProjectionForRow = projectJevRequestForAsset(modelRawRequest, modelVersion, asset)
+          // Tier 0/1 provenance (2026-10-03, plan §6B P0 item 3) — chained
+          // inside the same try: case_id/evaluation_id are derived FROM
+          // the projection above, so a projection failure must already
+          // leave both null (can't compute "the input" without it) and a
+          // failure in either hash computation is exactly as non-fatal
+          // as a failed projection — same reasoning, same catch.
+          jevCaseIdForRow = await computeCaseId(caseInputFromRequestProjection(jevRequestProjectionForRow))
+          jevEvaluationIdForRow = await computeEvaluationId(jevCaseIdForRow, jevRequestProjectionForRow)
         } catch (error) {
-          console.error(`could not build Jev request projection for ${asset}: ${error instanceof Error ? error.message : String(error)}`)
+          console.error(`could not build Jev request projection/case identity for ${asset}: ${error instanceof Error ? error.message : String(error)}`)
         }
       }
 
@@ -1771,6 +1791,8 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         entry_prompt_version: entryPromptVersionForRow,
         adversarial_prompt_version: adversarialPromptVersionForRow,
         jev_request_projection: jevRequestProjectionForRow,
+        jev_case_id: jevCaseIdForRow,
+        jev_evaluation_id: jevEvaluationIdForRow,
         decided_at: nowIso,
       })
       if (decisionInsertError) throw new Error(`could not insert agent_decisions for ${asset}: ${decisionInsertError.message}`)
@@ -1888,6 +1910,8 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
           entry_prompt_version: null,
           adversarial_prompt_version: null,
           jev_request_projection: null,
+          jev_case_id: null,
+          jev_evaluation_id: null,
           decided_at: nowIso,
         })
         if (shadowInsertError) {
