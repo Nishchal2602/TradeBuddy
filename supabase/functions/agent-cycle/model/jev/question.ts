@@ -2,6 +2,7 @@ import type { AssetSymbol } from '../../../../../src/shared/market-data/types.ts
 import type { Direction } from '../../../../../src/shared/positions/types.ts'
 import type { ArmId } from '../../strategy/intraday-ls/detectors.ts'
 import type { Bias } from '../../strategy/intraday-ls/bias.ts'
+import { hashPromptContent } from './prompt-hash.ts'
 import type { VetoCandidateInput } from '../payload.ts'
 
 // Gemini → Jev migration (2026-09-22, full removal — Jev is the sole
@@ -300,4 +301,21 @@ export function buildJevQuestions(candidates: VetoCandidateInput[]): Record<stri
     questions[vetoQuestionId(candidate.asset)] = buildJevQuestion(candidate.asset, candidate.direction)
   }
   return questions
+}
+
+// Tier 0 provenance (2026-10-03, prompt-hash.ts's own comment) — a
+// content hash of this module's actual rendered prompt text, covering
+// every branch whose WORDING differs (long vs short; the exclusion
+// criteria are shared text and need no separate branch to be covered —
+// they appear identically in both renders). asset is held fixed at 'BTC'
+// deliberately: the asset symbol is interpolated verbatim into the
+// template, so varying it would not exercise any additional wording —
+// only varying `direction` does, since CRITERIA_BY_DIRECTION differs by
+// direction. prompt-provenance.test.ts pins this against
+// JEV_QUESTION_VERSION; a wording change that doesn't also get a
+// deliberately-updated pinned hash fails that test.
+export async function jevQuestionPromptFingerprint(): Promise<string> {
+  const long = buildJevQuestions([{ asset: 'BTC', direction: 'long', news: [] }])
+  const short = buildJevQuestions([{ asset: 'BTC', direction: 'short', news: [] }])
+  return hashPromptContent([JSON.stringify(long), JSON.stringify(short)])
 }

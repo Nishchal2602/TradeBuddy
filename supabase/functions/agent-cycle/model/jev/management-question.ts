@@ -3,6 +3,7 @@ import type { Direction } from '../../../../../src/shared/positions/types.ts'
 import type { JevNewsItem, JevPositionSnapshot, JevState } from './question.ts'
 import type { VetoCandidateInput } from '../payload.ts'
 import { buildJevState } from './question.ts'
+import { hashPromptContent } from './prompt-hash.ts'
 import { computeCostR, computePositionPnlR, computePriceR } from '../../strategy/aggressive/protection.ts'
 
 // Phase 2 (2026-09-22) — "Jev as a portfolio-management decision layer."
@@ -492,4 +493,59 @@ export function buildManagementQuestions(candidates: ManagementCandidateInput[])
     Object.assign(questions, buildManagementQuestionsForAsset(candidate))
   }
   return questions
+}
+
+// Tier 0 provenance (2026-10-03, prompt-hash.ts's own comment) — a
+// content hash of this module's actual rendered prompt text, covering
+// the four independent dimensions that change which questions/criteria
+// get built: a legal stop-tighten exists or doesn't (MODIFY_PROTECTION
+// offered or not), disableAdd true or false (ADD + add_conviction
+// offered or not), and an Aggressive-only context present or absent
+// (remaining_upside offered or not, and the action question's wording
+// reframes around R metrics). This is not a full 2x2x2 cross — these
+// four variants are chosen so every distinct question/criteria TEXT
+// string this module can produce appears in at least one of them, which
+// is what a wording-drift check needs; it does not need to be exhaustive
+// combinatorially. prompt-provenance.test.ts pins this against
+// MANAGEMENT_QUESTION_VERSION.
+export async function managementQuestionPromptFingerprint(): Promise<string> {
+  const base: ManagementCandidateInput = {
+    asset: 'BTC',
+    direction: 'long',
+    entryPrice: 100,
+    currentPrice: 120,
+    quantity: 10,
+    stopLossPrice: 90,
+    takeProfitPrice: 180,
+    heldHours: 12,
+    feeBps: 10,
+    slippageBps: 5,
+    atrPct: 2.5,
+    news: [],
+    minStopLossPct: 0.005,
+  }
+  const noLegalTighten: ManagementCandidateInput = { ...base, entryPrice: 100, stopLossPrice: 97, currentPrice: 98 }
+  const addDisabled: ManagementCandidateInput = { ...base, disableAdd: true }
+  const aggressive: ManagementCandidateInput = {
+    ...base,
+    aggressive: {
+      initialEntryPrice: 100,
+      initialStopLossPrice: 92,
+      initialRiskUsd: 80,
+      partialRealizedPnlUsd: 0,
+      sampledMfeR: 2.0,
+      sampledMaeR: -0.2,
+      minutesSinceEntry: 45,
+      currentRoundTripCostUsd: 3,
+      ret15mPct: 0.2,
+      ret30mPct: 0.4,
+      ret60mPct: 0.6,
+      realizedVol5m: 0.05,
+      volumeTrendRatio: 1.2,
+      sampledDayHighPct: -1.5,
+      sampledDayLowPct: 3.0,
+    },
+  }
+  const rendered = [base, noLegalTighten, addDisabled, aggressive].map((c) => JSON.stringify(buildManagementQuestions([c])))
+  return hashPromptContent(rendered)
 }

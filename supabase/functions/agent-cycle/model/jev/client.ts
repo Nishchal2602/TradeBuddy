@@ -7,7 +7,11 @@ import type { JevManagementQuestionSpec } from './management-question.ts'
 // the veto's noul questions and the management layer's choice/score
 // questions (the API contract confirms mixed types in one request) — the
 // transport layer itself needs no other change to support this.
-type AnyJevQuestionSpec = JevQuestionSpec | JevManagementQuestionSpec
+// Exported 2026-10-03 (plan §6B P0 item 2) — provider.ts's JevRawRequest
+// needs this exact union to type `questions` precisely; re-declaring it
+// there would be the same hand-maintained-copy drift P0 item 1 exists to
+// eliminate, just one file over.
+export type AnyJevQuestionSpec = JevQuestionSpec | JevManagementQuestionSpec
 
 // The transport layer: request construction, auth, timeout, and bounded
 // retry/backoff. No fallback provider exists (Gemini removed entirely,

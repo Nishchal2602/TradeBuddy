@@ -1,6 +1,7 @@
 import type { AssetSymbol } from '../../../../../src/shared/market-data/types.ts'
 import type { JevChoiceQuestionSpec, JevManagementQuestionSpec } from './management-question.ts'
 import type { EntryOpportunityInput } from './entry-question.ts'
+import { hashPromptContent } from './prompt-hash.ts'
 
 // Strategy V4 (intraday_ls, 2026-10-02, plan §5.1c) — the adversarial
 // critique layer. A genuinely DIFFERENT question from entry-question.ts's
@@ -108,6 +109,30 @@ export function buildAdversarialQuestionsForAsset(opp: EntryOpportunityInput): R
     [failureRiskQuestionId(asset)]: failureRisk,
     [failureModeQuestionId(asset)]: failureMode,
   }
+}
+
+// Tier 0 provenance (2026-10-03, prompt-hash.ts's own comment) — a
+// content hash of this module's actual rendered prompt text, covering
+// both branches this file's own `opportunityContextSuffix` produces
+// (Aggressive-shaped vs V4-shaped), same reasoning as entry-question.ts's
+// own fingerprint. prompt-provenance.test.ts pins this against
+// ADVERSARIAL_QUESTION_VERSION.
+export async function adversarialQuestionPromptFingerprint(): Promise<string> {
+  const base = {
+    asset: 'BTC' as const,
+    atrTargetDistancePct: 0.02,
+    estimatedRoundTripCostPct: 0.003,
+    ret15mPct: 0.1,
+    ret30mPct: 0.2,
+    ret60mPct: 0.3,
+    realizedVol5m: 0.01,
+    volumeTrendRatio: 1.1,
+    sampledDayHighPct: 1,
+    sampledDayLowPct: -1,
+  }
+  const aggressiveShaped = buildAdversarialQuestionsForAsset(base)
+  const v4Shaped = buildAdversarialQuestionsForAsset({ ...base, armId: 'pullback_long', direction: 'long', bias: 'LONG' })
+  return hashPromptContent([JSON.stringify(aggressiveShaped), JSON.stringify(v4Shaped)])
 }
 
 export interface AdversarialOutcome {

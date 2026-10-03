@@ -250,7 +250,7 @@ V0 deliberately excludes:
 - news/no-news control experiment
 - buy-and-hold benchmark
 - event-driven triggers on the decision cycle (the position monitor is a separate, deterministic exception — it exists for SL/TP execution, not for triggering new decisions)
-- backtesting
+- ~~backtesting~~ — **superseded 2026-10-03.** A narrowly-bounded deterministic replay/backtest harness is now in scope; the canonical boundary (what's in, what's explicitly still out — especially: LLM historical replay never counts as performance evidence) lives in `context/project-overview.md`'s "Backtest/Replay Scope" subsection, not restated here.
 - streaming feeds
 - real leverage, funding, or exchange-style liquidation
 - limit orders

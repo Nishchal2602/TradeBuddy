@@ -1,8 +1,9 @@
 import { callJev, JevCallError } from './client.ts'
-import type { JevCallOptions } from './client.ts'
+import type { JevCallOptions, AnyJevQuestionSpec } from './client.ts'
 import { expectChoice, expectNoul, expectScore } from './schema.ts'
 import type { JevAnswer } from './schema.ts'
 import { buildJevQuestions, buildJevState, JEV_MODEL_ID, JEV_QUESTION_VERSION, JEV_VETO_THRESHOLD, vetoQuestionId } from './question.ts'
+import type { JevState } from './question.ts'
 import {
   ADD_MAGNITUDE_BY_SCORE_LEVEL,
   addConvictionQuestionId,
@@ -50,13 +51,30 @@ export interface VetoOutcome {
   noul: number
 }
 
+// Tier 0/1 provenance (2026-10-03, plan §6B P0 item 2 "stable per-row
+// Jev-request record") — the actual shape every requestVetoDecisions/
+// requestPortfolioDecisions call site has ALWAYS constructed
+// (`{ model: JEV_MODEL_ID, state, questions }`, both return statements
+// below), now named and exported rather than erased to `unknown`. This
+// is what request-projection.ts's projectJevRequestForAsset slices down
+// to one asset's own news/position/opportunity/questions — a batch-wide
+// value, covering every asset and question id this cycle's ONE call
+// touched, never per-asset on its own.
+export interface JevRawRequest {
+  model: string
+  state: JevState
+  questions: Record<string, AnyJevQuestionSpec>
+}
+
 export interface VetoRequestResult {
   outcomes: VetoOutcome[]
   modelVersion: string
   // Exact request/response, for agent_decisions.output_payload
-  // (invariant 8 — replayability). Shape is free; no UI reads this
-  // column (verified across src/ during planning).
-  rawRequest: unknown
+  // (invariant 8 — replayability). rawResponse's shape stays free (no UI
+  // reads this column, verified across src/ during planning) — only
+  // rawRequest is now typed, since request-projection.ts needs to read
+  // .state/.questions off it without a cast.
+  rawRequest: JevRawRequest
   rawResponse: unknown
 }
 
@@ -192,7 +210,7 @@ export interface PortfolioRequestResult {
   // drives both question families, built in the same loop below).
   adversarialOutcomes: AdversarialOutcome[]
   modelVersion: string
-  rawRequest: unknown
+  rawRequest: JevRawRequest
   rawResponse: unknown
 }
 

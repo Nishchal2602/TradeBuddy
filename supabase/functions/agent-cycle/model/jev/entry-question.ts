@@ -3,6 +3,7 @@ import type { Direction } from '../../../../../src/shared/positions/types.ts'
 import type { ArmId } from '../../strategy/intraday-ls/detectors.ts'
 import type { Bias } from '../../strategy/intraday-ls/bias.ts'
 import type { JevChoiceQuestionSpec, JevScoreQuestionSpec, JevManagementQuestionSpec } from './management-question.ts'
+import { hashPromptContent } from './prompt-hash.ts'
 
 // Aggressive strategy (v3-jev-intraday-30m, 2026-09-23) — originally the
 // ONLY questions specific to a FLAT-asset entry path; Strategy V4
@@ -92,6 +93,31 @@ export function buildEntryQuestionsForAsset(opp: EntryOpportunityInput): Record<
     [entryQualityQuestionId(asset)]: entryQuality,
     [expectedMoveQuestionId(asset)]: expectedMove,
   }
+}
+
+// Tier 0 provenance (2026-10-03, prompt-hash.ts's own comment) — a
+// content hash of this module's actual rendered prompt text, covering
+// both branches `opportunityContextSuffix` produces: Aggressive-shaped
+// (no armId/direction/bias, contextSuffix='') and V4-shaped (all three
+// present). All other fixture fields are held fixed since nothing else
+// in this file varies the WORDING — only the context trio's presence
+// does. prompt-provenance.test.ts pins this against ENTRY_QUESTION_VERSION.
+export async function entryQuestionPromptFingerprint(): Promise<string> {
+  const base = {
+    asset: 'BTC' as const,
+    atrTargetDistancePct: 0.02,
+    estimatedRoundTripCostPct: 0.003,
+    ret15mPct: 0.1,
+    ret30mPct: 0.2,
+    ret60mPct: 0.3,
+    realizedVol5m: 0.01,
+    volumeTrendRatio: 1.1,
+    sampledDayHighPct: 1,
+    sampledDayLowPct: -1,
+  }
+  const aggressiveShaped = buildEntryQuestionsForAsset(base)
+  const v4Shaped = buildEntryQuestionsForAsset({ ...base, armId: 'pullback_long', direction: 'long', bias: 'LONG' })
+  return hashPromptContent([JSON.stringify(aggressiveShaped), JSON.stringify(v4Shaped)])
 }
 
 // Maps EXPECTED_MOVE_LEVELS' score position (0..3) to a code-defined

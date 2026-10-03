@@ -3,7 +3,9 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import { CoinGeckoMarketDataProvider, fetchIntradayMarketData } from './providers/coingecko.ts'
 import { RssNewsProvider } from './providers/rss-news.ts'
 import { requestPortfolioDecisions, JEV_QUESTION_VERSION, JEV_VETO_THRESHOLD, MANAGEMENT_QUESTION_VERSION } from './model/jev/provider.ts'
-import type { VetoOutcome, ManagementOutcome } from './model/jev/provider.ts'
+import type { VetoOutcome, ManagementOutcome, JevRawRequest } from './model/jev/provider.ts'
+import { projectJevRequestForAsset } from './model/jev/request-projection.ts'
+import type { JevRequestProjection } from './model/jev/request-projection.ts'
 import type { AggressiveManagementContext } from './model/jev/management-question.ts'
 import type { EntryOpportunityInput, EntryOutcome } from './model/jev/entry-question.ts'
 import { ENTRY_QUESTION_VERSION } from './model/jev/entry-question.ts'
@@ -1014,7 +1016,14 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         ? `news retrieval failed, blocking model-assisted decisions this cycle: ${newsProviderFailedReason}`
         : null
     let modelVersion: string | null = null
-    let modelRawRequest: unknown = null
+    // Tier 0/1 provenance (2026-10-03, plan §6B P0 item 2) — typed as
+    // JevRawRequest | null, not unknown: every call site that assigns
+    // this has always constructed exactly { model, state, questions }
+    // (provider.ts's own JevRawRequest, now named instead of erased).
+    // Non-null only after a genuine successful call this cycle — null
+    // for a no-call cycle AND for a failed one (the assignment below
+    // only runs after the awaited call resolves without throwing).
+    let modelRawRequest: JevRawRequest | null = null
     let modelRawResponse: unknown = null
 
     // Strategy profiles, Pass 2 — entryOpportunities can make a call
@@ -1150,6 +1159,13 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
       // not-called veto row).
       let promptVersionForRow: string = JEV_QUESTION_VERSION
       let outputPayloadForRow: unknown = null
+      // Tier 0/1 provenance (2026-10-03, plan §6B P0 item 2) — the
+      // stable, typed, per-asset Jev-request record (model/jev/
+      // request-projection.ts), computed just before the insert below,
+      // once modelVersionForRow's branch has resolved. Null unless a
+      // genuine call happened AND this asset actually had a slice of it
+      // (see that computation's own guard, right before the insert).
+      let jevRequestProjectionForRow: JevRequestProjection | null = null
       // Phase 2 (2026-09-22/23) provenance — null unless this asset was a
       // management candidate this cycle (see agent_decisions' own new
       // columns, migration 20260923060000).
@@ -1605,6 +1621,23 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         }
       }
 
+      // Tier 0/1 provenance (2026-10-03, plan §6B P0 item 2) — computed
+      // whenever a genuine call happened this cycle AND this asset had
+      // its own slice of it (an asset absent from state.assets had no
+      // veto/management candidate this cycle at all — nothing to
+      // project). Non-fatal on failure: this is observational telemetry
+      // for a future case-capture/evaluation pipeline, never a trading
+      // action, same discipline as the market_bars upsert and the
+      // occupied-asset shadow row's own insert below — a malformed
+      // projection must never block the real decision this row records.
+      if (modelRawRequest !== null && asset in modelRawRequest.state.assets) {
+        try {
+          jevRequestProjectionForRow = projectJevRequestForAsset(modelRawRequest, modelVersion, asset)
+        } catch (error) {
+          console.error(`could not build Jev request projection for ${asset}: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+
       const decisionId = crypto.randomUUID()
       const plan = planDecisionExecution({
         asset,
@@ -1737,6 +1770,7 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         veto_prompt_version: vetoPromptVersionForRow,
         entry_prompt_version: entryPromptVersionForRow,
         adversarial_prompt_version: adversarialPromptVersionForRow,
+        jev_request_projection: jevRequestProjectionForRow,
         decided_at: nowIso,
       })
       if (decisionInsertError) throw new Error(`could not insert agent_decisions for ${asset}: ${decisionInsertError.message}`)
@@ -1853,6 +1887,7 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
           veto_prompt_version: null,
           entry_prompt_version: null,
           adversarial_prompt_version: null,
+          jev_request_projection: null,
           decided_at: nowIso,
         })
         if (shadowInsertError) {

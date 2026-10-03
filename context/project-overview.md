@@ -142,7 +142,7 @@ Each decision records:
 - Pyramiding, multi-leg positions, partial exits, trailing stops.
 - Event-driven/news-triggered execution on the decision cycle (the position monitor is a separate, deterministic exception for SL/TP execution only).
 - Streaming/WebSocket market feeds.
-- Backtesting infrastructure.
+- ~~Backtesting infrastructure.~~ **Superseded 2026-10-03 — see "Backtest/Replay Scope" below.** A narrowly-bounded deterministic replay harness is now in scope; everything else under this heading (real-money trading, exchange execution, LLM-based backtest-as-performance-evidence, multi-agent, RAG, streaming feeds, etc.) remains excluded, untouched by this change.
 - Multi-agent architecture.
 - RAG, embeddings, or vector databases.
 - On-chain or social signals.
@@ -154,6 +154,22 @@ Each decision records:
 - SOL support until V0.1.
 - News/no-news control experiment until V0.1.
 - Buy-and-hold benchmark until V0.1.
+
+### Backtest/Replay Scope (2026-10-03)
+
+**This is the scope change `context/specs/trading-strategy-v1.md` §22 required before any replay/backtest work could begin** — that section named this file, `CLAUDE.md`, and `ai-workflow-rules.md:17` as the three places backtesting was excluded, and `ai-workflow-rules.md:17`'s own text ("unless the context is explicitly updated first") made this the binding prerequisite. All three are updated together; this is the canonical statement — the other two point back here rather than each carrying their own wording, deliberately, since a prompt-version string drifting from its own prompt text (`context/progress-tracker.md`'s §6B P0 item 1 entry) is the exact failure mode a second hand-maintained copy of this scope statement would risk.
+
+**In scope, narrowly:** a deterministic replay/backtest harness over already-stored `market_bars` price history (`supabase/functions/agent-cycle/db/market-bars.ts`), limited to:
+
+- Replaying the **deterministic** strategy layers only — the regime rule, six-arm detection, risk gate, sizing, protection formulas, and exit logic — against historical bars. It calls the SAME pure functions live code already uses; it is not a second implementation of trading logic.
+- Following the look-ahead controls and anti-overfitting protocol already specified in `context/specs/trading-strategy-v1.md` §22–23: completed bars only, signal at bar *t* / execution at *t+1*, adverse fees and slippage, full indicator warm-up, pre-registration of every parameter and variant before looking at results, Deflated Sharpe (never raw), CPCV with purging/embargoing, a holdout that is never inspected, no per-asset tuning.
+- This is also the engineering lever named in `/Users/nishchal/.claude/plans/pricing-and-model-selection-ethereal-fox.md` §6B as the one that actually scales — it converts the deterministic layer's per-arm sample-size problem from a calendar constraint into a compute constraint, which the Jev/LLM layer structurally cannot benefit from (see the next bullet).
+
+**Explicitly still out of scope, not reauthorized by this change:**
+
+- **Calling Jev (or any LLM) against historical dates and treating the result as performance evidence.** Training-data contamination cannot be ruled out. Historical LLM replay remains legitimate **only** for software/robustness diagnostics — replay determinism, contract conformance, invariance probes, the pinned-model canary (§6B §4) — **never** for a claim about live predictive performance, arm selection, or prompt promotion.
+- Any form of real-money execution, exchange integration, or auto-tuning live strategy parameters from backtest results. A backtest finding is advisory input to a human-reviewed version bump, exactly like every other strategy-constant change — never a direct write path.
+- Everything else still listed under "Out of Scope" above — this change touches only the backtesting line. Streaming feeds, multi-agent architecture, RAG, real leverage, exchange credentials, etc. are all unaffected and remain excluded.
 
 ## Success Criteria
 

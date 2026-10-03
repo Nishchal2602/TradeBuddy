@@ -14,7 +14,8 @@ The developer is the architect. The coding agent is the implementation engine. D
 - Do not combine unrelated system boundaries in one implementation unit.
 - Do not add V1/V2 features because they appear useful while implementing V0.
 - Do not introduce real-money trading under any circumstances in V0.
-- Do not add multi-agent architecture, RAG, backtesting, streaming feeds, or new assets unless the context is explicitly updated first.
+- Do not add multi-agent architecture, RAG, streaming feeds, or new assets unless the context is explicitly updated first.
+- ~~backtesting~~ — **superseded 2026-10-03, this IS that explicit context update.** A narrowly-bounded deterministic replay/backtest harness is now in scope — see `context/project-overview.md`'s "Backtest/Replay Scope" subsection for the canonical, exact boundary (deterministic layers only; LLM historical replay never counts as performance evidence; no live-parameter auto-tuning). Do not re-derive or restate that scope here — read it there, since this file is deliberately not where it's defined.
 - Prefer the simplest implementation that satisfies the current spec.
 
 ## When to Split Work
