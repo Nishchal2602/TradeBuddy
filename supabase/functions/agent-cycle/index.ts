@@ -605,13 +605,17 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         atrTargetDistancePct: number
         estimatedRoundTripCostPct: number
       }
-      // Strategy V4 (intraday_ls, 2026-10-01) — populated ONLY for
-      // 'intraday_ls' cycles, only for a FLAT asset where the six-arm
-      // detector fired, cleared the cost gate (plan §4.1), AND has not
-      // already been consumed by a prior decision row (the lifecycle
-      // check, strategy/intraday-ls/lifecycle.ts). Persisted on every
-      // decision row (arm_id/bias/opportunity_bar_ts) regardless of
-      // whether intradayLsCandidate below is actually set.
+      // Strategy V4 (intraday_ls, 2026-10-01; un-gated from FLAT-only
+      // 2026-10-03) — populated ONLY for 'intraday_ls' cycles where the
+      // six-arm detector fired, cleared the cost gate (plan §4.1), AND has
+      // not already been consumed by a prior decision row (the lifecycle
+      // check, strategy/intraday-ls/lifecycle.ts) — regardless of whether
+      // the asset is FLAT or already occupied (plan §3.4: "detection runs
+      // regardless of position state"). Persisted on the row that
+      // consumes this opportunity (arm_id/bias/opportunity_bar_ts) — the
+      // MAIN row when FLAT, the separate occupied-asset shadow 'candidate'
+      // row when occupied — regardless of whether intradayLsCandidate
+      // below is actually set.
       intradayLsOpportunityContext?: {
         armId: ArmId
         bias: Bias
@@ -620,13 +624,19 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
       }
       // Strategy V4 (2026-10-01, §5) — the REAL OPEN_LONG/OPEN_SHORT
       // proposal built from the context above (protectionForEntry's own
-      // stop/target, §4.1). This is what Pass 2 uses as intraday_ls's
-      // effective candidate BASE (replacing Balanced's regime-sourced
-      // `candidate` entirely for this profile, never neutralizing it the
-      // way Aggressive's own entries are handled) and what the veto
-      // collection below reads to build a direction-aware veto question.
-      // Undefined whenever intradayLsOpportunityContext is — no opportunity
-      // this cycle means no candidate to propose, full stop.
+      // stop/target, §4.1). When the asset is FLAT, this is what Pass 2
+      // uses as intraday_ls's effective candidate BASE (replacing
+      // Balanced's regime-sourced `candidate` entirely for this profile,
+      // never neutralizing it the way Aggressive's own entries are
+      // handled) and what the veto collection below reads to build a
+      // direction-aware veto question. When the asset is OCCUPIED
+      // (2026-10-03), this is instead what the occupied-asset shadow
+      // 'candidate' row is built from — it never replaces or feeds the
+      // real management candidate, and never reaches the veto/entry Jev
+      // pipeline (every read of this field in Pass 2 that could do either
+      // is explicitly `!openPosition`-gated). Undefined whenever
+      // intradayLsOpportunityContext is — no opportunity this cycle means
+      // no candidate to propose, full stop.
       intradayLsCandidate?: ModelDecisionProposal
       // Strategy V4 (2026-10-02, plan §5.1 review item 1) — computed at
       // candidate-build time, from the SAME stopLossPct/takeProfitPct
@@ -763,15 +773,32 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
       }
 
       // Strategy V4 (intraday_ls, 2026-10-01, §3+§4.1+§5) — bias + six-arm
-      // detection for a FLAT asset, now building a genuine OPEN_LONG/
-      // OPEN_SHORT proposal once a detected opportunity clears the cost
-      // gate and the consumed-opportunity lifecycle. Gated on data
-      // sufficiency (the union of both other profiles' own requirements,
-      // plus the 4h bias leg — registry.ts).
+      // detection, building a genuine OPEN_LONG/OPEN_SHORT proposal once a
+      // detected opportunity clears the cost gate and the
+      // consumed-opportunity lifecycle. Gated on data sufficiency (the
+      // union of both other profiles' own requirements, plus the 4h bias
+      // leg — registry.ts).
+      //
+      // Un-gated from `openPosition === null` (2026-10-03, "Candidate vs
+      // management" follow-up, plan §3.4: "detection runs regardless of
+      // position state — it is free, same data"). Previously an occupied
+      // asset produced no shadow candidate at all, permanently losing the
+      // asset_occupied population §6's reward loop needs to measure what
+      // the one-position-per-asset constraint costs. Detection itself has
+      // zero knowledge of or interest in position state — it is Pass 2
+      // that decides what an occupied asset's detected opportunity means
+      // (a separate, gate-rejected 'candidate' row, never a trade — see
+      // this file's own "occupied-asset shadow" block below) and that
+      // Pass 2's existing `!openPosition` guards (the effectiveCandidate
+      // replacement, the collectModelCandidates candidate substitution,
+      // and the entryOpportunities flatMap) all still correctly prevent
+      // an occupied asset's detected opportunity from ever reaching the
+      // veto/management/entry Jev pipeline or replacing the real
+      // management candidate.
       let intradayLsOpportunityContext: PassOneResult['intradayLsOpportunityContext']
       let intradayLsCandidate: PassOneResult['intradayLsCandidate']
       let intradayLsComputedPrices: PassOneResult['intradayLsComputedPrices']
-      if (settings.strategyProfile === 'intraday_ls' && openPosition === null) {
+      if (settings.strategyProfile === 'intraday_ls') {
         const intraday = intradayByAsset[asset]
         const sufficiency = checkStrategyDataSufficiency('intraday_ls', assetMarketData, intraday)
         if (sufficiency.ok && intraday) {
@@ -850,7 +877,23 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         // uses, so what reaches it must be V4's own real candidate —
         // r.intradayLsCandidate when an opportunity was detected this
         // cycle, otherwise a plain HOLD (never the daily trend regime).
-        candidate: settings.strategyProfile === 'intraday_ls'
+        //
+        // `&& !r.openPosition` (2026-10-03) — Pass 1 now computes
+        // r.intradayLsCandidate regardless of position state (the
+        // occupied-asset shadow work above), so without this guard an
+        // occupied asset's detected OPEN_LONG/OPEN_SHORT would leak into
+        // vetoCandidates here instead of staying HOLD — which would both
+        // spend a real veto call on a candidate the gate is guaranteed to
+        // reject AND, far worse, silently drop the asset out of
+        // managementCandidates entirely (collectModelCandidates' own
+        // management branch requires candidate.action === 'HOLD'),
+        // meaning the actual open position would go completely unmanaged
+        // (no HOLD/ADD/REDUCE/CLOSE/MODIFY_PROTECTION) whenever a shadow
+        // opportunity happens to be detected on it. An occupied asset must
+        // always present as r.candidate here, exactly as before this
+        // change — the shadow candidate is handled entirely separately,
+        // in Pass 2's own dedicated block, and never touches this path.
+        candidate: settings.strategyProfile === 'intraday_ls' && !r.openPosition
           ? (r.intradayLsCandidate ?? {
             asset: r.asset,
             action: 'HOLD' as const,
@@ -917,7 +960,15 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
           sampledDayLowPct: features.sampledDayLowPct,
         }]
       }
-      if (r.intradayLsOpportunityContext && r.intradayLsCandidate) {
+      // `&& !r.openPosition` (2026-10-03) — an occupied asset's shadow
+      // candidate never asks entry_quality/expected_move/failure_risk/
+      // failure_mode: occupation is a structural fact no Jev evaluation
+      // could change, so spending a model call on it would be pure waste
+      // and would muddy the eventual skip_cause with a confound it does
+      // not need. See the occupied-asset shadow block in Pass 2 for how
+      // this candidate IS recorded — deterministically gate-rejected,
+      // with no model involvement at all.
+      if (r.intradayLsOpportunityContext && r.intradayLsCandidate && !r.openPosition) {
         const intraday = intradayByAsset[r.asset]
         if (!intraday) return [] // unreachable — intradayLsOpportunityContext is only ever set alongside a present intraday fetch
         const features = intradayFeaturesFor(intraday)
@@ -1073,10 +1124,15 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
       if (settings.strategyProfile === 'intraday_ls' && !openPosition && r.intradayLsCandidate) {
         effectiveCandidate = r.intradayLsCandidate
       }
+      // `&& !openPosition` (2026-10-03) — this is the MANAGEMENT row
+      // whenever occupied; arm_id/bias/opportunity_bar_ts belong on the
+      // separate occupied-asset shadow 'candidate' row instead (built
+      // further below), never duplicated onto both. One row, one meaning
+      // — see the "Candidate vs management" plan note this enforces.
       let armIdForRow: string | null = null
       let biasForRow: string | null = null
       let opportunityBarTsForRow: string | null = null
-      if (r.intradayLsOpportunityContext) {
+      if (r.intradayLsOpportunityContext && !openPosition) {
         armIdForRow = r.intradayLsOpportunityContext.armId
         biasForRow = r.intradayLsOpportunityContext.bias
         opportunityBarTsForRow = r.intradayLsOpportunityContext.opportunityBarTs
@@ -1684,6 +1740,125 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         decided_at: nowIso,
       })
       if (decisionInsertError) throw new Error(`could not insert agent_decisions for ${asset}: ${decisionInsertError.message}`)
+
+      // Strategy V4 (intraday_ls) — occupied-asset shadow candidate
+      // (2026-10-03, "Candidate vs management" follow-up, plan §3.4's
+      // asset_occupied population). The row just inserted above is the
+      // MANAGEMENT decision for the open position; this is a SEPARATE
+      // 'candidate' row recording that the six-arm detector ALSO found a
+      // genuine opportunity on this same asset this same cycle, and that
+      // it could not be acted on — exactly the counterfactual the reward
+      // loop's asset_occupied population needs, and which was silently
+      // lost forever on every cycle before this one.
+      //
+      // No new gate logic: `evaluateRiskGate` is reused unmodified against
+      // the SAME gateContext already built above for this asset/cycle —
+      // its very first check inside evaluateOpen (`currentState !==
+      // 'FLAT'`) rejects this deterministically with 'position already
+      // open; CLOSE first', the exact same reason an occupied FLAT-asset
+      // OPEN already gets today. Never asks Jev anything: occupation is a
+      // structural fact no news/entry/adversarial evaluation could
+      // change, so a model call here would be pure waste and would
+      // confound the eventual skip_cause with a vote that was never
+      // actually decisive.
+      //
+      // Non-fatal on failure, deliberately — this is observational
+      // telemetry for a future reward loop, never a trading action, same
+      // discipline as the market_bars upsert's own "side write" precedent
+      // a few lines up in Pass 1. A failure here must never block the
+      // REAL management decision's own dispatch (HOLD/ADD/REDUCE/CLOSE/
+      // MODIFY_PROTECTION) from executing below.
+      if (settings.strategyProfile === 'intraday_ls' && openPosition && r.intradayLsCandidate && r.intradayLsOpportunityContext) {
+        const shadowCandidate = r.intradayLsCandidate
+        const shadowGateResult = evaluateRiskGate(shadowCandidate, gateContext)
+        const shadowDecisionId = crypto.randomUUID()
+        const { error: shadowInsertError } = await supabase.from('agent_decisions').insert({
+          id: shadowDecisionId,
+          run_id: runId,
+          portfolio_id: portfolio.id,
+          asset,
+          position_id: null,
+          action: shadowCandidate.action,
+          confidence: shadowCandidate.confidence,
+          primary_driver: derivePrimaryDriver(shadowCandidate.reasons),
+          proposed_stop_loss_pct: shadowCandidate.action === 'OPEN_LONG' || shadowCandidate.action === 'OPEN_SHORT' ? shadowCandidate.stopLossPct : null,
+          proposed_take_profit_pct: shadowCandidate.action === 'OPEN_LONG' || shadowCandidate.action === 'OPEN_SHORT' ? shadowCandidate.takeProfitPct : null,
+          horizon_hours: shadowCandidate.horizonHours,
+          reasons: shadowCandidate.reasons,
+          invalidation: shadowCandidate.invalidation,
+          cited_news_ids: citedNewsIds(shadowCandidate.reasons),
+          risk_status: shadowGateResult.riskStatus,
+          risk_reason: shadowGateResult.riskReason,
+          approved_size_pct: shadowGateResult.approvedSizePct,
+          // The gate always rejects before computing prices (occupied ->
+          // evaluateOpen's first check) — intradayLsComputedPrices is the
+          // ONLY source of levels here, same fallback reasoning as the
+          // main row's own computed_stop_loss_price above: the labeler
+          // cannot simulate a shadow trade it has no levels for.
+          computed_stop_loss_price: shadowGateResult.computedStopLossPrice ?? r.intradayLsComputedPrices?.stopLossPrice ?? null,
+          computed_take_profit_price: shadowGateResult.computedTakeProfitPrice ?? r.intradayLsComputedPrices?.takeProfitPrice ?? null,
+          effective_min_confidence: effectiveAppetite.minConfidence,
+          effective_risk_budget_pct: effectiveAppetite.riskBudgetPct,
+          effective_single_trade_cap_pct: effectiveMaxSingleTradePct,
+          effective_asset_exposure_cap_pct: settings.maxAssetExposurePct,
+          effective_portfolio_risk_ceiling_pct: settings.portfolioRiskCeilingMultiplier * effectiveAppetite.riskBudgetPct,
+          effective_max_total_notional_pct: effectiveMaxTotalNotionalPct,
+          size_cap_applied: shadowGateResult.sizeCapApplied,
+          // Phase 2 management provenance — not applicable; this row never
+          // concerns the open position itself, only the detected entry.
+          proposed_action: null,
+          proposed_action_confidence: null,
+          proposed_adjust_notional: null,
+          executed_adjust_notional: null,
+          stop_loss_price_before: null,
+          stop_loss_price_after: null,
+          take_profit_price_before: null,
+          take_profit_price_after: null,
+          protection_rejection_reason: null,
+          input_payload: payload,
+          output_payload: null,
+          prompt_version: JEV_QUESTION_VERSION,
+          model_version: 'not-called',
+          strategy_version: strategy.strategyVersion,
+          model_vetoed: null,
+          expected_move_pct: null,
+          estimated_round_trip_cost_pct: null,
+          move_to_cost_ratio: null,
+          position_pnl_r: null,
+          price_r: null,
+          sampled_mfe_r: null,
+          giveback_r: null,
+          minutes_since_entry: null,
+          action_normalization_reason: null,
+          arm_id: r.intradayLsOpportunityContext.armId,
+          bias: r.intradayLsOpportunityContext.bias,
+          opportunity_bar_ts: r.intradayLsOpportunityContext.opportunityBarTs,
+          decision_type: 'candidate',
+          // No Jev call for this row at all — see this block's own
+          // top comment for why.
+          jev_news_veto_probability: null,
+          entry_quality: null,
+          entry_quality_confidence: null,
+          entry_quality_distribution: null,
+          entry_gate_mode: null,
+          expected_move_confidence: null,
+          expected_move_distribution: null,
+          expected_move_horizon_minutes: null,
+          failure_risk: null,
+          failure_risk_confidence: null,
+          failure_risk_distribution: null,
+          failure_mode: null,
+          failure_mode_confidence: null,
+          failure_mode_distribution: null,
+          veto_prompt_version: null,
+          entry_prompt_version: null,
+          adversarial_prompt_version: null,
+          decided_at: nowIso,
+        })
+        if (shadowInsertError) {
+          console.error(`could not insert occupied-asset shadow agent_decisions row for ${asset}: ${shadowInsertError.message}`)
+        }
+      }
 
       let finalRiskStatus: string = gateResult.riskStatus
 
