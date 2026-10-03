@@ -140,14 +140,31 @@ export const STRATEGY_PROFILES: Record<StrategyProfile, StrategyDefinition> = {
   intraday_ls: {
     profile: 'intraday_ls',
     strategyVersion: 'v4-ls-intraday-30m',
-    // 60, matching the live cron (agent-cycle-60min) — this field is
-    // actually read now (index.ts's Phase 0 wiring fix), so it must match
-    // reality, not the plan's originally-specified 15. Window-scanned
-    // detection (strategy/intraday-ls/detectors.ts's scanForEdge) is what
-    // makes a 60-minute cadence safe over 30-minute bars despite the
-    // mismatch — see that module's own comment, and H7's own stated
-    // limitation in the plan.
-    decisionIntervalMinutes: 60,
+    // 15, matching the live cron (agent-cycle-15min, changed 2026-10-03,
+    // explicit user instruction: "trade every 15 mins, precisely... I
+    // need more data to test my strategy"). This field is actually read
+    // now (index.ts's Phase 0 wiring fix) for idempotency-key bucket
+    // width, so it must match the real cron schedule or cycles start
+    // silently colliding as duplicate_tick no-ops — exactly the bug this
+    // project already hit once (2026-09-24) when this value drifted from
+    // the live schedule. CoinGecko quota: user explicitly accepted the
+    // ~32,145 req/month this implies (3.2x the free Demo tier's 10,000
+    // cap) after being shown the exact number — same call this project
+    // made once before (2026-09-24, reverted 2026-09-27 for unrelated
+    // cost reasons, not because the math was wrong).
+    //
+    // Deliberately UNCHANGED alongside this (explicit user instruction:
+    // "keep 30m bars + keep 4-bar window scan + keep 10m monitor"): the
+    // 30-minute signal timeframe, WINDOW_SCAN_BARS=4 in strategy/
+    // intraday-ls/detectors.ts, and position-monitor's own independent
+    // 10-minute cycle. The consumed-opportunity lifecycle
+    // (opportunity_bar_ts tracking, strategy/intraday-ls/lifecycle.ts) is
+    // bar-timestamp-based, not cycle-count-based, so it already handles
+    // more cycles re-observing the same closed bar correctly with zero
+    // code change — a real signal still only ever emits once per genuine
+    // 30-minute bar close, regardless of how many 15-minute decision
+    // cycles observe it in the meantime.
+    decisionIntervalMinutes: 15,
     newsLookbackMinutes: 195,
     maxDataStalenessMinutes: 10,
     risk: {

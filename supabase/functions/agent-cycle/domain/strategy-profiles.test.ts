@@ -75,8 +75,8 @@ Deno.test("strategyDefinitionFor('intraday_ls'): strategyVersion is 'v4-ls-intra
   assertEquals(strategyDefinitionFor('intraday_ls').strategyVersion, 'v4-ls-intraday-30m')
 })
 
-Deno.test("strategyDefinitionFor('intraday_ls'): decisionIntervalMinutes matches the LIVE cron (60), not the plan's originally-specified 15", () => {
-  assertEquals(strategyDefinitionFor('intraday_ls').decisionIntervalMinutes, 60)
+Deno.test("strategyDefinitionFor('intraday_ls'): decisionIntervalMinutes matches the LIVE cron (15, changed 2026-10-03 for more data collection)", () => {
+  assertEquals(strategyDefinitionFor('intraday_ls').decisionIntervalMinutes, 15)
 })
 
 Deno.test("strategyDefinitionFor('intraday_ls'): risk policy — 0.50% budget, 30%/60% caps, same 60-minute (one-cycle) re-entry block as its own cadence", () => {
