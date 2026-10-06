@@ -109,7 +109,7 @@ const SHORT_BREAKDOWN_BARS = (() => {
 
 Deno.test('detectBreakout: long, confirmed (volumeTrendRatio>=1.2, ret60mPct>0) -> breakout_long', () => {
   const result = detectBreakout('long', LONG_BREAKOUT_BARS, { ret60mPct: 1.5, volumeTrendRatio: 1.3 })
-  assertEquals(result, { armId: 'breakout_long', direction: 'long', detectedAtBarTs: LONG_BREAKOUT_BARS[15]!.timestamp })
+  assertEquals(result, { armId: 'breakout_long', direction: 'long', detectedAtBarTs: LONG_BREAKOUT_BARS[15]!.timestamp, triggerBarClose: LONG_BREAKOUT_BARS[15]!.close })
 })
 
 Deno.test('detectBreakout: long, edge fires but volumeTrendRatio below 1.2 -> null', () => {
@@ -122,7 +122,7 @@ Deno.test('detectBreakout: long, edge fires but ret60mPct is negative (direction
 
 Deno.test('detectBreakout: short, mirrored via invertBars, confirmed (ret60mPct<0) -> breakout_short', () => {
   const result = detectBreakout('short', SHORT_BREAKDOWN_BARS, { ret60mPct: -1.2, volumeTrendRatio: 1.5 })
-  assertEquals(result, { armId: 'breakout_short', direction: 'short', detectedAtBarTs: SHORT_BREAKDOWN_BARS[15]!.timestamp })
+  assertEquals(result, { armId: 'breakout_short', direction: 'short', detectedAtBarTs: SHORT_BREAKDOWN_BARS[15]!.timestamp, triggerBarClose: SHORT_BREAKDOWN_BARS[15]!.close })
 })
 
 Deno.test('detectBreakout: short, but ret60mPct is positive (direction mismatch) -> null', () => {
@@ -131,6 +131,21 @@ Deno.test('detectBreakout: short, but ret60mPct is positive (direction mismatch)
 
 Deno.test('detectBreakout: no edge at all -> null regardless of confirmation', () => {
   assertEquals(detectBreakout('long', flatBars(16), { ret60mPct: 5, volumeTrendRatio: 5 }), null)
+})
+
+// --- CFG-1 Stage 1B correction #9: minVolumeTrendRatio is config-driven ---
+
+Deno.test('detectBreakout: minVolumeTrendRatio=null disables the volume confirmation outright — the Stage 1B correction', () => {
+  // volumeTrendRatio=0.1 would fail the default 1.2 floor (proven by the
+  // test two above this one); with the confirmation explicitly disabled,
+  // the edge + direction match alone are enough to fire.
+  const result = detectBreakout('long', LONG_BREAKOUT_BARS, { ret60mPct: 1.5, volumeTrendRatio: 0.1 }, null)
+  assertEquals(result?.armId, 'breakout_long')
+})
+
+Deno.test('detectBreakout: an explicit non-default minVolumeTrendRatio is honored, not just the hardcoded 1.2', () => {
+  assertEquals(detectBreakout('long', LONG_BREAKOUT_BARS, { ret60mPct: 1.5, volumeTrendRatio: 1.25 }, 1.3), null)
+  assertEquals(detectBreakout('long', LONG_BREAKOUT_BARS, { ret60mPct: 1.5, volumeTrendRatio: 1.25 }, 1.2)?.armId, 'breakout_long')
 })
 
 // --- detectPullback (direction, no separate confirmation) -------------
@@ -153,7 +168,7 @@ function pullbackLongBars(): OhlcCandle[] {
 Deno.test('detectPullback: long — a known pullback-continuation shape fires pullback_long', () => {
   const bars = pullbackLongBars()
   const result = detectPullback('long', bars)
-  assertEquals(result, { armId: 'pullback_long', direction: 'long', detectedAtBarTs: bars[11]!.timestamp })
+  assertEquals(result, { armId: 'pullback_long', direction: 'long', detectedAtBarTs: bars[11]!.timestamp, triggerBarClose: bars[11]!.close })
 })
 
 Deno.test('detectPullback: short — the SAME shape mirrored (invertBars) fires pullback_short on the real (un-mirrored) candles', () => {
@@ -167,6 +182,7 @@ Deno.test('detectPullback: short — the SAME shape mirrored (invertBars) fires 
   assertEquals(result?.armId, 'pullback_short')
   assertEquals(result?.direction, 'short')
   assertEquals(result?.detectedAtBarTs, realBars[11]!.timestamp)
+  assertEquals(result?.triggerBarClose, realBars[11]!.close, 'the REAL (un-mirrored) close, not the inverted working series mirror.ts scanned internally')
 })
 
 Deno.test('detectPullback: no pullback shape present -> null', () => {
@@ -237,6 +253,29 @@ Deno.test('detectFadeOpportunity: fewer than 16 closes or candles -> null (fails
   assertEquals(detectFadeOpportunity('NEUTRAL', short), null)
 })
 
+// --- CFG-1 Stage 1B "dead arm revival": thresholds are config-driven,
+// never hand-tuned off the observed sample ---------------------------------
+
+Deno.test('detectFadeOpportunity: a wider (non-default) oversold threshold fires where the default 30 would not', () => {
+  // Verified numerically (same discipline as FADE_LONG_CLOSES above):
+  // RSI(14) full=31.24 (prior=39.39). Both sit ABOVE the default 30
+  // oversold threshold, so fadeLongCondition is false at both points
+  // under default config — null. At oversold=35: full (31.24<=35) is
+  // true, prior (39.39<=35) is false — a genuine edge, not a sustained
+  // condition. distanceFromLowPct(0.51) well inside 1x ATR%(1.28) either
+  // way, so RSI alone is what's gated here.
+  const closes = [100, 100.2, 99.8, 100.1, 99.9, 100, 99.7, 99.9, 99.6, 99.8, 99.5, 99.7, 99.4, 99.5, 99.3, 98.5]
+  assertEquals(detectFadeOpportunity('NEUTRAL', fadeMarketData(closes)), null)
+  const result = detectFadeOpportunity('NEUTRAL', fadeMarketData(closes), { oversold: 35, overbought: 70, rangeAtrMultiple: 1.0 })
+  assertEquals(result?.armId, 'fade_long')
+})
+
+Deno.test('detectFadeOpportunity: an explicit threshold object matching today\'s defaults reproduces default behavior exactly', () => {
+  const defaultResult = detectFadeOpportunity('NEUTRAL', fadeMarketData(FADE_LONG_CLOSES))
+  const explicitResult = detectFadeOpportunity('NEUTRAL', fadeMarketData(FADE_LONG_CLOSES), { oversold: 30, overbought: 70, rangeAtrMultiple: 1.0 })
+  assertEquals(explicitResult, defaultResult)
+})
+
 // --- detectIntradayLsOpportunity (combined: bias-gated priority) -------
 
 Deno.test('detectIntradayLsOpportunity: LONG bias, breakout confirmed -> breakout_long (fade never attempted)', () => {
@@ -262,6 +301,55 @@ Deno.test('detectIntradayLsOpportunity: nothing fires under any bias -> null', (
   assertEquals(detectIntradayLsOpportunity('LONG', flatBars(16), { ret60mPct: 1, volumeTrendRatio: 1.5 }, fadeMarketData(FADE_LONG_CLOSES.map(() => 100))), null)
 })
 
+// --- CFG-1 Stage 1B: regime/direction decoupling + per-arm kill switch ---
+
+Deno.test('detectIntradayLsOpportunity: a directionPolicy excluding breakout_long falls through to pullback, even though breakout would have fired', () => {
+  const result = detectIntradayLsOpportunity(
+    'LONG', LONG_BREAKOUT_BARS, { ret60mPct: 1, volumeTrendRatio: 1.5 }, fadeMarketData(FADE_LONG_CLOSES),
+    { directionPolicy: { LONG: ['pullback_long'], SHORT: ['breakout_short', 'pullback_short'], NEUTRAL: ['fade_long', 'fade_short'] } },
+  )
+  // LONG_BREAKOUT_BARS has no pullback shape, so excluding breakout
+  // correctly leaves nothing to fire — proving the policy is actually
+  // CONSULTED, not merely logged.
+  assertEquals(result, null)
+})
+
+Deno.test('detectIntradayLsOpportunity: a directionPolicy excluding ALL long arms suppresses detection entirely under LONG bias', () => {
+  const result = detectIntradayLsOpportunity(
+    'LONG', LONG_BREAKOUT_BARS, { ret60mPct: 1, volumeTrendRatio: 1.5 }, fadeMarketData(FADE_LONG_CLOSES),
+    { directionPolicy: { LONG: [], SHORT: ['breakout_short', 'pullback_short'], NEUTRAL: ['fade_long', 'fade_short'] } },
+  )
+  assertEquals(result, null)
+})
+
+Deno.test('detectIntradayLsOpportunity: per-arm disable suppresses just that arm — breakout disabled falls through to pullback', () => {
+  const pullbackBars = pullbackLongBars()
+  const result = detectIntradayLsOpportunity(
+    'LONG', pullbackBars, { ret60mPct: 1, volumeTrendRatio: 1.5 }, fadeMarketData(FADE_LONG_CLOSES),
+    { arms: { breakout_long: { enabled: false } } },
+  )
+  assertEquals(result?.armId, 'pullback_long')
+})
+
+Deno.test('detectIntradayLsOpportunity: a NEUTRAL-bias fade whose own armId is excluded from directionPolicy is suppressed', () => {
+  const result = detectIntradayLsOpportunity(
+    'NEUTRAL', flatBars(16), { ret60mPct: 1, volumeTrendRatio: 1.5 }, fadeMarketData(FADE_LONG_CLOSES),
+    { directionPolicy: { LONG: ['breakout_long', 'pullback_long'], SHORT: ['breakout_short', 'pullback_short'], NEUTRAL: ['fade_short'] } },
+  )
+  // FADE_LONG_CLOSES would fire fade_long under the default policy
+  // (proven above); excluding it from NEUTRAL's policy here suppresses it.
+  assertEquals(result, null)
+})
+
+Deno.test('detectIntradayLsOpportunity: omitting options reproduces default behavior exactly (the Stage 1A behavior-neutrality guarantee)', () => {
+  const withDefaults = detectIntradayLsOpportunity('LONG', LONG_BREAKOUT_BARS, { ret60mPct: 1, volumeTrendRatio: 1.5 }, fadeMarketData(FADE_LONG_CLOSES))
+  const withExplicitDefaultPolicy = detectIntradayLsOpportunity(
+    'LONG', LONG_BREAKOUT_BARS, { ret60mPct: 1, volumeTrendRatio: 1.5 }, fadeMarketData(FADE_LONG_CLOSES),
+    { directionPolicy: { LONG: ['breakout_long', 'pullback_long'], SHORT: ['breakout_short', 'pullback_short'], NEUTRAL: ['fade_long', 'fade_short'] } },
+  )
+  assertEquals(withExplicitDefaultPolicy, withDefaults)
+})
+
 // --- isOpportunityStillValid (signal-validity drift check) ------------
 
 Deno.test('isOpportunityStillValid: price unchanged since the trigger bar -> valid', () => {
@@ -280,4 +368,20 @@ Deno.test('isOpportunityStillValid: drift beyond half the stop distance -> inval
 Deno.test('isOpportunityStillValid: drift is direction-agnostic (works the same for a move down)', () => {
   assertEquals(isOpportunityStillValid(100, 99.4, 0.012), true) // exactly -0.6%
   assertEquals(isOpportunityStillValid(100, 99.39, 0.012), false)
+})
+
+// CFG-1 Stage 1B — maxDriftFraction is now an optional, config-driven
+// override (config-schema.ts's signalDriftMaxFraction); omitting it
+// reproduces the exact default-0.5 behavior asserted by the four tests
+// above, unedited.
+
+Deno.test('isOpportunityStillValid: an explicit non-default maxDriftFraction is honored, not just the hardcoded 0.5', () => {
+  // 1.0 x 1% = 1% — a drift that the default 0.5 fraction would reject.
+  assertEquals(isOpportunityStillValid(100, 101, 0.01, 1.0), true)
+  assertEquals(isOpportunityStillValid(100, 101.01, 0.01, 1.0), false)
+})
+
+Deno.test('isOpportunityStillValid: maxDriftFraction=0 means only an exact match is valid', () => {
+  assertEquals(isOpportunityStillValid(100, 100, 0.012, 0), true)
+  assertEquals(isOpportunityStillValid(100, 100.01, 0.012, 0), false)
 })

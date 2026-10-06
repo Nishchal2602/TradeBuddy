@@ -2,10 +2,10 @@ import { strategyDefinitionFor } from '../../../../src/shared/strategy/profiles.
 import type { StrategyDefinition, StrategyProfile } from '../../../../src/shared/strategy/profiles.ts'
 import { evaluateTrendRegime } from './regime.ts'
 import type { RegimeResult } from '../../../../src/shared/strategy/types.ts'
-import { detectOpportunity } from './aggressive/detectors.ts'
+import { detectOpportunity, MIN_BARS } from './aggressive/detectors.ts'
 import type { OpportunitySignal } from './aggressive/detectors.ts'
 import { aggressiveProtectionFor, clearsTradeabilityFloor } from './aggressive/protection.ts'
-import { computeIntradayFeatures } from './aggressive/features.ts'
+import { computeIntradayFeatures, MIN_SPOT5M_POINTS } from './aggressive/features.ts'
 import type { IntradayFeatures } from './aggressive/features.ts'
 import type { IntradayMarketData } from './aggressive/types.ts'
 import { calculateATRPercent } from '../indicators/calculate.ts'
@@ -82,11 +82,11 @@ export function checkStrategyDataSufficiency(
       if (!intraday) {
         return { ok: false, reason: `${marketData.asset} has no intraday market data available` }
       }
-      if (intraday.ohlc30m.length < 12) {
-        return { ok: false, reason: `${marketData.asset} has only ${intraday.ohlc30m.length} closed 30m bars, need at least 12` }
+      if (intraday.ohlc30m.length < MIN_BARS) {
+        return { ok: false, reason: `${marketData.asset} has only ${intraday.ohlc30m.length} closed 30m bars, need at least ${MIN_BARS}` }
       }
-      if (intraday.spot5m.length < 25) {
-        return { ok: false, reason: `${marketData.asset} has only ${intraday.spot5m.length} closed 5m points, need at least 25` }
+      if (intraday.spot5m.length < MIN_SPOT5M_POINTS) {
+        return { ok: false, reason: `${marketData.asset} has only ${intraday.spot5m.length} closed 5m points, need at least ${MIN_SPOT5M_POINTS}` }
       }
       return { ok: true, reason: null }
     }
@@ -108,11 +108,11 @@ export function checkStrategyDataSufficiency(
       if (!intraday) {
         return { ok: false, reason: `${marketData.asset} has no intraday market data available` }
       }
-      if (intraday.ohlc30m.length < 12) {
-        return { ok: false, reason: `${marketData.asset} has only ${intraday.ohlc30m.length} closed 30m bars, need at least 12` }
+      if (intraday.ohlc30m.length < MIN_BARS) {
+        return { ok: false, reason: `${marketData.asset} has only ${intraday.ohlc30m.length} closed 30m bars, need at least ${MIN_BARS}` }
       }
-      if (intraday.spot5m.length < 25) {
-        return { ok: false, reason: `${marketData.asset} has only ${intraday.spot5m.length} closed 5m points, need at least 25` }
+      if (intraday.spot5m.length < MIN_SPOT5M_POINTS) {
+        return { ok: false, reason: `${marketData.asset} has only ${intraday.spot5m.length} closed 5m points, need at least ${MIN_SPOT5M_POINTS}` }
       }
       return { ok: true, reason: null }
     }

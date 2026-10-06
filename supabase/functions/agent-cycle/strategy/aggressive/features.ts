@@ -16,6 +16,14 @@ import type { IntradaySpotPoint } from './types.ts'
 // mislabelled as such downstream (persisted state, Jev's own state
 // payload, or any future analysis).
 
+// CFG-1 Stage 1B (2026-10-06) — named so registry.ts's
+// checkStrategyDataSufficiency can reference this exact floor instead of
+// restating the literal 25 a second time (the same discipline MIN_BARS
+// already gets in aggressive/detectors.ts). Matches config-schema.ts's
+// minSpot5mPoints today (both 25) — that field is not yet wired to this
+// constant; this is a same-value refactor, not a behavior change.
+export const MIN_SPOT5M_POINTS = 25
+
 export interface IntradayFeatures {
   ret15mPct: number
   ret30mPct: number
@@ -85,13 +93,14 @@ function sampledExtremeDistances(points: readonly IntradaySpotPoint[]): { sample
 }
 
 // The one entry point strategy/registry.ts and the aggressive management-
-// question builder call. Requires at least 25 closed 5-minute points (the
-// realized-volatility window's own minimum, the largest of the four) —
-// the real pipeline supplies ~289 (24h), so this floor exists only to
-// fail closed on a malformed/truncated upstream response, same
-// discipline as indicators/calculate.ts's own InsufficientDataError uses.
+// question builder call. Requires at least MIN_SPOT5M_POINTS closed
+// 5-minute points (the realized-volatility window's own minimum, the
+// largest of the four) — the real pipeline supplies ~289 (24h), so this
+// floor exists only to fail closed on a malformed/truncated upstream
+// response, same discipline as indicators/calculate.ts's own
+// InsufficientDataError uses.
 export function computeIntradayFeatures(points: readonly IntradaySpotPoint[]): IntradayFeatures {
-  if (points.length < 25) throw new InsufficientDataError('intraday features', 25, points.length)
+  if (points.length < MIN_SPOT5M_POINTS) throw new InsufficientDataError('intraday features', MIN_SPOT5M_POINTS, points.length)
   const { sampledDayHighPct, sampledDayLowPct } = sampledExtremeDistances(points)
   return {
     ret15mPct: returnPct(points, 3),

@@ -41,6 +41,14 @@ export interface IntradayLsOpportunity {
   // true across a 60-minute cadence that re-scans a trailing window every
   // cycle, not a single most-recent bar.
   detectedAtBarTs: string
+  // CFG-1 Stage 1B (2026-10-06) — the REAL (never inverted/mirrored)
+  // close price of the trigger bar/candle itself, for
+  // isOpportunityStillValid's own signal-drift check below. For a
+  // mirrored short (breakout/pullback), this is read from the ORIGINAL
+  // bars30m at the scan's own barIndex, never from the inverted working
+  // series mirror.ts builds — an inverted close is a negated price, not
+  // a real one, and would make the drift comparison meaningless.
+  triggerBarClose: number
 }
 
 // --- Window-scanned detection (plan §3.3) ----------------------------------
@@ -103,15 +111,41 @@ export interface BreakoutConfirmation {
   volumeTrendRatio: number
 }
 
-export function detectBreakout(direction: Direction, bars30m: readonly OhlcCandle[], confirmation: BreakoutConfirmation): IntradayLsOpportunity | null {
+// CFG-1 Stage 1B correction #9 (2026-10-06) — minVolumeTrendRatio is now an
+// optional, config-driven override (default: BREAKOUT_MIN_VOLUME_TREND_
+// RATIO, so every existing call site/test keeps today's exact behavior
+// unedited). `null` disables the volume confirmation outright — the
+// live, deliberate correction (v4.1-corrected config): the only volume
+// field this system has ever had access to (CoinGecko's `total_volumes`)
+// is ROLLING 24-HOUR TRAILING volume resampled every 5 minutes, not
+// incremental per-interval volume (verified live: BTC reads ~$25-34
+// BILLION per 5-minute point, moving single-digit percent between
+// samples). A ratio of two overlapping windows of a slow 24h aggregate
+// is structurally pinned near 1.0 (live-measured, all four assets:
+// 0.97-1.11) — it has never been confirming a real volume surge.
+// Deliberately a REMOVAL, not a replacement: whatever eventually
+// confirms a breakout is a separate, Stage-3-validated research
+// question, not a value smuggled in here.
+export function detectBreakout(
+  direction: Direction,
+  bars30m: readonly OhlcCandle[],
+  confirmation: BreakoutConfirmation,
+  minVolumeTrendRatio: number | null = BREAKOUT_MIN_VOLUME_TREND_RATIO,
+): IntradayLsOpportunity | null {
   const workingBars = direction === 'long' ? bars30m : invertBars(bars30m)
   const scan = scanForEdge(workingBars, testMomentumBreakout)
   if (!scan) return null
 
   const directionConfirmed = direction === 'long' ? confirmation.ret60mPct > 0 : confirmation.ret60mPct < 0
-  if (confirmation.volumeTrendRatio < BREAKOUT_MIN_VOLUME_TREND_RATIO || !directionConfirmed) return null
+  const volumeConfirmed = minVolumeTrendRatio === null || confirmation.volumeTrendRatio >= minVolumeTrendRatio
+  if (!volumeConfirmed || !directionConfirmed) return null
 
-  return { armId: direction === 'long' ? 'breakout_long' : 'breakout_short', direction, detectedAtBarTs: scan.barTs }
+  return {
+    armId: direction === 'long' ? 'breakout_long' : 'breakout_short',
+    direction,
+    detectedAtBarTs: scan.barTs,
+    triggerBarClose: bars30m[scan.barIndex]!.close,
+  }
 }
 
 // Pullback's own confirmation is already embedded in testPullbackContinuation
@@ -122,7 +156,12 @@ export function detectPullback(direction: Direction, bars30m: readonly OhlcCandl
   const workingBars = direction === 'long' ? bars30m : invertBars(bars30m)
   const scan = scanForEdge(workingBars, testPullbackContinuation)
   if (!scan) return null
-  return { armId: direction === 'long' ? 'pullback_long' : 'pullback_short', direction, detectedAtBarTs: scan.barTs }
+  return {
+    armId: direction === 'long' ? 'pullback_long' : 'pullback_short',
+    direction,
+    detectedAtBarTs: scan.barTs,
+    triggerBarClose: bars30m[scan.barIndex]!.close,
+  }
 }
 
 // --- Fade (NEUTRAL bias only) ------------------------------------------
@@ -148,16 +187,35 @@ const MIN_CLOSES_FOR_FADE = 16
 // ATR(14)/7-day-range need 15 candles; same one-more for "prior".
 const MIN_CANDLES_FOR_FADE = 16
 
-function fadeLongCondition(rsi14: number, atrPct: number, distanceFromSevenDayLowPct: number): boolean {
-  return rsi14 <= FADE_RSI_OVERSOLD && distanceFromSevenDayLowPct <= FADE_RANGE_ATR_MULTIPLE * atrPct
+function fadeLongCondition(rsi14: number, atrPct: number, distanceFromSevenDayLowPct: number, oversold: number, rangeAtrMultiple: number): boolean {
+  return rsi14 <= oversold && distanceFromSevenDayLowPct <= rangeAtrMultiple * atrPct
 }
 
-function fadeShortCondition(rsi14: number, atrPct: number, distanceFromSevenDayHighPct: number): boolean {
-  return rsi14 >= FADE_RSI_OVERBOUGHT && distanceFromSevenDayHighPct >= -FADE_RANGE_ATR_MULTIPLE * atrPct
+function fadeShortCondition(rsi14: number, atrPct: number, distanceFromSevenDayHighPct: number, overbought: number, rangeAtrMultiple: number): boolean {
+  return rsi14 >= overbought && distanceFromSevenDayHighPct >= -rangeAtrMultiple * atrPct
 }
 
-export function detectFadeOpportunity(bias: Bias, marketData: NormalizedMarketData): IntradayLsOpportunity | null {
+// CFG-1 Stage 1B (2026-10-06) — thresholds are now optional, config-driven
+// overrides, defaulting to today's exact values so every existing call
+// site/test keeps current behavior unedited. This is what "dead arm
+// revival" actually means per the project's own explicit decision: make
+// the thresholds CONFIGURABLE so a future replay-validated value can be
+// tried, never hand-tune them off the 1,784-observation sample that
+// motivated this correction (that would be exactly the noise-fitting the
+// regime-filter finding warned against). v4-compat AND v4.1-corrected
+// both ship the SAME 30/70/1.0 values — only configurability changed.
+export interface FadeThresholds {
+  oversold: number
+  overbought: number
+  rangeAtrMultiple: number
+}
+
+export function detectFadeOpportunity(bias: Bias, marketData: NormalizedMarketData, thresholds?: FadeThresholds): IntradayLsOpportunity | null {
   if (bias !== 'NEUTRAL') return null // fades are NEUTRAL-only (plan §3.1's bias table)
+
+  const oversold = thresholds?.oversold ?? FADE_RSI_OVERSOLD
+  const overbought = thresholds?.overbought ?? FADE_RSI_OVERBOUGHT
+  const rangeAtrMultiple = thresholds?.rangeAtrMultiple ?? FADE_RANGE_ATR_MULTIPLE
 
   const closes = marketData.closeSeries.map((p) => p.close)
   if (closes.length < MIN_CLOSES_FOR_FADE || marketData.candles.length < MIN_CANDLES_FOR_FADE) return null
@@ -175,42 +233,92 @@ export function detectFadeOpportunity(bias: Bias, marketData: NormalizedMarketDa
 
   const detectedAtBarTs = marketData.closeSeries[marketData.closeSeries.length - 1]!.timestamp
 
-  const longNow = fadeLongCondition(currentRsi, currentAtrPct, current.distanceFromLowPct)
-  const longPrior = fadeLongCondition(priorRsi, priorAtrPct, prior.distanceFromLowPct)
+  const triggerBarClose = closes[closes.length - 1]!
+
+  const longNow = fadeLongCondition(currentRsi, currentAtrPct, current.distanceFromLowPct, oversold, rangeAtrMultiple)
+  const longPrior = fadeLongCondition(priorRsi, priorAtrPct, prior.distanceFromLowPct, oversold, rangeAtrMultiple)
   if (longNow && !longPrior) {
-    return { armId: 'fade_long', direction: 'long', detectedAtBarTs }
+    return { armId: 'fade_long', direction: 'long', detectedAtBarTs, triggerBarClose }
   }
 
-  const shortNow = fadeShortCondition(currentRsi, currentAtrPct, current.distanceFromHighPct)
-  const shortPrior = fadeShortCondition(priorRsi, priorAtrPct, prior.distanceFromHighPct)
+  const shortNow = fadeShortCondition(currentRsi, currentAtrPct, current.distanceFromHighPct, overbought, rangeAtrMultiple)
+  const shortPrior = fadeShortCondition(priorRsi, priorAtrPct, prior.distanceFromHighPct, overbought, rangeAtrMultiple)
   if (shortNow && !shortPrior) {
-    return { armId: 'fade_short', direction: 'short', detectedAtBarTs }
+    return { armId: 'fade_short', direction: 'short', detectedAtBarTs, triggerBarClose }
   }
 
   return null
 }
 
-// --- Combined entry point -----------------------------------------------
-//
+// CFG-1 Stage 1B (2026-10-06) — the hardcoded "LONG only attempts the
+// long pair, SHORT only the short pair, NEUTRAL only the two fades"
+// structure, made an explicit, overridable VALUE rather than only an
+// implicit consequence of this function's own if/else. Both presets
+// (v4-compat, v4.1-corrected) ship this EXACT mapping — see config-
+// presets.ts's own directionPolicy field — so wiring it here changes
+// nothing for either config; what it buys is that regime (what the
+// market is doing) and direction eligibility (which arms may respond)
+// are no longer the SAME fused decision, per this plan's own "decouple
+// regime from direction" finding.
+const DEFAULT_DIRECTION_POLICY: Record<Bias, ArmId[]> = {
+  LONG: ['breakout_long', 'pullback_long'],
+  SHORT: ['breakout_short', 'pullback_short'],
+  NEUTRAL: ['fade_long', 'fade_short'],
+}
+
+export interface IntradayLsDetectionOptions {
+  // Partial — matches config-schema.ts's z.record(Bias, ...) inference
+  // (Zod records are never non-partial, since nothing guarantees every
+  // key was supplied at parse time); a bias absent from the map falls
+  // back to DEFAULT_DIRECTION_POLICY for that one key, not the whole map.
+  directionPolicy?: Partial<Record<Bias, ArmId[]>>
+  // Partial — an arm absent from this map is treated as enabled (today's
+  // actual behavior, since no kill switch exists at all currently).
+  arms?: Partial<Record<ArmId, { enabled: boolean }>>
+  minVolumeTrendRatio?: number | null
+  fadeThresholds?: FadeThresholds
+}
+
+function armEnabled(armId: ArmId, options: IntradayLsDetectionOptions | undefined): boolean {
+  return options?.arms?.[armId]?.enabled ?? true
+}
+
 // One candidate per asset per cycle (plan §3.2). Priority breakout ->
 // pullback -> fade is structurally guaranteed rather than computed: LONG
 // bias only ever attempts breakout_long/pullback_long, SHORT only
 // breakout_short/pullback_short, NEUTRAL only the two fades (mutually
 // exclusive by construction — RSI cannot be both <=30 and >=70) — there
-// is never a cross-bias-regime tie to break.
+// is never a cross-bias-regime tie to break. `options` is optional and
+// defaults reproduce today's exact behavior unedited (every existing
+// call site omits it).
 export function detectIntradayLsOpportunity(
   bias: Bias,
   bars30m: readonly OhlcCandle[],
   breakoutConfirmation: BreakoutConfirmation,
   marketData: NormalizedMarketData,
+  options?: IntradayLsDetectionOptions,
 ): IntradayLsOpportunity | null {
+  const eligibleArms = options?.directionPolicy?.[bias] ?? DEFAULT_DIRECTION_POLICY[bias]
+
   if (bias === 'LONG' || bias === 'SHORT') {
     const direction: Direction = bias === 'LONG' ? 'long' : 'short'
-    const breakout = detectBreakout(direction, bars30m, breakoutConfirmation)
-    if (breakout) return breakout
-    return detectPullback(direction, bars30m)
+    const breakoutArmId: ArmId = direction === 'long' ? 'breakout_long' : 'breakout_short'
+    const pullbackArmId: ArmId = direction === 'long' ? 'pullback_long' : 'pullback_short'
+
+    if (eligibleArms.includes(breakoutArmId) && armEnabled(breakoutArmId, options)) {
+      const breakout = detectBreakout(direction, bars30m, breakoutConfirmation, options?.minVolumeTrendRatio)
+      if (breakout) return breakout
+    }
+    if (eligibleArms.includes(pullbackArmId) && armEnabled(pullbackArmId, options)) {
+      return detectPullback(direction, bars30m)
+    }
+    return null
   }
-  return detectFadeOpportunity(bias, marketData)
+
+  const fade = detectFadeOpportunity(bias, marketData, options?.fadeThresholds)
+  if (!fade) return null
+  if (!eligibleArms.includes(fade.armId) || !armEnabled(fade.armId, options)) return null
+  return fade
 }
 
 // --- Signal-validity drift check (plan §3.2/§4.2) --------------------------
@@ -223,7 +331,15 @@ export function detectIntradayLsOpportunity(
 // AND price hasn't drifted more than half a stop distance beyond the
 // trigger bar's own close. stopDistancePct is the fraction s from
 // protection.ts (e.g. 0.012 for 1.2%), not a percentage-as-number.
-export function isOpportunityStillValid(triggerBarClose: number, currentPrice: number, stopDistancePct: number): boolean {
+//
+// CFG-1 Stage 1B (2026-10-06) — maxDriftFraction is now an optional,
+// config-driven override (default 0.5, matching config-schema.ts's
+// signalDriftMaxFraction — today's intended value in both presets), so
+// every existing call site/test keeps exact current behavior unedited.
+// Wired into index.ts's Pass 1 behind signalDriftRuleEnforced: false in
+// v4-compat (this function had no production caller at all until
+// v4.1-corrected flips it on), true in v4.1-corrected.
+export function isOpportunityStillValid(triggerBarClose: number, currentPrice: number, stopDistancePct: number, maxDriftFraction = 0.5): boolean {
   const drift = Math.abs(currentPrice - triggerBarClose) / triggerBarClose
-  return drift <= 0.5 * stopDistancePct
+  return drift <= maxDriftFraction * stopDistancePct
 }

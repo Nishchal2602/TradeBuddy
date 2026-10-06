@@ -32,7 +32,7 @@ function point(minutesAgo: number, price: number) {
 
 const BASE_INPUT = {
   maxDataStalenessMinutes: 20, nowIso: NOW, feeBps: 0, slippageBps: 0, startingCash: 1000, strategyProfile: 'balanced' as const,
-  shortFundingBpsPerDay: 0, timeStopMinutes: 480, maxHoldMinutes: 1440,
+  shortFundingBpsPerDay: 0, timeStopMinutes: 480, maxHoldMinutes: 1440, givebackEnabledForIntradayLs: false,
 }
 
 Deno.test('planMonitorActions: no open positions -> everything empty', () => {
@@ -205,6 +205,35 @@ Deno.test('planMonitorActions: no premature exit under Aggressive — a small pu
   const result = planMonitorActions({ ...BASE_INPUT, strategyProfile: 'aggressive', openPositions: [{ position, points: [point(0, 104)] }] }) // +0.5R, unarmed
   assertEquals(result.givebackCloses.length, 0)
   assertEquals(result.remainingOpenPositions.map((p) => p.id), [position.id])
+})
+
+// CFG-1 Stage 1B (2026-10-06) — the giveback EXIT's intraday_ls gap: both
+// shipped presets today ship givebackEnabledForIntradayLs=false, which is
+// exactly the OLD unconditional behavior below; a config flipping it on is
+// what newly reaches the exit, mirroring the Balanced/Aggressive pair above.
+
+Deno.test('planMonitorActions: an eligible position under intraday_ls is SAMPLED but never EXITED when givebackEnabledForIntradayLs is false (the shipped default)', () => {
+  const position = trackedLongPosition()
+  const result = planMonitorActions({
+    ...BASE_INPUT, strategyProfile: 'intraday_ls', givebackEnabledForIntradayLs: false,
+    openPositions: [{ position, points: [point(5, 132), point(0, 108)] }],
+  })
+  assertEquals(result.givebackCloses.length, 0)
+  assertEquals(result.closes.length, 0)
+  assertEquals(result.remainingOpenPositions.map((p) => p.id), [position.id])
+  assertEquals(result.highWaterUpdates.length, 1, 'high-water state is still sampled regardless of the flag')
+  assertEquals(result.highWaterUpdates[0]!.sampledMfeR, 4.0)
+})
+
+Deno.test('planMonitorActions: an eligible position under intraday_ls DOES exit via profit_giveback once givebackEnabledForIntradayLs is true', () => {
+  const position = trackedLongPosition()
+  const result = planMonitorActions({
+    ...BASE_INPUT, strategyProfile: 'intraday_ls', givebackEnabledForIntradayLs: true,
+    openPositions: [{ position, points: [point(5, 132), point(0, 108)] }],
+  })
+  assertEquals(result.givebackCloses.length, 1)
+  assertEquals(result.givebackCloses[0]!.closedPosition.closeReason, 'profit_giveback')
+  assertEquals(result.remainingOpenPositions.length, 0)
 })
 
 // =========================================================================

@@ -4,6 +4,7 @@ import { fetchRecentPricePoints } from '../agent-cycle/providers/coingecko.ts'
 import { computeNav } from '../agent-cycle/broker/accounting.ts'
 import type { ClosePositionResult } from '../agent-cycle/broker/accounting.ts'
 import { rowToPosition } from '../agent-cycle/db/row-mappers.ts'
+import { loadActiveIntradayLsConfig } from '../agent-cycle/db/strategy-config.ts'
 import type { AssetSymbol } from '../../../src/shared/market-data/types.ts'
 import type { PricePoint } from './triggers.ts'
 import { planMonitorActions } from './plan.ts'
@@ -189,6 +190,19 @@ export async function runPositionMonitor(deps: MonitorDeps): Promise<MonitorRunS
       return { position, points: sincePoints }
     })
 
+    // CFG-1 Stage 1B (2026-10-06) — the same strategy_configs row
+    // agent-cycle reads (loadActiveIntradayLsConfig re-validates and
+    // re-hashes on every read, so a hand-edited row fails this tick
+    // loudly rather than silently). Skipped entirely outside
+    // intraday_ls, same "no new behavior for other profiles" discipline
+    // as agent-cycle's own identical gate. Not yet seeded (fresh deploy,
+    // before agent-cycle's first intraday_ls cycle) reads as "disabled"
+    // — the current, pre-Stage-1B behavior — rather than seeding from
+    // here too; agent-cycle is the one writer of this table.
+    const givebackEnabledForIntradayLs = settings.strategy_profile === 'intraday_ls'
+      ? (await loadActiveIntradayLsConfig(supabase))?.config.givebackEnabledForIntradayLs ?? false
+      : false
+
     const plan: MonitorPlanResult = planMonitorActions({
       openPositions: openPositionsWithPoints,
       maxDataStalenessMinutes: settings.max_data_staleness_minutes,
@@ -200,6 +214,7 @@ export async function runPositionMonitor(deps: MonitorDeps): Promise<MonitorRunS
       shortFundingBpsPerDay: Number(settings.short_funding_bps_per_day),
       timeStopMinutes: settings.time_stop_minutes,
       maxHoldMinutes: settings.max_hold_minutes,
+      givebackEnabledForIntradayLs,
     })
 
     // Step 5: execute through the shared broker via the conditional-update

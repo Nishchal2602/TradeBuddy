@@ -38,7 +38,7 @@ import { stopLossPctFor, takeProfitPctFor } from './strategy/rules.ts'
 import { computePositionPnlR, computePriceR } from './strategy/aggressive/protection.ts'
 import { evaluateBias } from './strategy/intraday-ls/bias.ts'
 import type { Bias } from './strategy/intraday-ls/bias.ts'
-import { armFamilyOf, detectIntradayLsOpportunity } from './strategy/intraday-ls/detectors.ts'
+import { armFamilyOf, detectIntradayLsOpportunity, isOpportunityStillValid } from './strategy/intraday-ls/detectors.ts'
 import type { ArmFamily, ArmId } from './strategy/intraday-ls/detectors.ts'
 import { shouldEmitOpportunity } from './strategy/intraday-ls/lifecycle.ts'
 import { riskAppetiteThresholds } from '../../../src/shared/risk/appetite-mapping.ts'
@@ -661,7 +661,26 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
       // only for a non-intraday_ls cycle.
       regimeState?: Bias | null
       eligibleArms?: ArmId[] | null
-      noCandidateReason?: 'data_insufficient' | 'regime_null' | 'no_arm_triggered' | 'cost_gate' | 'opportunity_consumed' | null
+      // 'direction_disabled' is a valid DB value (CHECK constraint,
+      // migration 20261006140000) but deliberately never assigned here:
+      // a short-reachable-but-disabled opportunity still populates
+      // arm_id/bias (via intradayLsOpportunityContext, independent of
+      // intradayLsCandidate below) — an opportunity WAS found, so
+      // no_candidate_reason correctly stays null, matching this field's
+      // own "null exactly when arm_id is populated" invariant. Querying
+      // for a disabled short is `arm_id is not null and action = 'HOLD'
+      // and bias... ` (the direction the arm detected), not this column.
+      // 'signal_stale' (CFG-1 Stage 1B, 2026-10-06) — isOpportunityStillValid's
+      // own drift check failed: price has moved more than
+      // signalDriftMaxFraction x stopLossPct away from the trigger bar's
+      // close since it was detected (window-scanning can surface an edge
+      // up to WINDOW_SCAN_BARS-1 bars old). Deliberately NOT consumed —
+      // intradayLsOpportunityContext is left unset, so opportunity_bar_ts
+      // is never written on this row and the same bar can still qualify a
+      // later cycle if price reverts. Only reachable when the active
+      // config's signalDriftRuleEnforced is true (v4.1-corrected; false,
+      // hence unreachable, in v4-compat).
+      noCandidateReason?: 'data_insufficient' | 'regime_null' | 'no_arm_triggered' | 'cost_gate' | 'opportunity_consumed' | 'signal_stale' | null
     }
 
     // Strategy profiles, Pass 2 — the additive intraday feed, fetched ONCE
@@ -857,13 +876,22 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
           if (!bias) {
             noCandidateReasonForRow = 'regime_null'
           } else {
-            eligibleArmsForRow = activeIntradayLsConfig?.config.directionPolicy[bias] ?? null
+            const policyConfig = activeIntradayLsConfig?.config
+            eligibleArmsForRow = policyConfig?.directionPolicy[bias] ?? null
             const features = intradayFeaturesFor(intraday)
             const detected = detectIntradayLsOpportunity(
               bias,
               intraday.ohlc30m,
               { ret60mPct: features.ret60mPct, volumeTrendRatio: features.volumeTrendRatio },
               assetMarketData,
+              policyConfig
+                ? {
+                    directionPolicy: policyConfig.directionPolicy,
+                    arms: policyConfig.arms,
+                    minVolumeTrendRatio: policyConfig.breakoutMinVolumeTrendRatio,
+                    fadeThresholds: { oversold: policyConfig.fadeRsiOversold, overbought: policyConfig.fadeRsiOverbought, rangeAtrMultiple: policyConfig.fadeRangeAtrMultiple },
+                  }
+                : undefined,
             )
             if (!detected) {
               noCandidateReasonForRow = 'no_arm_triggered'
@@ -877,21 +905,67 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
                 const lastConsumed = await readLastConsumedOpportunityBarTs(supabase, portfolio.id, asset)
                 if (!shouldEmitOpportunity(detected.detectedAtBarTs, lastConsumed)) {
                   noCandidateReasonForRow = 'opportunity_consumed'
+                } else if (
+                  policyConfig?.signalDriftRuleEnforced &&
+                  !isOpportunityStillValid(detected.triggerBarClose, assetMarketData.price, stopLossPct, policyConfig.signalDriftMaxFraction)
+                ) {
+                  // CFG-1 Stage 1B — isOpportunityStillValid wired in
+                  // (plan §3.2/§4.2's drift rule, previously specified,
+                  // tested, and never called from production). Price has
+                  // moved more than signalDriftMaxFraction x stopLossPct
+                  // from the trigger bar's own close since window-scanned
+                  // detection found it — deliberately NOT consumed (no
+                  // intradayLsOpportunityContext, so opportunity_bar_ts is
+                  // never written on this row): the same bar can still
+                  // qualify a later cycle if price reverts, exactly like a
+                  // data_insufficient/regime_null non-event rather than a
+                  // decision that burns the edge.
+                  noCandidateReasonForRow = 'signal_stale'
                 } else {
+                  // arm_id/bias/opportunity_bar_ts persist on the main
+                  // row regardless of what happens next (that gating is
+                  // keyed on intradayLsOpportunityContext alone, below —
+                  // never on intradayLsCandidate), so the opportunity is
+                  // never silently lost even if it's not promoted.
                   intradayLsOpportunityContext = { armId: detected.armId, bias, direction: detected.direction, opportunityBarTs: detected.detectedAtBarTs }
-                  intradayLsCandidate = {
-                    asset,
-                    action: detected.direction === 'long' ? 'OPEN_LONG' : 'OPEN_SHORT',
-                    confidence: 1,
-                    horizonHours: null,
-                    reasons: [{ type: 'TECHNICAL', text: `intraday_ls ${detected.armId} detected under ${bias} bias` }],
-                    invalidation: [{ text: 'Managed by the position-monitor exit set (stop-loss/take-profit/giveback/time-stop), not the daily trend regime' }],
-                    stopLossPct,
-                    takeProfitPct,
-                  }
                   intradayLsComputedPrices = computeStopLossTakeProfitPrices(detected.direction, assetMarketData.price, stopLossPct, takeProfitPct)
-                  // A real candidate was built — no_candidate_reason stays
-                  // null, correctly: there IS a candidate this cycle.
+                  // CFG-1 Stage 1B — "short reachable but disabled": a
+                  // detected short is NOT promoted to a live trade
+                  // proposal when the active config's shortEnabled=false.
+                  // Leaving intradayLsCandidate unset here is deliberately
+                  // the ONLY change needed — both the Jev veto collection
+                  // (collectModelCandidates' own `r.intradayLsCandidate ??
+                  // HOLD` fallback) and the entry/adversarial opportunity
+                  // list (`r.intradayLsCandidate && !r.openPosition`, Pass
+                  // 2) already key on this exact field, so the short is
+                  // correctly never shown to Jev at all — "occupation is
+                  // a structural fact no evaluation could change" applies
+                  // identically here. No second insert, no risk of
+                  // colliding with the one-candidate-row-per-asset-per-run
+                  // uniqueness a FLAT asset's main row already occupies.
+                  // Known, accepted gap: if this SAME cycle is also the
+                  // occupied-asset case (openPosition truthy), the
+                  // existing shadow-candidate block a few lines below
+                  // requires intradayLsCandidate too, so a disabled short
+                  // on an occupied asset records on the management row's
+                  // own metadata only, not a separate shadow row — a rare
+                  // double-edge case, not the primary scenario this fixes.
+                  if (!(detected.direction === 'short' && policyConfig && !policyConfig.shortEnabled)) {
+                    intradayLsCandidate = {
+                      asset,
+                      action: detected.direction === 'long' ? 'OPEN_LONG' : 'OPEN_SHORT',
+                      confidence: 1,
+                      horizonHours: null,
+                      reasons: [{ type: 'TECHNICAL', text: `intraday_ls ${detected.armId} detected under ${bias} bias` }],
+                      invalidation: [{ text: 'Managed by the position-monitor exit set (stop-loss/take-profit/giveback/time-stop), not the daily trend regime' }],
+                      stopLossPct,
+                      takeProfitPct,
+                    }
+                  }
+                  // A real candidate was built (or deliberately suppressed
+                  // above) — no_candidate_reason stays null either way:
+                  // an opportunity WAS detected this cycle, which is what
+                  // that field means.
                 }
               }
             }
@@ -1449,17 +1523,21 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
             // Strategy profiles (2026-09-23) — MOVE_CLOSER/MOVE_OUT steps
             // one ATR unit (apply-management.ts's buildTargetProposal), so
             // this must be the SAME ATR the strategy itself reasons in:
-            // Balanced's 4h figure is unchanged; Aggressive must use its
-            // own 30m ATR (registry.ts's managementAtrPctFor — its own
-            // comment already says the 4-hourly figure is "incoherent" at
-            // this horizon). Falls back to the 4h figure only if 30m data
-            // is momentarily too thin for ATR(14) — a coarser step for
-            // one cycle, not a crash of the whole cycle over one field.
+            // Balanced's 4h figure is unchanged; Aggressive and intraday_ls
+            // must use their own 30m ATR (registry.ts's managementAtrPctFor
+            // — its own comment already says the 4-hourly figure is
+            // "incoherent" at this horizon). CFG-1 Stage 1B (2026-10-06):
+            // intraday_ls was silently falling through to the 4h figure
+            // here even though the entry path already used 30m ATR — the
+            // management-path gap this comment now closes. Falls back to
+            // the 4h figure only if 30m data is momentarily too thin for
+            // ATR(14) — a coarser step for one cycle, not a crash of the
+            // whole cycle over one field.
             let managementAtrPct = assetInput.market.indicators.atrPct
-            if (settings.strategyProfile === 'aggressive') {
+            if (settings.strategyProfile === 'aggressive' || settings.strategyProfile === 'intraday_ls') {
               const intraday = intradayByAsset[asset]
               if (intraday && intraday.ohlc30m.length >= 15) {
-                managementAtrPct = managementAtrPctFor('aggressive', assetMarketData, intraday)
+                managementAtrPct = managementAtrPctFor(settings.strategyProfile, assetMarketData, intraday)
               }
             }
 
@@ -2027,6 +2105,7 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
           console.error(`could not insert occupied-asset shadow agent_decisions row for ${asset}: ${shadowInsertError.message}`)
         }
       }
+
 
       let finalRiskStatus: string = gateResult.riskStatus
 

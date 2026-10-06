@@ -50,6 +50,16 @@ export interface MonitorPlanInput {
   // so switching back to Aggressive later resumes with intact history
   // rather than a reset ratchet.
   strategyProfile: StrategyProfile
+  // CFG-1 Stage 1B (2026-10-06) — the active intraday_ls config's own
+  // givebackEnabledForIntradayLs flag (false in both shipped presets
+  // today; plan.ts's own giveback block is below). Read by index.ts via
+  // agent-cycle/db/strategy-config.ts's loadActiveIntradayLsConfig — the
+  // identical config row agent-cycle itself reads, so the two functions
+  // can never silently disagree on whether the ratchet is live for this
+  // profile. Meaningless (left false) whenever strategyProfile is not
+  // 'intraday_ls' — Aggressive's own giveback exit is unconditional and
+  // unaffected by this field.
+  givebackEnabledForIntradayLs: boolean
   // Strategy V4 (2026-10-01) — threaded into every closePosition call
   // (perpetual funding accrual, broker/accounting.ts's own module
   // comment) and the two new intraday_ls-only exits' own thresholds.
@@ -193,7 +203,15 @@ export function planMonitorActions(input: MonitorPlanInput): MonitorPlanResult {
     if (position.highWaterTrackedFrom != null) {
       const tracking = trackGivebackForPosition({ position, feeBps: input.feeBps, slippageBps: input.slippageBps, points })
 
-      if (tracking.exit !== null && input.strategyProfile === 'aggressive') {
+      // CFG-1 Stage 1B (2026-10-06) — intraday_ls now reaches this EXIT
+      // too when its own config says so (both shipped presets ship this
+      // false, matching the plan.ts §4.2 vs. code contradiction this
+      // fixes: the plan always listed giveback as an active V4 exit, the
+      // code could never reach it under this profile). Aggressive's own
+      // exit is unconditional, unchanged.
+      const givebackExitEnabled = input.strategyProfile === 'aggressive' ||
+        (input.strategyProfile === 'intraday_ls' && input.givebackEnabledForIntradayLs)
+      if (tracking.exit !== null && givebackExitEnabled) {
         const result = closePosition({
           position,
           // Same "no windfall" fill-price policy as a stop-loss — the
@@ -215,9 +233,10 @@ export function planMonitorActions(input: MonitorPlanInput): MonitorPlanResult {
       }
 
       // Either no exit condition was met, or one was but the active
-      // profile is Balanced (sampling continues regardless; only the
-      // exit is profile-gated) — persist the advanced high-water state
-      // and keep the position open.
+      // profile/config doesn't enable this exit (Balanced; or intraday_ls
+      // with givebackEnabledForIntradayLs false) — sampling continues
+      // regardless, only the exit is gated — persist the advanced
+      // high-water state and keep the position open.
       highWaterUpdates.push({
         positionId: position.id,
         sampledMfeR: tracking.sampledMfeR,
