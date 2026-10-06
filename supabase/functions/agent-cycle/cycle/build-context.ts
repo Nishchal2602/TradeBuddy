@@ -221,10 +221,29 @@ export function buildRiskGateContext(inputs: GateContextInputs): RiskGateContext
 // that can change mid-cycle as earlier assets in the same run execute
 // (index.ts, Phase 5). Pure: takes the live openPositions/prices the
 // caller already holds, no I/O of its own.
+// candidateDirection (2026-10-03, plan ASSET-4 item 5 — fixing a latent
+// long-only bug) is the direction THIS sizing decision is actually about:
+// the proposal's own direction for OPEN_LONG/OPEN_SHORT, or the existing
+// position's direction for an ADD (gate.ts's evaluateOpen/evaluateAdd are
+// the two — and only two — callers of applySizingCaps, so these are the
+// only two cases that matter; see the call site in index.ts).
+//
+// Originally this filtered `p.direction === 'long'` unconditionally, with
+// a comment claiming "V1 only ever opens long, so 'same direction' is
+// every open position today." That was true when it was written but was
+// never revisited once shorts shipped (trading-domain-contract.md's 1x
+// synthetic shorts, then intraday_ls's genuinely bidirectional entries) —
+// a short candidate's same-direction notional silently stayed 0 no matter
+// how many other shorts were open, so the total_notional cap could never
+// bind on the short side. Unreachable with 2 assets (every live candidate
+// to date has been long); reachable with 4, where a 3rd/4th slot is
+// exactly where this would first matter. Fixed here rather than deferred,
+// per explicit user decision.
 export function aggregateOtherOpenPositionsRisk(
   openPositions: Position[],
   excludeAsset: AssetSymbol,
   latestPriceByAsset: Map<AssetSymbol, number>,
+  candidateDirection: Direction,
 ): { otherOpenPositionsRiskAtStopUsd: number; otherSameDirectionNotionalUsd: number } {
   let otherOpenPositionsRiskAtStopUsd = 0
   let otherSameDirectionNotionalUsd = 0
@@ -234,15 +253,14 @@ export function aggregateOtherOpenPositionsRisk(
     // the stop's price distance from entry — not notional x a re-derived
     // stopLossPct (an already-open position doesn't carry one; this is
     // the exact, direct figure sizing.ts's own risk-at-stop concept means).
+    // Direction-agnostic, correctly, on both branches: ANY other open
+    // position's stop risk counts toward the portfolio risk ceiling,
+    // regardless of which side it or the candidate are on.
     otherOpenPositionsRiskAtStopUsd += p.quantity * Math.abs(p.entryPrice - p.stopLossPrice)
-    // trading-strategy-v1.md §5/§17 — V1 only ever opens long
-    // (sizing.ts's own PortfolioRiskInputs comment: "long-only in V1, so
-    // 'same direction' is every open position today"). Filtered
-    // explicitly rather than assumed, so a legacy/pre-existing short
-    // (buildCandidateProposal's defensive-HOLD branch — never opened by
-    // V1 itself, but not database-impossible) is correctly excluded from
-    // the long-side notional cap rather than silently counted toward it.
-    if (p.direction === 'long') {
+    // Bidirectional (fixed 2026-10-03) — counts toward the SAME-direction
+    // notional cap only when this other position's direction matches the
+    // CANDIDATE's direction, long or short alike.
+    if (p.direction === candidateDirection) {
       otherSameDirectionNotionalUsd += p.quantity * (latestPriceByAsset.get(p.asset) ?? p.entryPrice)
     }
   }

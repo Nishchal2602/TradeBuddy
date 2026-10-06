@@ -14,6 +14,22 @@ import type { Bias } from './bias.ts'
 export type ArmId = 'breakout_long' | 'breakout_short' | 'pullback_long' | 'pullback_short' | 'fade_long' | 'fade_short'
 export type Direction = 'long' | 'short'
 
+// CFG-1 Stage 0 (2026-10-06) — the six arm ids look like six independent
+// strategies, but statistically they are one of three setup families
+// crossed with direction (itself already a first-class field on
+// IntradayLsOpportunity, never re-derived from the id string). Persisting
+// arm_family as its OWN column (agent_decisions) is what makes "does
+// pullback work independent of direction?" answerable with a GROUP BY
+// instead of a LIKE '%pullback%' string match against six isolated
+// buckets.
+export type ArmFamily = 'breakout' | 'pullback' | 'fade'
+
+export function armFamilyOf(armId: ArmId): ArmFamily {
+  if (armId.startsWith('breakout')) return 'breakout'
+  if (armId.startsWith('pullback')) return 'pullback'
+  return 'fade'
+}
+
 export interface IntradayLsOpportunity {
   armId: ArmId
   direction: Direction

@@ -19,14 +19,26 @@ import { closedPoints } from '../strategy/closed-bars.ts'
 const HOUR_MS = 60 * 60 * 1000
 const DAY_MS = 24 * HOUR_MS
 
-// CoinGecko coin ids for the V0 asset universe. Entirely internal to this
-// file — nothing outside ever sees the string "bitcoin"/"ethereum". This is
-// the concrete point of "the agent cycle only knows about the normalized
-// interfaces" (user direction, 2026-09-17): a provider-specific id scheme
-// must never leak past this adapter.
-const COIN_ID: Record<AssetSymbol, string> = {
+// CoinGecko coin ids for the V0 asset universe. The ID STRINGS are entirely
+// internal to this file — nothing outside ever sees "bitcoin"/"ethereum"/
+// etc. This is the concrete point of "the agent cycle only knows about the
+// normalized interfaces" (user direction, 2026-09-17): a provider-specific
+// id scheme must never leak past this adapter.
+//
+// AVAX -> 'avalanche-2', NOT 'avalanche' — verified live 2026-10-03
+// (/coins/markets?ids=avalanche-2 resolves to symbol AVAX; 'avalanche' is a
+// different, unrelated coin on CoinGecko). Easy to get wrong silently since
+// both ids exist.
+//
+// Exported (2026-10-03, plan ASSET-4 item 7a) ONLY so the asset-universe
+// completeness test can assert its KEY SET (never the id strings
+// themselves) matches AssetSymbol.options — the "nothing outside sees the
+// id strings" invariant above is about the VALUES and is unaffected.
+export const COIN_ID: Record<AssetSymbol, string> = {
   BTC: 'bitcoin',
   ETH: 'ethereum',
+  SUI: 'sui',
+  AVAX: 'avalanche-2',
 }
 
 const BASE_URL = 'https://api.coingecko.com/api/v3'

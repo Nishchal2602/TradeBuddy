@@ -1,6 +1,7 @@
 import { assertEquals, assertThrows } from 'jsr:@std/assert@1'
 import {
   MIN_BARS_FOR_WINDOW_SCAN,
+  armFamilyOf,
   detectBreakout,
   detectFadeOpportunity,
   detectIntradayLsOpportunity,
@@ -8,6 +9,23 @@ import {
   isOpportunityStillValid,
   scanForEdge,
 } from './detectors.ts'
+import type { ArmId } from './detectors.ts'
+
+// --- armFamilyOf (CFG-1 Stage 0, 2026-10-06) --------------------------------
+
+Deno.test('armFamilyOf: maps all six arm ids to exactly three families', () => {
+  const expected: Record<ArmId, 'breakout' | 'pullback' | 'fade'> = {
+    breakout_long: 'breakout',
+    breakout_short: 'breakout',
+    pullback_long: 'pullback',
+    pullback_short: 'pullback',
+    fade_long: 'fade',
+    fade_short: 'fade',
+  }
+  for (const [armId, family] of Object.entries(expected)) {
+    assertEquals(armFamilyOf(armId as ArmId), family)
+  }
+})
 import { testMomentumBreakout } from '../aggressive/detectors.ts'
 import { InsufficientDataError } from '../../indicators/calculate.ts'
 import type { OhlcCandle } from '../../../../../src/shared/market-data/types.ts'

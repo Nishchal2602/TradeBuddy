@@ -14,6 +14,15 @@ import type { IntradayMarketData, IntradaySpotPoint } from '../strategy/aggressi
 // fixtures alone — same split as every other DB-adjacent module in this
 // codebase (db/row-mappers.ts, db/quote-rows.ts). Only upsertMarketBars
 // at the bottom touches Supabase.
+//
+// Provenance fields (CFG-1 Stage 0, 2026-10-06) — added so a future
+// replay harness can reconstruct the INFORMATION SET available at time
+// t, not just the price path. `closeTime`/`ingestedAt`/`source`/
+// `batchId`/`dataVersion` are threaded through from the caller rather
+// than computed with a bare Date.now() here, matching this codebase's
+// existing clock-injection discipline for pure functions.
+
+export const MARKET_BARS_DATA_VERSION = 'v1'
 
 export type BarTimeframe = '5m' | '30m' | '4h' | '1d'
 
@@ -21,6 +30,14 @@ export interface MarketBarRow {
   asset: AssetSymbol
   timeframe: BarTimeframe
   openTime: string
+  // Explicitly named alias of openTime, added 2026-10-06 — openTime has
+  // ALWAYS held the bar's CLOSE instant for every series this table
+  // stores (verified live, 2026-10-03: a 30m bar stamped 14:30 covers
+  // 14:00->14:30; a close-only point's own timestamp already IS its
+  // close). openTime is kept as the column name for backward
+  // compatibility (it's half the primary key) — closeTime exists so a
+  // future reader never has to rediscover this the hard way.
+  closeTime: string
   // True OHLC (candles/ohlc30m) -> all three populated, isSampled=false.
   // Close-only series (dailyCloseSeries/spot5m) -> all three null,
   // isSampled=true — a close-only point has no true high/low to report,
@@ -31,71 +48,129 @@ export interface MarketBarRow {
   high: number | null
   low: number | null
   close: number
+  // CAVEAT, permanent (CFG-1 Stage 0 finding): this is CoinGecko's
+  // `total_volumes` field, which is ROLLING 24-HOUR TRAILING volume
+  // resampled at 5-minute intervals — NOT incremental per-interval
+  // volume. Verified live 2026-10-06: BTC's series reads ~$25-34
+  // BILLION per 5-minute point (24h-scale, not interval-scale), moving
+  // only single-digit percent between consecutive samples. No endpoint
+  // on CoinGecko's free/Demo tier returns true incremental volume at any
+  // intraday granularity — /ohlc never includes volume at all. Never
+  // read this as "volume traded in this bar." strategy/aggressive/
+  // features.ts's volumeTrend() computing a ratio of two windows of
+  // this series is consequently near-meaningless (see CFG-1 plan
+  // correction #9, which removes the one live consumer that treated it
+  // as real).
   volume: number | null
   isSampled: boolean
+  // Provenance — never computed with a bare clock read here; always the
+  // caller's own nowIso/runId, so every bar in one write carries the
+  // same values and a replay can group by them.
+  source: string
+  ingestedAt: string
+  batchId: string | null
+  dataVersion: string
 }
 
-export function barsFromOhlcCandles(asset: AssetSymbol, timeframe: '30m' | '4h', candles: readonly OhlcCandle[]): MarketBarRow[] {
+export interface BarProvenance {
+  nowIso: string
+  batchId: string | null
+  source?: string
+}
+
+const DEFAULT_SOURCE = 'coingecko'
+
+export function barsFromOhlcCandles(
+  asset: AssetSymbol,
+  timeframe: '30m' | '4h',
+  candles: readonly OhlcCandle[],
+  provenance: BarProvenance,
+): MarketBarRow[] {
   return candles.map((c) => ({
     asset,
     timeframe,
     openTime: c.timestamp,
+    closeTime: c.timestamp,
     open: c.open,
     high: c.high,
     low: c.low,
     close: c.close,
     volume: null,
     isSampled: false,
+    source: provenance.source ?? DEFAULT_SOURCE,
+    ingestedAt: provenance.nowIso,
+    batchId: provenance.batchId,
+    dataVersion: MARKET_BARS_DATA_VERSION,
   }))
 }
 
-export function barsFromCloseSeries(asset: AssetSymbol, timeframe: '1d', closes: readonly { timestamp: string; close: number }[]): MarketBarRow[] {
+export function barsFromCloseSeries(
+  asset: AssetSymbol,
+  timeframe: '1d',
+  closes: readonly { timestamp: string; close: number }[],
+  provenance: BarProvenance,
+): MarketBarRow[] {
   return closes.map((c) => ({
     asset,
     timeframe,
     openTime: c.timestamp,
+    closeTime: c.timestamp,
     open: null,
     high: null,
     low: null,
     close: c.close,
     volume: null,
     isSampled: true,
+    source: provenance.source ?? DEFAULT_SOURCE,
+    ingestedAt: provenance.nowIso,
+    batchId: provenance.batchId,
+    dataVersion: MARKET_BARS_DATA_VERSION,
   }))
 }
 
-export function barsFromSpotPoints(asset: AssetSymbol, timeframe: '5m', points: readonly IntradaySpotPoint[]): MarketBarRow[] {
+export function barsFromSpotPoints(
+  asset: AssetSymbol,
+  timeframe: '5m',
+  points: readonly IntradaySpotPoint[],
+  provenance: BarProvenance,
+): MarketBarRow[] {
   return points.map((p) => ({
     asset,
     timeframe,
     openTime: p.timestamp,
+    closeTime: p.timestamp,
     open: null,
     high: null,
     low: null,
     close: p.price,
     volume: p.volume,
     isSampled: true,
+    source: provenance.source ?? DEFAULT_SOURCE,
+    ingestedAt: provenance.nowIso,
+    batchId: provenance.batchId,
+    dataVersion: MARKET_BARS_DATA_VERSION,
   }))
 }
 
 // Called once per asset, every cycle, regardless of profile — `candles`
 // and `dailyCloseSeries` are already fetched unconditionally by
 // getMarketData (providers/coingecko.ts), so this adds zero new requests.
-export function marketBarsFromNormalizedMarketData(data: NormalizedMarketData): MarketBarRow[] {
+export function marketBarsFromNormalizedMarketData(data: NormalizedMarketData, provenance: BarProvenance): MarketBarRow[] {
   return [
-    ...barsFromOhlcCandles(data.asset, '4h', data.candles),
-    ...barsFromCloseSeries(data.asset, '1d', data.dailyCloseSeries),
+    ...barsFromOhlcCandles(data.asset, '4h', data.candles, provenance),
+    ...barsFromCloseSeries(data.asset, '1d', data.dailyCloseSeries, provenance),
   ]
 }
 
 // Called only for an asset with a present IntradayMarketData entry
-// (currently: strategyProfile === 'aggressive' only — see index.ts's own
-// intradayByAsset comment). Adds zero new requests: ohlc30m/spot5m are
-// already fetched by fetchIntradayMarketData whenever that profile is
-// active.
-export function marketBarsFromIntradayMarketData(intraday: IntradayMarketData): MarketBarRow[] {
+// (currently: strategyProfile === 'aggressive' | 'intraday_ls' — see
+// index.ts's own intradayByAsset comment). Adds zero new requests:
+// ohlc30m/spot5m are already fetched by fetchIntradayMarketData whenever
+// one of those profiles is active.
+export function marketBarsFromIntradayMarketData(intraday: IntradayMarketData, provenance: BarProvenance): MarketBarRow[] {
   return [
-    ...barsFromOhlcCandles(intraday.asset, '30m', intraday.ohlc30m),
-    ...barsFromSpotPoints(intraday.asset, '5m', intraday.spot5m),
+    ...barsFromOhlcCandles(intraday.asset, '30m', intraday.ohlc30m, provenance),
+    ...barsFromSpotPoints(intraday.asset, '5m', intraday.spot5m, provenance),
   ]
 }
 
@@ -117,12 +192,17 @@ function toDbRow(row: MarketBarRow) {
     asset: row.asset,
     timeframe: row.timeframe,
     open_time: row.openTime,
+    close_time: row.closeTime,
     open: row.open,
     high: row.high,
     low: row.low,
     close: row.close,
     volume: row.volume,
     is_sampled: row.isSampled,
+    source: row.source,
+    ingested_at: row.ingestedAt,
+    batch_id: row.batchId,
+    data_version: row.dataVersion,
   }
 }
 
@@ -132,8 +212,8 @@ function toDbRow(row: MarketBarRow) {
 // last run. A failure here is logged, never thrown — market_bars is a
 // side write for future analysis, not a trading action, the same
 // non-fatal discipline this file's sibling market_quotes upsert already
-// uses in index.ts ("a side write to a display-only table, not a trading
-// action").
+// uses in index.ts ("a side write to a display-only table, not a
+// trading action").
 export async function upsertMarketBars(supabase: SupabaseClient, rows: readonly MarketBarRow[]): Promise<void> {
   const byKey = new Map<string, MarketBarRow[]>()
   for (const row of rows) {

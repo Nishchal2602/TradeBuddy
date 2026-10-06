@@ -34,9 +34,29 @@ const FEEDS: { slug: string; name: string; url: string }[] = [
 // real-world phrasing ($ETH rallies, ETH/USD, Ether surged) before use.
 // "eth"/"ether" without \b would false-positive inside dozens of ordinary
 // English words.
-const ASSET_PATTERNS: Record<AssetSymbol, RegExp> = {
+//
+// SUI/AVAX added 2026-10-03 (plan ASSET-4) with the SAME discipline applied
+// deliberately narrowly:
+// - SUI: \bsui\b alone — "lawsuit"/"pursuit"/"the suite of products" all
+//   contain the literal substring "sui"; \b boundaries exclude them, but
+//   the ticker itself is still a 3-letter word with real collision risk
+//   (see rss-news.test.ts's adversarial fixtures).
+// - AVAX: \bavax\b ONLY — "avalanche" is deliberately excluded (explicit
+//   user decision). "an avalanche of liquidations" / "avalanche warning
+//   issued" are plausible real crypto-journalism and ordinary-English
+//   phrasing respectively; the ticker form is the only safe anchor.
+//   Trade-off accepted: articles writing only "Avalanche" (not "AVAX")
+//   go untagged.
+// Exported (2026-10-03, plan ASSET-4 item 7a) solely so the asset-universe
+// completeness test (src/shared/market-data/types.test.ts) can assert its
+// key set matches AssetSymbol.options without reaching into module
+// internals — no behavior change, still module-private in spirit (nothing
+// else imports this).
+export const ASSET_PATTERNS: Record<AssetSymbol, RegExp> = {
   BTC: /\b(bitcoin|btc)\b/i,
   ETH: /\b(ethereum|eth|ether)\b/i,
+  SUI: /\b(sui)\b/i,
+  AVAX: /\b(avax)\b/i,
 }
 
 function guessRelevantAssets(text: string): AssetSymbol[] {

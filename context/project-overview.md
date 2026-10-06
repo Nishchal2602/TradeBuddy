@@ -116,7 +116,7 @@ Each decision records:
 - Server-side agent loop using Supabase Edge Functions.
 - Supabase Postgres for application state and history.
 - Scheduled execution through Supabase cron.
-- BTC and ETH.
+- ~~BTC and ETH.~~ **Superseded 2026-10-03, plan ASSET-4 — widened to BTC, ETH, SUI, AVAX.** Explicit user instruction; see `CLAUDE.md`'s "Current V0" section (`V0 assets`) for the canonical current list and the reasoning (sizing/rotation/short-direction changes shipped alongside it). Not restated here.
 - Market data ingestion.
 - News ingestion.
 - Technical indicator calculation.

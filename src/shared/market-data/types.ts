@@ -3,8 +3,29 @@ import { z } from 'zod'
 // V0 asset universe (architecture.md, progress-tracker.md). Adding an asset
 // is a context-file change, not just a type change — keep this the single
 // place the union is spelled out.
-export const AssetSymbol = z.enum(['BTC', 'ETH'])
+// Widened 2026-10-03 (BTC/ETH -> BTC/ETH/SUI/AVAX, plan ASSET-4) on explicit
+// user instruction. CoinGecko ids verified live before the change:
+// SUI -> 'sui', AVAX -> 'avalanche-2' (NOT 'avalanche', which is a different
+// coin). Both clear every checkStrategyDataSufficiency gate with the same
+// data shape as BTC/ETH (180 4h candles, 121 daily, 48 30m bars, 289 5m).
+export const AssetSymbol = z.enum(['BTC', 'ETH', 'SUI', 'AVAX'])
 export type AssetSymbol = z.infer<typeof AssetSymbol>
+
+// The full universe as a runtime array — derived from the enum above, never
+// re-spelled. Exists specifically so a consumer that needs "every asset this
+// system knows about" (as opposed to agent_settings.assets, which is "every
+// asset currently enabled for trading") cannot drift from the enum.
+//
+// market-refresh/index.ts is the motivating case: it deliberately never reads
+// agent_settings, and previously carried its own `const ASSETS = ['BTC','ETH']`
+// literal. A short literal stays a valid AssetSymbol[] when the enum widens,
+// so the compiler could not catch that drift and that function has no test
+// file at all — quotes for a newly-added asset would simply never refresh.
+// Deriving it here makes that class of bug structurally impossible rather
+// than merely tested-for, and gives the universe-completeness test a
+// side-effect-free import (every edge function's index.ts has a top-level
+// Deno.serve, so none of them can be imported from a test).
+export const ALL_ASSETS: AssetSymbol[] = AssetSymbol.options
 
 // One true OHLC candle. `timestamp` is the candle's close time, UTC ISO 8601
 // — never a Date object, so this survives JSON round-trips (Postgres JSONB,

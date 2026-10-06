@@ -4,6 +4,7 @@ import {
   classifyRunInsertConflict,
   floorToIntervalIso,
   parseTrigger,
+  rotateAssetOrder,
   staleRunCutoffIso,
 } from './idempotency.ts'
 
@@ -93,6 +94,62 @@ Deno.test('parseTrigger: an empty object, null, undefined, and an unrecognized v
 
 Deno.test('staleRunCutoffIso: exactly 10 minutes before nowIso', () => {
   assertEquals(staleRunCutoffIso('2026-09-22T07:10:00.000Z'), '2026-09-22T07:00:00.000Z')
+})
+
+// --- rotateAssetOrder (2026-10-03, plan ASSET-4 §4b) ------------------------
+
+Deno.test('rotateAssetOrder: two instants in the same bucket produce the identical order', () => {
+  const assets = ['BTC', 'ETH', 'SUI', 'AVAX'] as const
+  const a = rotateAssetOrder(assets, '2026-10-03T06:05:00.000Z', 15)
+  const b = rotateAssetOrder(assets, '2026-10-03T06:14:59.999Z', 15)
+  assertEquals(a, b)
+})
+
+Deno.test('rotateAssetOrder: consecutive buckets advance the starting asset by exactly one', () => {
+  const assets = ['BTC', 'ETH', 'SUI', 'AVAX'] as const
+  // 2026-10-03T06:00:00.000Z is an exact 15-minute boundary, so these four
+  // timestamps land in four consecutive buckets.
+  const orders = [
+    rotateAssetOrder(assets, '2026-10-03T06:00:00.000Z', 15),
+    rotateAssetOrder(assets, '2026-10-03T06:15:00.000Z', 15),
+    rotateAssetOrder(assets, '2026-10-03T06:30:00.000Z', 15),
+    rotateAssetOrder(assets, '2026-10-03T06:45:00.000Z', 15),
+  ]
+  assertEquals(orders[0], ['BTC', 'ETH', 'SUI', 'AVAX'])
+  assertEquals(orders[1], ['ETH', 'SUI', 'AVAX', 'BTC'])
+  assertEquals(orders[2], ['SUI', 'AVAX', 'BTC', 'ETH'])
+  assertEquals(orders[3], ['AVAX', 'BTC', 'ETH', 'SUI'])
+})
+
+Deno.test('rotateAssetOrder: the full cycle wraps back to the original order after N buckets', () => {
+  const assets = ['BTC', 'ETH', 'SUI', 'AVAX'] as const
+  const start = rotateAssetOrder(assets, '2026-10-03T06:00:00.000Z', 15)
+  const afterFullCycle = rotateAssetOrder(assets, '2026-10-03T07:00:00.000Z', 15) // +4 buckets
+  assertEquals(start, afterFullCycle)
+})
+
+Deno.test('rotateAssetOrder: is a rotation, never a reorder — same elements, same relative cyclic order', () => {
+  const assets = ['BTC', 'ETH', 'SUI', 'AVAX'] as const
+  const rotated = rotateAssetOrder(assets, '2026-10-03T09:37:12.000Z', 15)
+  assertEquals([...rotated].sort(), [...assets].sort())
+  // Doubling the rotated array must contain the original sequence as a
+  // contiguous run — the defining property of a cyclic rotation.
+  const doubled = [...rotated, ...rotated]
+  const joined = doubled.join(',')
+  assertEquals(joined.includes(assets.join(',')), true)
+})
+
+Deno.test('rotateAssetOrder: a 2-asset universe (today\'s live BTC/ETH-only state) still rotates correctly', () => {
+  const assets = ['BTC', 'ETH'] as const
+  const a = rotateAssetOrder(assets, '2026-10-03T06:00:00.000Z', 15)
+  const b = rotateAssetOrder(assets, '2026-10-03T06:15:00.000Z', 15)
+  assertEquals(a, ['BTC', 'ETH'])
+  assertEquals(b, ['ETH', 'BTC'])
+})
+
+Deno.test('rotateAssetOrder: a single-asset or empty universe is returned unchanged (no rotation possible)', () => {
+  assertEquals(rotateAssetOrder(['BTC'], '2026-10-03T06:00:00.000Z', 15), ['BTC'])
+  assertEquals(rotateAssetOrder([], '2026-10-03T06:00:00.000Z', 15), [])
 })
 
 // --- classifyRunInsertConflict -----------------------------------------------

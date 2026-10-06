@@ -1,5 +1,7 @@
 # UI Context
 
+**Scope note (2026-10-04, WEB-1):** everything below this point, through § Icons, describes the Chrome extension's own design system only. A second, separate design system for the new web dashboard (a different app entirely — see `CLAUDE.md`'s "Current V0" additions) is defined in its own section at the end of this file, "Web Dashboard Design System." The two are deliberately different (most notably: the web dashboard uses glassmorphism, which § Visual Principles below explicitly tells the EXTENSION to avoid) and must never be conflated or merged — read the section that matches the app you're working on.
+
 ## Theme
 
 Dark only. The extension is a compact, technical trading workspace: near-black base, layered surfaces, restrained borders, dense information hierarchy, and high-contrast semantic states. It should feel analytical and serious rather than like a consumer finance app.
@@ -240,3 +242,90 @@ Use Lucide React.
 - Section icons: `h-5 w-5`
 
 Use icons as visual support, never as the only way to communicate meaning.
+
+## Web Dashboard Design System (2026-10-03, WEB-1)
+
+A second, separate UI — a desktop web dashboard at `src/web/` (its own Vite entry, `vite.web.config.ts`, builds to `dist-web/`) — alongside the Chrome extension, which this addition does not touch. Built because the extension (complete 2026-09-19) renders almost nothing shipped since: strategy profiles, the two R metrics, V4's six bias-gated arms, the three Jev advisory layers, occupied-asset shadow candidates, or the 4-asset universe. Scoped and verified in `/Users/nishchal/.claude/plans/pricing-and-model-selection-ethereal-fox.md`'s "WEB-1" section.
+
+**This is a deliberate, scoped departure from the extension's own § Visual Principles above — most notably glassmorphism, which that section explicitly tells the extension to avoid.** The extension's principles are unchanged and still govern the extension; this section is the complete, independent spec for the web dashboard only. User-supplied token list; typography, layout, and page content are this project's own design work on top of it.
+
+### Theme
+
+Dark only, single look (no light-mode toggle). Airy and editorial rather than dense/technical — the opposite density choice from the extension, deliberately: this is a desktop surface with real column width, not a 420px popup.
+
+### Tokens
+
+| Role | Variable | Value |
+|---|---|---|
+| Background | `--w-bg` | `#070A09` |
+| Raised surface (sidebar, table headers) | `--w-bg-raised` | `#0B0F0E` |
+| Glass tint | `--w-glass` | `rgba(46, 27, 69, 0.05)` (user-supplied: `#2E1B45` @ 5%) |
+| Glass tint, strong (row hover / active nav) | `--w-glass-strong` | `rgba(46, 27, 69, 0.09)` |
+| Text | `--w-text` | `#FAFAFA` |
+| Muted text | `--w-muted` | `#A3A9AD` |
+| Faint (chart axes, disabled) | `--w-faint` | `#4A5158` |
+| Border | `--w-border` | `#292F36` |
+| Border, soft (inner dividers) | `--w-border-soft` | `rgba(41, 47, 54, 0.55)` |
+| Accent / secondary | `--w-accent` | `#E0C709` |
+| Accent wash (behind active nav) | `--w-accent-dim` | `rgba(224, 199, 9, 0.14)` |
+| Positive P&L | `--w-pos` | `#6FBF8B` (desaturated to sit inside this palette) |
+| Negative P&L | `--w-neg` | `#D2726B` |
+| Font | `--font-web` | Manrope (`@fontsource-variable/manrope`) |
+
+`--w-pos`/`--w-neg` are the one addition beyond the user's supplied list (the mockups render P&L as plain text). Added under the extension's own still-applicable rule — "positive/negative colors are semantic state colors only, never decorative" — desaturated for this palette, used only on numeric P&L and status dots, never as a fill, always paired with an explicit `+`/`−` sign so color is never the sole signal.
+
+All tokens live in `src/web/styles/web-theme.css`, mapped via `@theme inline` the same way the extension's `theme.css` does — no separate Tailwind config file, same v4-via-plugin approach.
+
+**The two stylesheets are reciprocally scoped so neither's utilities leak into the other's bundle**: the extension's `theme.css` has `@source not "../web"`; the web stylesheet has `@import 'tailwindcss' source(none)` plus an explicit `@source '../**/*.{ts,tsx,html}'` (relative to the CSS file's OWN directory — `src/web/styles/`, not the Vite root; verified live, this is easy to get backwards and fails silently with an empty generated stylesheet, no error). Verified by hash-comparing the extension's `dist/` output with and without `src/web/` present — byte-identical.
+
+### Glass surface
+
+```css
+.glass {
+  background: var(--w-glass);
+  border: 1px solid var(--w-border);
+  border-radius: 14px;
+  backdrop-filter: blur(16px) saturate(130%);
+  box-shadow: inset 0 1px 0 rgba(202, 211, 217, 0.035);
+}
+```
+The inset top highlight is what makes a 5%-opacity tint read as a surface rather than a flat wash. `backdrop-filter` needs visual content behind it — a single fixed, very-low-opacity radial glow sits behind the page (`body::before`) for exactly this reason, and is the only decorative element in the system.
+
+### Typography — one family, eight roles
+
+Deliberately one family (Manrope), unlike the extension's three — this is an editorial surface where weight and size carry hierarchy, not a dense technical one needing a mono-for-numerics convention. Numeric alignment comes from `font-variant-numeric: tabular-nums` (the `.tabular` utility / baked into `.wt-stat`/`.wt-num`), not a font-feature string, so it doesn't depend on Manrope's own feature support.
+
+| Class | Size/line | Weight | Use |
+|---|---|---|---|
+| `.wt-display` | 34/40 | 300 | Page titles |
+| `.wt-stat` | 30/36 | 500 | Big stat values |
+| `.wt-title` | 19/26 | 500 | Card titles |
+| `.wt-body` | 14/22 | 400 | Prose |
+| `.wt-body-sm` | 13/20 | 400 | Table cells, descriptions |
+| `.wt-num` | 13/18 | 500 | Table numerics |
+| `.wt-label` | 10/14 | 600, +0.14em, uppercase | Breadcrumbs, stat labels, table headers |
+| `.wt-nav` / `.wt-nav-active` | 14/20 | 400 / 500 | Sidebar |
+
+### Layout
+
+Sidebar 232px fixed (`.glass-raised`, right border, nav items, the "Paper trading" glass callout, a static identity block at the bottom — no auth, nothing to sign into). Main column `px-12 py-10`, content capped at `max-w-[1120px]`. Page header is always breadcrumb → title → subtitle, with an optional right-aligned action (e.g. the Run Agent control). Stat rows are columns divided by a vertical rule (`divide-x`), not separate boxed tiles. Tables use real `<table>` columns — the extension's "popup is too narrow for tabular columns" constraint does not apply here.
+
+Accent (`--w-accent`) is used sparingly: active nav, the status strip's running dot, card eyebrow labels, the chart line/markers. Never a large fill or a button background on its own (buttons use the accent-dim wash + accent border + accent text, not a solid accent fill).
+
+### Pages
+
+Five: Overview (`#/`), Decisions (`#/decisions`, detail `#/decisions/:id`), Positions & Trades (`#/positions`), AI Judgment (`#/judgment`), Strategy & Settings (`#/strategy`). Routing is a ~50-line hand-rolled hash router (`src/web/router.tsx`) — matching this repo's existing minimalism (hand-rolled data hooks instead of react-query) rather than adding a routing library for five pages.
+
+Content decisions worth preserving, since they came from real data constraints rather than taste:
+
+- **No "Confidence" column anywhere**, unlike the mockups. Every deterministic proposal carries a constant `confidence: 1` (`architecture.md`'s own documented invariant) — a dashboard column for it would render a fake, unvarying 100%.
+- **Overview's P&L chart defaults to `realized_pnl_cum + unrealized_pnl`, not raw NAV.** NAV includes capital contributions (e.g. the 2026-10-03 +$10,000 injection) and would show a fake spike; the P&L series is immune to it. A toggle switches to NAV, with contribution markers — detected generically from the series itself (any single-tick cash jump ≥$500, not a hardcoded date), so a future contribution marks itself with zero code change.
+- **Decisions distinguishes a genuine "shadow candidate" (`decision_type='candidate' AND risk_status='rejected'`) from an ordinary flat-asset `candidate` row** (`decision_type='candidate'`, any other `risk_status`) — found live while building this page: the first version mislabeled every routine flat-asset HOLD as a "shadow candidate" using `decision_type` alone. `src/web/data/display.ts`'s `isShadowCandidate()` is the one place this check lives.
+- **`model_version` renders as its own badge** (`modelCallLabel()` in `display.ts`) distinguishing a real call (`jev-1.13.0`) from `call-failed` (outage) from `not-called` (disabled/no candidate) — the same disambiguation `CLAUDE.md` names as a standing invariant for any analysis of model behavior.
+- **AI Judgment leads with its own sample size** (`NDisclosure` — this system's thinnest data, n=2 for the full advisory layer set at build time) and never computes a composite score across the three Jev layers — matching the project's own explicit refusal to invent that policy in code.
+- **`price_r` and `position_pnl_r` render as two separate labelled fields everywhere**, never collapsed into one "R" (`CLAUDE.md`: "after an ADD at a worse price they can disagree").
+- Three-column risk-control table on Strategy & Settings (profile value / settings ceiling / effective `min()`) rather than one number — this project had a real multi-week bug where those three silently diverged.
+
+### Reuse
+
+`src/supabase.ts`, `src/format.ts`, `src/features/decisions/display.ts`'s label maps (re-exported, not duplicated), `src/features/home/run-agent.ts`'s `invokeAgentCycle()`, `src/hooks/use-now.ts`, and every `src/shared/**` type are reused unmodified. `src/components/ui/*` (the extension's own primitives) are NOT reused — they hardcode the extension's token class names; the web app has its own primitives in `src/web/ui/`.

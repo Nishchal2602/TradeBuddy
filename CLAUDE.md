@@ -177,6 +177,8 @@ Do not turn the extension into a generic chat UI.
 
 Use the tokens and patterns in `context/ui-context.md`.
 
+**A second, separate web dashboard exists (`src/web/`, WEB-1, 2026-10-03)** — its own Vite entry (`vite.web.config.ts`), its own design system (glassmorphism, Manrope, a different token set — `context/ui-context.md`'s "Web Dashboard Design System" section), builds to `dist-web/`. It is read-only against the same Supabase project plus one control action (`invokeAgentCycle()`, reused unchanged from the extension). The rules above still govern the extension; do not apply the web dashboard's visual language to the extension or vice versa. Verified to have zero effect on the extension's own build output (byte-identical `dist/` with and without `src/web/` present).
+
 ## Verification
 
 Before marking a unit complete:
@@ -226,6 +228,16 @@ V0 assets:
 
 - BTC
 - ETH
+- SUI
+- AVAX
+
+**Widened from BTC/ETH 2026-10-03 (plan ASSET-4), explicit user instruction: "instead of only BTC and ETH we now have BTC, ETH, SUI, AVAX... everything stays exactly the same but now the model decides on 4 coins instead of two."** `src/shared/market-data/types.ts`'s `AssetSymbol` enum is the single source of truth — every other consumer (`COIN_ID`, `ASSET_PATTERNS`, `market-refresh`'s `ALL_ASSETS`) is either compiler-forced to stay complete (`Record<AssetSymbol, …>`) or pinned by `asset-universe.test.ts`. Three changes shipped in the same commit because the portfolio-wide notional cap was already exactly saturated at 2 positions (verified live: NAV $10,006.28, BTC 30.0%, ETH 29.9% against a 60% ceiling) — "everything stays the same" was true of the code but not of the resulting behavior without them:
+
+- `intraday_ls.risk.maxSingleTradePct`: 0.30 → 0.15 (`src/shared/strategy/profiles.ts`), so 4 positions fit the same 60% notional ceiling instead of 2.
+- Deterministic per-asset rotation (`cycle/idempotency.ts`'s `rotateAssetOrder`) — removes `agent_settings.assets`' array order as a silent standing allocation preference once a cap binds with more candidates than slots.
+- The `aggregateOtherOpenPositionsRisk` short-side fix (`cycle/build-context.ts`) — a latent long-only bug (`otherSameDirectionNotionalUsd` hardcoded `p.direction === 'long'`) made reachable by the 3rd/4th slot; fixed now rather than deferred, per explicit user decision.
+
+CoinGecko coin ids: `SUI → 'sui'`, `AVAX → 'avalanche-2'` (NOT `'avalanche'` — a different, unrelated coin). RSS asset-tagging for AVAX matches only the `avax` ticker form, deliberately excluding `avalanche` (ordinary English / plausible crypto-journalism false-positive risk) — see `providers/rss-news.ts`'s own comment. CoinGecko/Jev cost scaling from the wider universe was explicitly accepted as out of scope for this change (user instruction) — see the ASSET-4 plan's "Operational constraint: CoinGecko quota" section for the resulting ~78,900 req/month estimate and its consequences for `position-monitor`'s protection coverage.
 
 V0 cadence:
 

@@ -3,6 +3,7 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import { fetchLatestQuotes } from '../agent-cycle/providers/coingecko.ts'
 import { toQuoteRow, toRefreshErrorRows } from '../agent-cycle/db/quote-rows.ts'
 import type { AssetSymbol } from '../../../src/shared/market-data/types.ts'
+import { ALL_ASSETS } from '../../../src/shared/market-data/types.ts'
 
 // A third, deliberately trade-incapable Edge Function ("market_quotes
 // plan", 2026-09-21) — its only job is keeping market_quotes fresh
@@ -21,7 +22,15 @@ import type { AssetSymbol } from '../../../src/shared/market-data/types.ts'
 // here to duplicate. Deliberately simpler than agent-cycle/
 // position-monitor for exactly this reason, not an oversight.
 
-const ASSETS: AssetSymbol[] = ['BTC', 'ETH']
+// Derived from the enum (src/shared/market-data/types.ts), never
+// independently spelled out — this file deliberately never reads
+// agent_settings (see this module's own comment above), so ALL_ASSETS is
+// what "every asset this system knows about" actually means here. A
+// hand-maintained literal here was the exact silent-drift risk found
+// 2026-10-03 (plan ASSET-4): a 2-element array stays a valid AssetSymbol[]
+// after the enum widens, so the compiler could not have caught it, and
+// this function has no test file to catch it either.
+const ASSETS: AssetSymbol[] = ALL_ASSETS
 
 export interface RefreshSummary {
   status: 'refreshed' | 'failed'

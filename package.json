@@ -6,15 +6,19 @@
   "description": "Autonomous crypto paper-trading agent — Chrome extension UI over a Supabase-hosted agent loop.",
   "scripts": {
     "dev": "vite",
+    "dev:web": "vite --config vite.web.config.ts",
     "typecheck": "tsc -b",
     "build": "tsc -b && vite build && node scripts/copy-extension-assets.mjs",
+    "build:web": "tsc -b && vite build --config vite.web.config.ts",
     "lint": "oxlint",
     "preview": "vite preview",
+    "preview:web": "vite preview --config vite.web.config.ts",
     "supabase": "supabase"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.3.0",
     "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "@fontsource-variable/manrope": "^5.3.0",
     "@fontsource-variable/space-grotesk": "^5.3.0",
     "@supabase/supabase-js": "^2.58.0",
     "class-variance-authority": "^0.7.1",

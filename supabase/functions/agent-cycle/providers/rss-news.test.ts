@@ -219,6 +219,62 @@ Deno.test('getRecentNews: items irrelevant to any requested asset are dropped en
   assertEquals(result, [])
 })
 
+// --- SUI/AVAX false-positive guards (2026-10-03, plan ASSET-4 item 7b) ----
+//
+// Both new tickers are short tokens that collide with ordinary English or
+// other crypto-journalism phrasing — the same false-positive discipline
+// documented for eth/ether (ASSET_PATTERNS's own comment) needed real
+// evidence for these two, not just intent. One item per case, checked
+// against BOTH requested assets so a false positive shows up as a
+// non-empty `assets` array rather than merely as "wasn't dropped".
+
+Deno.test('getRecentNews: "an avalanche of liquidations" is NOT tagged AVAX — the exact phrase the pattern was narrowed to exclude', async () => {
+  const xml = rssXml([{ title: 'An avalanche of liquidations hit the market overnight', link: 'https://a.example/1', guid: 'a1', pubDate: hoursAgo(1) }])
+  const provider = new RssNewsProvider(mockFetch({ [FEED_A.url]: () => textResponse(xml) }) as unknown as typeof fetch, [FEED_A])
+  const result = await provider.getRecentNews(['SUI', 'AVAX'], 180)
+  assertEquals(result, [])
+})
+
+Deno.test('getRecentNews: "Avalanche warning issued for the Alps" is NOT tagged AVAX — ordinary-English usage', async () => {
+  const xml = rssXml([{ title: 'Avalanche warning issued for the Alps this weekend', link: 'https://a.example/1', guid: 'a1', pubDate: hoursAgo(1) }])
+  const provider = new RssNewsProvider(mockFetch({ [FEED_A.url]: () => textResponse(xml) }) as unknown as typeof fetch, [FEED_A])
+  const result = await provider.getRecentNews(['SUI', 'AVAX'], 180)
+  assertEquals(result, [])
+})
+
+Deno.test('getRecentNews: "AVAX rallies 12% after upgrade" IS tagged AVAX — positive control, the pattern must still do its job', async () => {
+  const xml = rssXml([{ title: 'AVAX rallies 12% after network upgrade', link: 'https://a.example/1', guid: 'a1', pubDate: hoursAgo(1) }])
+  const provider = new RssNewsProvider(mockFetch({ [FEED_A.url]: () => textResponse(xml) }) as unknown as typeof fetch, [FEED_A])
+  const result = await provider.getRecentNews(['SUI', 'AVAX'], 180)
+  assertEquals(result.length, 1)
+  assertEquals(result[0]!.assets, ['AVAX'])
+})
+
+Deno.test('getRecentNews: "SEC lawsuit against exchange proceeds" is NOT tagged SUI — "lawsuit" contains the literal substring "sui"', async () => {
+  const xml = rssXml([{ title: 'SEC lawsuit against major exchange proceeds to trial', link: 'https://a.example/1', guid: 'a1', pubDate: hoursAgo(1) }])
+  const provider = new RssNewsProvider(mockFetch({ [FEED_A.url]: () => textResponse(xml) }) as unknown as typeof fetch, [FEED_A])
+  const result = await provider.getRecentNews(['SUI', 'AVAX'], 180)
+  assertEquals(result, [])
+})
+
+Deno.test('getRecentNews: "pursuit of regulatory clarity" and "the suite of products" are NOT tagged SUI — same substring class, different shapes', async () => {
+  const xml = rssXml([
+    { title: 'Regulators continue their pursuit of regulatory clarity', link: 'https://a.example/1', guid: 'a1', pubDate: hoursAgo(1) },
+    { title: 'Exchange launches the suite of products for institutions', link: 'https://a.example/2', guid: 'a2', pubDate: hoursAgo(1) },
+  ])
+  const provider = new RssNewsProvider(mockFetch({ [FEED_A.url]: () => textResponse(xml) }) as unknown as typeof fetch, [FEED_A])
+  const result = await provider.getRecentNews(['SUI', 'AVAX'], 180)
+  assertEquals(result, [])
+})
+
+Deno.test('getRecentNews: "SUI network activity climbs" IS tagged SUI — positive control', async () => {
+  const xml = rssXml([{ title: 'SUI network activity climbs to new highs', link: 'https://a.example/1', guid: 'a1', pubDate: hoursAgo(1) }])
+  const provider = new RssNewsProvider(mockFetch({ [FEED_A.url]: () => textResponse(xml) }) as unknown as typeof fetch, [FEED_A])
+  const result = await provider.getRecentNews(['SUI', 'AVAX'], 180)
+  assertEquals(result.length, 1)
+  assertEquals(result[0]!.assets, ['SUI'])
+})
+
 Deno.test('getRecentNews: HTML description is stripped to plain text', async () => {
   const xml = rssXml([{
     title: 'Bitcoin news with rich description',

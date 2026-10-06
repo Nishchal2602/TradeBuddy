@@ -17,6 +17,8 @@
 // are running at the same instant; see the migration's own comment for
 // why open_position_atomic specifically depends on (b) actually holding.
 
+import type { AssetSymbol } from '../../../../src/shared/market-data/types.ts'
+
 export type CycleTrigger = 'manual' | 'scheduled'
 
 // supabase-js's `invoke('agent-cycle')` with no options sends no body at
@@ -50,6 +52,34 @@ export function floorToIntervalIso(nowIso: string, intervalMinutes: number): str
 export function buildDecisionIdempotencyKey(trigger: CycleTrigger, nowIso: string, decisionIntervalMinutes: number): string {
   if (trigger === 'manual') return `decision-manual-${nowIso}`
   return `decision-${floorToIntervalIso(nowIso, decisionIntervalMinutes)}`
+}
+
+// Deterministic per-asset iteration order for one decision cycle
+// (2026-10-03, plan ASSET-4) — rotates which asset is sized FIRST each
+// cycle, so that whenever a portfolio-wide cap binds (total_notional,
+// portfolio_risk, cash — see sizing.ts), the same asset doesn't win every
+// contested cycle merely by sitting first in agent_settings.assets.
+// Invisible at 2 assets/2 slots; a real, previously-undocumented
+// allocation policy the moment more candidates can exist than slots.
+//
+// A function of the SAME floored bucket buildDecisionIdempotencyKey
+// already uses, not of real time or randomness: a retried/duplicate tick
+// for an identical bucket must produce an identical order, or rotation
+// itself becomes a source of non-determinism in a system whose cycles
+// are meant to be idempotent (invariant 10).
+//
+// Deliberately NOT ordered by any notion of signal strength: this
+// system's detectors are binary/edge-triggered with no "how good is this
+// candidate" scalar to rank by, and inventing one here would be
+// undeclared strategy policy. Rotation is the neutral choice — it makes
+// allocation fair OVER TIME without claiming any one candidate is
+// better than another.
+export function rotateAssetOrder(assets: readonly AssetSymbol[], nowIso: string, decisionIntervalMinutes: number): AssetSymbol[] {
+  if (assets.length <= 1) return [...assets]
+  const bucketMs = new Date(floorToIntervalIso(nowIso, decisionIntervalMinutes)).getTime()
+  const bucketIndex = Math.floor(bucketMs / (decisionIntervalMinutes * 60_000))
+  const offset = ((bucketIndex % assets.length) + assets.length) % assets.length
+  return [...assets.slice(offset), ...assets.slice(0, offset)]
 }
 
 // A 'running' decision row older than this is certainly dead — an Edge

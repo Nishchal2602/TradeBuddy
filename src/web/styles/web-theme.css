@@ -1,0 +1,187 @@
+/*
+ * Web dashboard design tokens — see context/ui-context.md
+ * "Web Dashboard Design System (2026-10-03)". A deliberate, scoped
+ * departure from the extension's token set and visual principles (most
+ * notably glassmorphism, which ui-context.md's original § Visual
+ * Principles explicitly told the extension to avoid) — documented there
+ * as a decision, not smuggled in here.
+ *
+ * `source(none)` + the explicit @source lines below are the reciprocal
+ * half of src/styles/theme.css's `@source not "../web"` — neither
+ * stylesheet's generated utilities may leak into the other's bundle, even
+ * though both are Tailwind v4 with zero config file. If source(none)
+ * ever behaves unexpectedly on a future Tailwind version, the fallback is
+ * plain auto-detection plus explicit `@source not` lines excluding
+ * ../popup, ../components, ../features — the exclusion direction is the
+ * load-bearing half and is independently sufficient either way.
+ */
+
+@import 'tailwindcss' source(none);
+/* Relative to THIS FILE's own directory (src/web/styles/), not the Vite
+   root — Tailwind v4 resolves @source paths against the stylesheet's own
+   location. '../' steps back up to src/web/ so everything under it
+   (pages/, ui/, shell/, data/, index.html) is scanned. Getting this
+   wrong silently produces an empty @layer utilities with no error at
+   all — verified live (2026-10-04) after the first build rendered with
+   zero generated utility classes. */
+@source '../**/*.{ts,tsx,html}';
+
+@import '@fontsource-variable/manrope';
+
+:root {
+  /* Surfaces */
+  --w-bg: #070a09;
+  --w-bg-raised: #0b0f0e; /* sidebar + table header lift */
+  --w-glass: rgba(46, 27, 69, 0.05); /* user-supplied: #2E1B45 @ 5% */
+  --w-glass-strong: rgba(46, 27, 69, 0.09); /* row hover / active nav */
+
+  /* Text */
+  --w-text: #fafafa;
+  --w-muted: #a3a9ad;
+  --w-faint: #4a5158; /* chart axes, disabled */
+
+  /* Borders */
+  --w-border: #292f36;
+  --w-border-soft: rgba(41, 47, 54, 0.55); /* inner dividers */
+
+  /* Accent */
+  --w-accent: #e0c709;
+  --w-accent-dim: rgba(224, 199, 9, 0.14); /* wash behind active nav */
+
+  /* Semantic P&L — desaturated to sit inside this palette, used only on
+     numeric P&L and status dots, never as a fill. Always paired with an
+     explicit +/- sign (ui-context.md's "color is never the sole signal"
+     rule, carried over from the extension's own palette discipline). */
+  --w-pos: #6fbf8b;
+  --w-neg: #d2726b;
+
+  --font-web: 'Manrope Variable', 'Manrope', ui-sans-serif, system-ui, sans-serif;
+}
+
+@theme inline {
+  --color-w-bg: var(--w-bg);
+  --color-w-bg-raised: var(--w-bg-raised);
+  --color-w-glass: var(--w-glass);
+  --color-w-glass-strong: var(--w-glass-strong);
+
+  --color-w-text: var(--w-text);
+  --color-w-muted: var(--w-muted);
+  --color-w-faint: var(--w-faint);
+
+  --color-w-border: var(--w-border);
+  --color-w-border-soft: var(--w-border-soft);
+
+  --color-w-accent: var(--w-accent);
+  --color-w-accent-dim: var(--w-accent-dim);
+
+  --color-w-pos: var(--w-pos);
+  --color-w-neg: var(--w-neg);
+
+  --font-web: var(--font-web);
+}
+
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: var(--w-bg);
+    color: var(--w-text);
+    font-family: var(--font-web);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* The single decorative element in the system — a fixed, very low-
+     opacity glow that gives the glass surfaces' backdrop-filter something
+     to actually blur. Without it the 5% tint reads as flat, not glass. */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background: radial-gradient(
+      1200px 800px at 15% -10%,
+      rgba(46, 27, 69, 0.22),
+      transparent 60%
+    );
+  }
+}
+
+@layer components {
+  .glass {
+    background: var(--w-glass);
+    border: 1px solid var(--w-border);
+    border-radius: 14px;
+    backdrop-filter: blur(16px) saturate(130%);
+    box-shadow: inset 0 1px 0 rgba(202, 211, 217, 0.035);
+  }
+
+  .glass-raised {
+    background: var(--w-bg-raised);
+    border: 1px solid var(--w-border);
+  }
+
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Type scale — one family, eight roles (WEB-1 plan). Deliberately NOT
+     mono-for-numerics the way the extension does: this is one editorial
+     typeface carrying hierarchy through weight/size, and numeric
+     alignment comes from font-variant-numeric instead of a feature
+     string, so it works regardless of Manrope's own feature support. */
+  .wt-display {
+    font-size: 34px;
+    line-height: 40px;
+    font-weight: 300;
+    letter-spacing: -0.02em;
+  }
+  .wt-stat {
+    font-size: 30px;
+    line-height: 36px;
+    font-weight: 500;
+    letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
+  }
+  .wt-title {
+    font-size: 19px;
+    line-height: 26px;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+  }
+  .wt-body {
+    font-size: 14px;
+    line-height: 22px;
+    font-weight: 400;
+  }
+  .wt-body-sm {
+    font-size: 13px;
+    line-height: 20px;
+    font-weight: 400;
+  }
+  .wt-num {
+    font-size: 13px;
+    line-height: 18px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+  .wt-label {
+    font-size: 10px;
+    line-height: 14px;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+  .wt-nav {
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 400;
+  }
+  .wt-nav-active {
+    font-size: 14px;
+    line-height: 20px;
+    font-weight: 500;
+  }
+}

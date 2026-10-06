@@ -15,6 +15,16 @@
 
 @import 'tailwindcss';
 
+/* Tailwind v4 auto-detects source files with no config file involved — so
+   without this, the web dashboard's own class usage (src/web/**, a
+   completely separate token set, WEB-1 plan) would get pulled into THIS
+   stylesheet's generated utilities too, changing the extension's CSS
+   output. This is the one and only edit this app makes to any existing
+   extension file; src/web/styles/web-theme.css carries the reciprocal
+   exclusion. Verified by hash-comparing dist/ before and after the web
+   app's introduction (WEB-1 plan, Verification step 1). */
+@source not "../web";
+
 /* Vendored variable fonts — MV3's default CSP blocks the Google Fonts CDN
    the reference designs load from, so these are bundled from the
    extension's own origin instead. Importing from CSS puts them in Vite's

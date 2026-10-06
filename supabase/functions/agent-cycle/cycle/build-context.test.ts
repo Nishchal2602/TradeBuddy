@@ -282,36 +282,87 @@ Deno.test('buildRiskGateContext: threads every trading-strategy-v1.md §17 portf
 
 Deno.test('aggregateOtherOpenPositionsRisk: excludes the candidate asset itself', () => {
   const btc = position({ asset: 'BTC', quantity: 1, entryPrice: 100, stopLossPrice: 95 })
-  const result = aggregateOtherOpenPositionsRisk([btc], 'BTC', new Map())
+  const result = aggregateOtherOpenPositionsRisk([btc], 'BTC', new Map(), 'long')
   assertEquals(result, { otherOpenPositionsRiskAtStopUsd: 0, otherSameDirectionNotionalUsd: 0 })
 })
 
 Deno.test('aggregateOtherOpenPositionsRisk: risk-at-stop is quantity x the stop distance from entry, not notional x a re-derived pct', () => {
   const eth = position({ asset: 'ETH', quantity: 2, entryPrice: 3_000, stopLossPrice: 2_940 }) // 2 x 60 = 120
-  const result = aggregateOtherOpenPositionsRisk([eth], 'BTC', new Map([['ETH', 3_050]]))
+  const result = aggregateOtherOpenPositionsRisk([eth], 'BTC', new Map([['ETH', 3_050]]), 'long')
   assertAlmostEquals(result.otherOpenPositionsRiskAtStopUsd, 120, 1e-9)
 })
 
 Deno.test('aggregateOtherOpenPositionsRisk: same-direction notional values at the LIVE price, not entry price', () => {
   const eth = position({ asset: 'ETH', direction: 'long', quantity: 2, entryPrice: 3_000, stopLossPrice: 2_940 })
-  const result = aggregateOtherOpenPositionsRisk([eth], 'BTC', new Map([['ETH', 3_100]]))
+  const result = aggregateOtherOpenPositionsRisk([eth], 'BTC', new Map([['ETH', 3_100]]), 'long')
   assertAlmostEquals(result.otherSameDirectionNotionalUsd, 6_200, 1e-9) // 2 x 3100, not 2 x 3000
 })
 
 Deno.test('aggregateOtherOpenPositionsRisk: falls back to entryPrice when the asset is missing from latestPriceByAsset', () => {
   const eth = position({ asset: 'ETH', direction: 'long', quantity: 2, entryPrice: 3_000, stopLossPrice: 2_940 })
-  const result = aggregateOtherOpenPositionsRisk([eth], 'BTC', new Map())
+  const result = aggregateOtherOpenPositionsRisk([eth], 'BTC', new Map(), 'long')
   assertAlmostEquals(result.otherSameDirectionNotionalUsd, 6_000, 1e-9) // 2 x 3000 (entryPrice fallback)
 })
 
-Deno.test('aggregateOtherOpenPositionsRisk: a short position counts toward risk-at-stop but NOT same-direction notional (V1 is long-only)', () => {
-  const legacyShort = position({ asset: 'ETH', direction: 'short', quantity: 1, entryPrice: 3_000, stopLossPrice: 3_060 })
-  const result = aggregateOtherOpenPositionsRisk([legacyShort], 'BTC', new Map([['ETH', 3_000]]))
+Deno.test('aggregateOtherOpenPositionsRisk: no other open positions -> both aggregates zero', () => {
+  const result = aggregateOtherOpenPositionsRisk([], 'BTC', new Map(), 'long')
+  assertEquals(result, { otherOpenPositionsRiskAtStopUsd: 0, otherSameDirectionNotionalUsd: 0 })
+})
+
+// --- aggregateOtherOpenPositionsRisk: bidirectional invariant (plan
+// ASSET-4 item 5, 2026-10-03) ------------------------------------------
+//
+// Rewritten, not extended, from the old single test asserting the
+// opposite ("a short position counts toward risk-at-stop but NOT
+// same-direction notional (V1 is long-only)") — that assertion encoded
+// the bug this fix removes and would now be actively wrong. The
+// invariant going forward, pinned as a 2x2 matrix plus one mixed case:
+//
+//   otherOpenPositionsRiskAtStopUsd  — counts EVERY other open position,
+//                                      regardless of direction (unchanged)
+//   otherSameDirectionNotionalUsd    — counts ONLY positions whose
+//                                      direction matches candidateDirection
+
+Deno.test('aggregateOtherOpenPositionsRisk: candidate long, other position long -> counted toward same-direction notional', () => {
+  const eth = position({ asset: 'ETH', direction: 'long', quantity: 2, entryPrice: 3_000, stopLossPrice: 2_940 })
+  const result = aggregateOtherOpenPositionsRisk([eth], 'BTC', new Map([['ETH', 3_000]]), 'long')
+  assertAlmostEquals(result.otherOpenPositionsRiskAtStopUsd, 120, 1e-9)
+  assertAlmostEquals(result.otherSameDirectionNotionalUsd, 6_000, 1e-9)
+})
+
+Deno.test('aggregateOtherOpenPositionsRisk: candidate long, other position short -> risk-at-stop counted, same-direction notional 0', () => {
+  const eth = position({ asset: 'ETH', direction: 'short', quantity: 1, entryPrice: 3_000, stopLossPrice: 3_060 })
+  const result = aggregateOtherOpenPositionsRisk([eth], 'BTC', new Map([['ETH', 3_000]]), 'long')
   assertAlmostEquals(result.otherOpenPositionsRiskAtStopUsd, 60, 1e-9)
   assertEquals(result.otherSameDirectionNotionalUsd, 0)
 })
 
-Deno.test('aggregateOtherOpenPositionsRisk: no other open positions -> both aggregates zero', () => {
-  const result = aggregateOtherOpenPositionsRisk([], 'BTC', new Map())
-  assertEquals(result, { otherOpenPositionsRiskAtStopUsd: 0, otherSameDirectionNotionalUsd: 0 })
+Deno.test('aggregateOtherOpenPositionsRisk: candidate short, other position short -> counted toward same-direction notional (THE bug this fix closes)', () => {
+  const eth = position({ asset: 'ETH', direction: 'short', quantity: 1, entryPrice: 3_000, stopLossPrice: 3_060 })
+  const result = aggregateOtherOpenPositionsRisk([eth], 'BTC', new Map([['ETH', 3_000]]), 'short')
+  assertAlmostEquals(result.otherOpenPositionsRiskAtStopUsd, 60, 1e-9)
+  // Old (buggy) code hardcoded `p.direction === 'long'`, so this always
+  // came back 0 regardless of candidateDirection — the live consequence
+  // was that the short-side total_notional cap could never bind.
+  assertAlmostEquals(result.otherSameDirectionNotionalUsd, 3_000, 1e-9) // 1 x 3000
+})
+
+Deno.test('aggregateOtherOpenPositionsRisk: candidate short, other position long -> risk-at-stop counted, same-direction notional 0', () => {
+  const eth = position({ asset: 'ETH', direction: 'long', quantity: 2, entryPrice: 3_000, stopLossPrice: 2_940 })
+  const result = aggregateOtherOpenPositionsRisk([eth], 'BTC', new Map([['ETH', 3_000]]), 'short')
+  assertAlmostEquals(result.otherOpenPositionsRiskAtStopUsd, 120, 1e-9)
+  assertEquals(result.otherSameDirectionNotionalUsd, 0)
+})
+
+Deno.test('aggregateOtherOpenPositionsRisk: mixed portfolio — candidate long, others [long, short] -> only the long counts toward notional, BOTH count toward risk-at-stop', () => {
+  const ethLong = position({ asset: 'ETH', direction: 'long', quantity: 2, entryPrice: 3_000, stopLossPrice: 2_940 }) // risk 120, notional 6000
+  const suiShort = position({ asset: 'SUI', direction: 'short', quantity: 100, entryPrice: 2, stopLossPrice: 2.1 }) // risk 10, notional 0 (wrong direction)
+  const result = aggregateOtherOpenPositionsRisk(
+    [ethLong, suiShort],
+    'BTC',
+    new Map([['ETH', 3_000], ['SUI', 2]]),
+    'long',
+  )
+  assertAlmostEquals(result.otherOpenPositionsRiskAtStopUsd, 130, 1e-9) // 120 + 10, direction-agnostic
+  assertAlmostEquals(result.otherSameDirectionNotionalUsd, 6_000, 1e-9) // ETH's long notional only
 })

@@ -169,7 +169,27 @@ export const STRATEGY_PROFILES: Record<StrategyProfile, StrategyDefinition> = {
     maxDataStalenessMinutes: 10,
     risk: {
       riskBudgetPct: 0.005,
-      maxSingleTradePct: 0.30,
+      // 0.30 -> 0.15 (2026-10-03, plan ASSET-4, explicit user instruction:
+      // 4-asset universe, same aggregate risk). At the 1.2% stop floor,
+      // live-verified before this change: NAV $10,006.28, BTC $3,001.54
+      // (30.0%), ETH $2,996.45 (29.9%) — the OLD 30% cap was already
+      // exactly saturated at 2 positions (maxTotalNotionalPct 0.60 / 0.30
+      // = 2). Without this change, a 3rd/4th asset's candidate would be
+      // REJECTED outright ("no room to open... by the total_notional
+      // cap"), not shrunk, and BTC/ETH would win every contested cycle by
+      // agent_settings.assets array order (see the asset-rotation fix
+      // below). At 0.15: 4 x 15% = 60% notional (same ceiling), 4 x
+      // (15% x 1.2%) = 0.72% of NAV against the SAME 0.75%
+      // portfolioRiskCeilingUsd — same gross stop-risk envelope at the
+      // floor, now spread across 4 assets instead of 2. This is NOT a
+      // variance-equivalent claim: the 4 assets are correlated (mean
+      // pairwise daily-return rho = 0.622, live-measured 2026-10-03 —
+      // see progress-tracker.md), so the four stops are not independent
+      // draws, and cost drag doubles (4 round trips vs 2). Only valid AT
+      // the 1.2% floor — at wider ATR-driven stops the binding cap
+      // changes and positions 3-4 get clamped below 15% rather than
+      // filling at it.
+      maxSingleTradePct: 0.15,
       maxTotalNotionalPct: 0.60,
       stopOutReentryBlockMinutes: 60,
     },

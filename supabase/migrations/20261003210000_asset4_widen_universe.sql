@@ -1,0 +1,28 @@
+-- ============================================================================
+-- ASSET-4: widen the traded universe from BTC/ETH to BTC/ETH/SUI/AVAX
+-- (2026-10-03), explicit user instruction: "instead of only BTC and ETH we
+-- now have BTC, ETH, SUI, AVAX... everything stays exactly the same but
+-- now the model decides on 4 coins instead of two."
+--
+-- No schema change at all: agent_settings.assets is plain text[] with only
+-- a non-empty CHECK (agent_settings_assets_nonempty, initial schema) — no
+-- CHECK constraint, RPC branch, or index anywhere enumerates the asset
+-- set. This is a pure data update. The actual single source of truth for
+-- "which assets this system knows about" is the AssetSymbol enum
+-- (src/shared/market-data/types.ts), widened in the same commit as this
+-- migration — see that file's own comment and ALL_ASSETS constant.
+--
+-- Shipped as a migration file purely for provenance (every prior config
+-- change in this project — strategy profile, cadence, risk policy — has
+-- gone through a migration even when no schema object changed), not
+-- because the database enforces anything about asset membership.
+--
+-- Position sizing (intraday_ls.risk.maxSingleTradePct: 0.30 -> 0.15,
+-- src/shared/strategy/profiles.ts), the asset-rotation fix (cycle/
+-- idempotency.ts's rotateAssetOrder), and the short-side total_notional
+-- fix (cycle/build-context.ts's aggregateOtherOpenPositionsRisk) all ship
+-- in the same commit as this migration — see the ASSET-4 plan section for
+-- the full reasoning behind each.
+-- ============================================================================
+
+update agent_settings set assets = array['BTC', 'ETH', 'SUI', 'AVAX'];
