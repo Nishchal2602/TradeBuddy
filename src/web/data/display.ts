@@ -1,5 +1,6 @@
 import type { Action, RiskStatus } from '@/shared/decisions/types.ts'
 import type { CloseReason } from '@/shared/positions/types.ts'
+import type { ExperimentStatus } from '@/shared/experiments/types.ts'
 import { ACTION_LABEL, RISK_STATUS_LABEL, CLOSE_REASON_LABEL } from '@/features/decisions/display'
 import type { BadgeVariant } from '../ui/badge'
 
@@ -57,4 +58,33 @@ export function modelCallLabel(modelVersion: string): { label: string; variant: 
   if (modelVersion === 'not-called') return { label: 'No model call', variant: 'muted' }
   if (modelVersion === 'call-failed') return { label: 'Call failed', variant: 'neg' }
   return { label: modelVersion, variant: 'neutral' }
+}
+
+// WEB-2 (2026-10-08) — Experiments section additions.
+export const EXPERIMENT_STATUS_VARIANT: Record<ExperimentStatus, BadgeVariant> = {
+  draft: 'muted',
+  running: 'accent',
+  completed: 'pos',
+  abandoned: 'neg',
+}
+
+export const EXPERIMENT_STATUS_LABEL: Record<ExperimentStatus, string> = {
+  draft: 'Draft',
+  running: 'Running',
+  completed: 'Completed',
+  abandoned: 'Abandoned',
+}
+
+// All 8 values confirmed verbatim from the real CHECK constraint
+// (agent_decisions_no_candidate_reason_valid, migrations
+// 20261006140000/20261006150000) — not guessed.
+export const NO_CANDIDATE_REASON_LABEL: Record<string, string> = {
+  data_insufficient: 'Insufficient data',
+  regime_null: 'Regime undetermined',
+  no_arm_triggered: 'No arm triggered',
+  cost_gate: 'Cost gate',
+  opportunity_consumed: 'Opportunity already consumed',
+  arm_disabled: 'Arm disabled',
+  direction_disabled: 'Direction disabled',
+  signal_stale: 'Signal drift (stale)',
 }

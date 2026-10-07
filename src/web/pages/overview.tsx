@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useCallback, useState } from 'react'
 import { useNow } from '@/hooks/use-now'
 import { formatUsd, formatAgo } from '@/format'
 import { PageHeader } from '../shell/page-header'
@@ -12,11 +12,12 @@ import { Badge } from '../ui/badge'
 import { usePoll } from '../data/use-poll'
 import { loadOverviewData, type OpenPositionRow, type RecentDecisionRow } from '../data/overview'
 import { ACTION_LABEL, ACTION_VARIANT, RISK_STATUS_LABEL, RISK_STATUS_VARIANT, modelCallLabel, isShadowCandidate } from '../data/display'
-import { hrefFor } from '../router'
+import { hrefFor, navigate } from '../router'
 import { unrealizedPnl } from '@/format'
 
-export function OverviewPage() {
-  const { state, refresh } = usePoll(loadOverviewData)
+export function OverviewPage({ portfolioId }: { portfolioId?: string }) {
+  const loader = useCallback(() => loadOverviewData(portfolioId), [portfolioId])
+  const { state, refresh } = usePoll(loader)
   const [chartMode, setChartMode] = useState<'pnl' | 'nav'>('pnl')
   const now = useNow()
 
@@ -86,7 +87,7 @@ export function OverviewPage() {
         crumb="Workspace / Overview"
         title="Your agent. At a glance."
         subtitle="A measured approach to the market. Here's where things stand."
-        right={<RunAgentButton onRan={refresh} />}
+        right={<RunAgentButton onRan={refresh} portfolioId={portfolioId} />}
       />
 
       <div className="glass mb-6 flex items-center gap-3 px-5 py-3">
@@ -175,7 +176,7 @@ export function OverviewPage() {
           eyebrow="Audit trail"
           title="Recent decisions"
           right={
-            <a href={hrefFor('/decisions')} className="wt-body-sm text-w-accent hover:underline">
+            <a href={hrefFor('/decisions', portfolioId)} className="wt-body-sm text-w-accent hover:underline">
               View all →
             </a>
           }
@@ -187,9 +188,7 @@ export function OverviewPage() {
             columns={decisionColumns}
             rows={data.recentDecisions}
             keyFor={(d) => d.id}
-            onRowClick={(d) => {
-              window.location.hash = `/decisions/${d.id}`
-            }}
+            onRowClick={(d) => navigate(`/decisions/${d.id}`, portfolioId)}
           />
         )}
       </GlassCard>

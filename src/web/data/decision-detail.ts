@@ -8,6 +8,7 @@ import { supabase } from '@/supabase'
 // the extension's decision-detail screen has no use for any of these yet
 // and widening it would be scope it didn't ask for.
 export interface DecisionExtra {
+  portfolioId: string
   strategyVersion: string
   decisionType: 'candidate' | 'management' | null
   armId: string | null
@@ -52,7 +53,7 @@ export async function loadDecisionExtra(decisionId: string): Promise<DecisionExt
     // string widens to plain `string` and silently falls back to an
     // unhelpful error type for every field.
     .select(
-      'strategy_version, decision_type, arm_id, bias, opportunity_bar_ts, jev_news_veto_probability, entry_quality, entry_quality_confidence, entry_quality_distribution, entry_gate_mode, expected_move_pct, expected_move_confidence, expected_move_distribution, expected_move_horizon_minutes, failure_risk, failure_risk_confidence, failure_risk_distribution, failure_mode, failure_mode_confidence, failure_mode_distribution, veto_prompt_version, entry_prompt_version, adversarial_prompt_version, jev_case_id, jev_evaluation_id, price_r, position_pnl_r, effective_portfolio_risk_ceiling_pct, effective_max_total_notional_pct',
+      'portfolio_id, strategy_version, decision_type, arm_id, bias, opportunity_bar_ts, jev_news_veto_probability, entry_quality, entry_quality_confidence, entry_quality_distribution, entry_gate_mode, expected_move_pct, expected_move_confidence, expected_move_distribution, expected_move_horizon_minutes, failure_risk, failure_risk_confidence, failure_risk_distribution, failure_mode, failure_mode_confidence, failure_mode_distribution, veto_prompt_version, entry_prompt_version, adversarial_prompt_version, jev_case_id, jev_evaluation_id, price_r, position_pnl_r, effective_portfolio_risk_ceiling_pct, effective_max_total_notional_pct',
     )
     .eq('id', decisionId)
     .maybeSingle()
@@ -60,6 +61,7 @@ export async function loadDecisionExtra(decisionId: string): Promise<DecisionExt
   if (!data) return null
 
   return {
+    portfolioId: data.portfolio_id,
     strategyVersion: data.strategy_version,
     decisionType: data.decision_type,
     armId: data.arm_id,

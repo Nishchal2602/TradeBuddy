@@ -26,8 +26,18 @@ export interface AgentCycleRunResult {
 // treats as 'scheduled' — the more restrictive default — so an
 // extension build that somehow failed to send this would revert to the
 // OLD bucketed behavior, not a worse one.
-export async function invokeAgentCycle(): Promise<AgentCycleRunResult> {
-  const { data, error } = await supabase.functions.invoke<AgentCycleRunResult>('agent-cycle', { body: { trigger: 'manual' } })
+// WEB-2 (2026-10-08) — portfolioId is optional and additive: every
+// pre-existing caller (this file's own zero-arg contract, and the
+// extension's Home screen) keeps sending exactly {trigger:'manual'} and
+// is unaffected. The web dashboard's account-scoped "Run agent" button
+// passes it through when rendered under a specific test account — no
+// backend change needed, since agent-cycle's own Deno.serve handler
+// already extracts portfolioId from the body (EXP-1 Stage E3), and
+// cycle-dispatcher already calls it exactly this way, live, today.
+export async function invokeAgentCycle(portfolioId?: string): Promise<AgentCycleRunResult> {
+  const { data, error } = await supabase.functions.invoke<AgentCycleRunResult>('agent-cycle', {
+    body: portfolioId ? { trigger: 'manual', portfolioId } : { trigger: 'manual' },
+  })
   if (error) throw new Error(`could not run the agent: ${error.message}`)
   if (!data) throw new Error('the agent cycle returned no result')
   return data

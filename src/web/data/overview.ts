@@ -52,15 +52,20 @@ export interface OverviewData {
 // with zero code change.
 const CONTRIBUTION_THRESHOLD_USD = 500
 
-export async function loadOverviewData(): Promise<OverviewData> {
+export async function loadOverviewData(portfolioId?: string): Promise<OverviewData> {
+  const portfolioQuery = supabase.from('portfolios').select('id, cash, starting_capital')
   const [{ data: settings, error: settingsError }, { data: portfolio, error: portfolioError }] = await Promise.all([
     supabase.from('agent_settings').select('is_paused, decision_interval_minutes, strategy_profile, assets').single(),
-    supabase.from('portfolios').select('id, cash, starting_capital').single(),
+    // WEB-2 (2026-10-08) — portfolioId absent resolves is_test=false (the
+    // live champion), exactly as before this retrofit. Behavior-
+    // preserving by construction: the `:` branch below is the unmodified
+    // original line.
+    (portfolioId ? portfolioQuery.eq('id', portfolioId) : portfolioQuery.eq('is_test', false)).single(),
   ])
   if (settingsError) throw new Error(`could not load agent settings: ${settingsError.message}`)
   if (portfolioError) throw new Error(`could not load portfolio: ${portfolioError.message}`)
 
-  const portfolioId = portfolio.id as string
+  const resolvedPortfolioId = portfolio.id as string
   const assets = settings.assets as AssetSymbol[]
 
   const [navRes, openPosRes, pricesRes, decisionsRes, decisionRunRes, monitorRunRes] = await Promise.all([
@@ -76,23 +81,23 @@ export async function loadOverviewData(): Promise<OverviewData> {
     supabase
       .from('nav_snapshots')
       .select('cash, positions_value, nav, unrealized_pnl, realized_pnl_cum, captured_at')
-      .eq('portfolio_id', portfolioId)
+      .eq('portfolio_id', resolvedPortfolioId)
       .order('captured_at', { ascending: false })
       .limit(3000),
     supabase
       .from('positions')
       .select('asset, direction, quantity, entry_price, stop_loss_price, take_profit_price, opened_at')
-      .eq('portfolio_id', portfolioId)
+      .eq('portfolio_id', resolvedPortfolioId)
       .eq('status', 'open'),
     supabase.from('market_quotes').select('asset, price, change_24h_pct').in('asset', assets),
     supabase
       .from('agent_decisions')
       .select('id, asset, action, risk_status, decision_type, arm_id, model_version, decided_at')
-      .eq('portfolio_id', portfolioId)
+      .eq('portfolio_id', resolvedPortfolioId)
       .order('decided_at', { ascending: false })
       .limit(8),
-    supabase.from('agent_runs').select('started_at, status').eq('portfolio_id', portfolioId).eq('kind', 'decision').order('started_at', { ascending: false }).limit(1).maybeSingle(),
-    supabase.from('agent_runs').select('started_at, status').eq('portfolio_id', portfolioId).eq('kind', 'monitor').order('started_at', { ascending: false }).limit(1).maybeSingle(),
+    supabase.from('agent_runs').select('started_at, status').eq('portfolio_id', resolvedPortfolioId).eq('kind', 'decision').order('started_at', { ascending: false }).limit(1).maybeSingle(),
+    supabase.from('agent_runs').select('started_at, status').eq('portfolio_id', resolvedPortfolioId).eq('kind', 'monitor').order('started_at', { ascending: false }).limit(1).maybeSingle(),
   ])
   if (navRes.error) throw new Error(`could not load NAV history: ${navRes.error.message}`)
   if (openPosRes.error) throw new Error(`could not load open positions: ${openPosRes.error.message}`)

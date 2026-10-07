@@ -25,10 +25,22 @@ export interface DecisionFilters {
 
 const PAGE_SIZE = 100
 
-export async function loadDecisions(filters: DecisionFilters): Promise<DecisionListRow[]> {
+// WEB-2 (2026-10-08) — closes a live data-mixing gap: this query
+// previously had no portfolio scoping at all and read across every
+// portfolio in the database. portfolioId absent now resolves is_test=false
+// (the live champion), matching every other page's own convention.
+export async function loadDecisions(filters: DecisionFilters, portfolioId?: string): Promise<DecisionListRow[]> {
+  const portfolioQuery = supabase.from('portfolios').select('id')
+  const { data: portfolio, error: portfolioError } = await (
+    portfolioId ? portfolioQuery.eq('id', portfolioId) : portfolioQuery.eq('is_test', false)
+  ).single()
+  if (portfolioError) throw new Error(`could not load portfolio: ${portfolioError.message}`)
+  const resolvedPortfolioId = portfolio.id as string
+
   let query = supabase
     .from('agent_decisions')
     .select('id, asset, action, risk_status, decision_type, arm_id, bias, model_version, strategy_version, approved_size_pct, decided_at')
+    .eq('portfolio_id', resolvedPortfolioId)
     .order('decided_at', { ascending: false })
     .limit(PAGE_SIZE)
 

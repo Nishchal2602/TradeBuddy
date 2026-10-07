@@ -26,13 +26,25 @@ export interface JudgmentData {
 
 const JEV_VETO_THRESHOLD = 0.7
 
-export async function loadJudgmentData(): Promise<JudgmentData> {
+// WEB-2 (2026-10-08) — closes a live data-mixing gap: this previously had
+// no portfolio scoping at all and read across every portfolio in the
+// database. portfolioId absent now resolves is_test=false (the live
+// champion), matching every other page's own convention.
+export async function loadJudgmentData(portfolioId?: string): Promise<JudgmentData> {
+  const portfolioQuery = supabase.from('portfolios').select('id')
+  const { data: portfolio, error: portfolioError } = await (
+    portfolioId ? portfolioQuery.eq('id', portfolioId) : portfolioQuery.eq('is_test', false)
+  ).single()
+  if (portfolioError) throw new Error(`could not load portfolio: ${portfolioError.message}`)
+  const resolvedPortfolioId = portfolio.id as string
+
   const [callsRes, vetoRes, casesRes] = await Promise.all([
-    supabase.from('agent_decisions').select('id', { count: 'exact', head: true }).like('model_version', 'jev%'),
-    supabase.from('agent_decisions').select('model_vetoed').not('model_vetoed', 'is', null),
+    supabase.from('agent_decisions').select('id', { count: 'exact', head: true }).eq('portfolio_id', resolvedPortfolioId).like('model_version', 'jev%'),
+    supabase.from('agent_decisions').select('model_vetoed').eq('portfolio_id', resolvedPortfolioId).not('model_vetoed', 'is', null),
     supabase
       .from('agent_decisions')
       .select('id, asset, action, decided_at, jev_news_veto_probability, entry_quality, entry_quality_distribution, entry_gate_mode, failure_risk, failure_risk_distribution, failure_mode, failure_mode_distribution')
+      .eq('portfolio_id', resolvedPortfolioId)
       .or('jev_news_veto_probability.not.is.null,entry_quality.not.is.null,failure_risk.not.is.null')
       .order('decided_at', { ascending: false }),
   ])

@@ -55,6 +55,15 @@
   --w-pos: #6fbf8b;
   --w-neg: #d2726b;
 
+  /* Categorical series palette — the Experiments performance-overlay
+     chart ONLY (multi-line-chart.tsx). Deliberately distinct from
+     --w-pos/--w-neg: a chart line's color must never imply a win/loss
+     judgment, only "which account is this." */
+  --w-series-1: var(--w-accent);
+  --w-series-2: #5b8def;
+  --w-series-3: #9b7fd4;
+  --w-series-4: #4fb8c4;
+
   --font-web: 'Manrope Variable', 'Manrope', ui-sans-serif, system-ui, sans-serif;
 }
 
@@ -76,6 +85,11 @@
 
   --color-w-pos: var(--w-pos);
   --color-w-neg: var(--w-neg);
+
+  --color-w-series-1: var(--w-series-1);
+  --color-w-series-2: var(--w-series-2);
+  --color-w-series-3: var(--w-series-3);
+  --color-w-series-4: var(--w-series-4);
 
   --font-web: var(--font-web);
 }

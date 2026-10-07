@@ -59,10 +59,15 @@ export interface PositionsData {
   trades: TradeRow[]
 }
 
-export async function loadPositionsData(): Promise<PositionsData> {
-  const { data: portfolio, error: portfolioError } = await supabase.from('portfolios').select('id').single()
+export async function loadPositionsData(portfolioId?: string): Promise<PositionsData> {
+  // WEB-2 (2026-10-08) — portfolioId absent resolves is_test=false (the
+  // live champion), exactly as before this retrofit.
+  const portfolioQuery = supabase.from('portfolios').select('id')
+  const { data: portfolio, error: portfolioError } = await (
+    portfolioId ? portfolioQuery.eq('id', portfolioId) : portfolioQuery.eq('is_test', false)
+  ).single()
   if (portfolioError) throw new Error(`could not load portfolio: ${portfolioError.message}`)
-  const portfolioId = portfolio.id as string
+  const resolvedPortfolioId = portfolio.id as string
 
   const [positionsRes, tradesRes] = await Promise.all([
     supabase
@@ -70,12 +75,12 @@ export async function loadPositionsData(): Promise<PositionsData> {
       .select(
         'id, asset, direction, quantity, entry_price, cost_basis, stop_loss_price, take_profit_price, status, opened_at, closed_at, realized_pnl, close_reason, partial_realized_pnl_usd, sampled_mfe_r, sampled_mae_r, high_water_tracked_from, giveback_floor_r, opened_under_strategy_profile',
       )
-      .eq('portfolio_id', portfolioId)
+      .eq('portfolio_id', resolvedPortfolioId)
       .order('opened_at', { ascending: false }),
     supabase
       .from('trades')
       .select('id, asset, side, intent, quantity, reference_price, fill_price, fee, slippage_cost, funding_cost, realized_pnl, cash_after, executed_at, trigger_reason, decision_id')
-      .eq('portfolio_id', portfolioId)
+      .eq('portfolio_id', resolvedPortfolioId)
       .order('executed_at', { ascending: false }),
   ])
   if (positionsRes.error) throw new Error(`could not load positions: ${positionsRes.error.message}`)

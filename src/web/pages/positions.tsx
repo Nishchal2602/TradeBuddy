@@ -1,3 +1,4 @@
+import { useCallback } from 'react'
 import { useNow } from '@/hooks/use-now'
 import { formatUsd, formatAgo } from '@/format'
 import { PageHeader } from '../shell/page-header'
@@ -9,8 +10,9 @@ import { usePoll } from '../data/use-poll'
 import { loadPositionsData, type PositionRow, type TradeRow } from '../data/positions'
 import { CLOSE_REASON_LABEL, CLOSE_REASON_VARIANT } from '../data/display'
 
-export function PositionsPage() {
-  const { state, refresh } = usePoll(loadPositionsData)
+export function PositionsPage({ portfolioId }: { portfolioId?: string }) {
+  const loader = useCallback(() => loadPositionsData(portfolioId), [portfolioId])
+  const { state, refresh } = usePoll(loader)
   const now = useNow()
 
   if (state.status === 'loading') return <LoadingState message="Loading positions & trades…" />

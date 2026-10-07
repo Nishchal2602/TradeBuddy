@@ -1,3 +1,4 @@
+import { useCallback } from 'react'
 import { PageHeader } from '../shell/page-header'
 import { GlassCard, GlassCardHeader } from '../ui/glass-card'
 import { LoadingState, ErrorState } from '../ui/states'
@@ -17,13 +18,13 @@ const FAILURE_MODE_LABEL: Record<string, string> = {
   NONE: 'No material vulnerability',
 }
 
-function CaseCard({ c }: { c: JudgmentCase }) {
+function CaseCard({ c, portfolioId }: { c: JudgmentCase; portfolioId?: string }) {
   return (
     <GlassCard>
       <GlassCardHeader
         eyebrow={new Date(c.decidedAt).toLocaleString()}
         title={
-          <a href={hrefFor(`/decisions/${c.id}`)} className="hover:text-w-accent">
+          <a href={hrefFor(`/decisions/${c.id}`, portfolioId)} className="hover:text-w-accent">
             {c.asset} · {c.action}
           </a>
         }
@@ -72,8 +73,9 @@ function CaseCard({ c }: { c: JudgmentCase }) {
   )
 }
 
-export function JudgmentPage() {
-  const { state, refresh } = usePoll(loadJudgmentData)
+export function JudgmentPage({ portfolioId }: { portfolioId?: string }) {
+  const loader = useCallback(() => loadJudgmentData(portfolioId), [portfolioId])
+  const { state, refresh } = usePoll(loader)
 
   if (state.status === 'loading') return <LoadingState message="Loading AI judgment data…" />
   if (state.status === 'error') return <ErrorState title="Could not load judgment data" description={state.message} onRetry={refresh} />
@@ -106,7 +108,7 @@ export function JudgmentPage() {
       ) : (
         <div className="flex flex-col gap-6">
           {data.cases.map((c) => (
-            <CaseCard key={c.id} c={c} />
+            <CaseCard key={c.id} c={c} portfolioId={portfolioId} />
           ))}
         </div>
       )}

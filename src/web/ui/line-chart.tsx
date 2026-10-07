@@ -1,36 +1,17 @@
 import { useMemo, useState } from 'react'
+import { downsample } from './chart-utils'
+import type { ChartPoint, ChartMarker } from './chart-utils'
+
+export type { ChartPoint, ChartMarker }
 
 // Hand-rolled SVG line chart (WEB-1 plan) — a single path over downsampled
 // points, a faint gradient fill, no gridlines, no charting library. The
 // design is a thin minimal line; a charting dependency would import far
 // more than ~2,000 NAV points over one series ever earns.
 
-export interface ChartPoint {
-  t: number // epoch ms
-  v: number
-}
-
-export interface ChartMarker {
-  t: number
-  label: string
-}
-
 const WIDTH = 960
 const HEIGHT = 220
 const PAD_Y = 16
-
-function downsample(points: ChartPoint[], maxPoints: number): ChartPoint[] {
-  if (points.length <= maxPoints) return points
-  const step = points.length / maxPoints
-  const result: ChartPoint[] = []
-  for (let i = 0; i < maxPoints; i++) {
-    const point = points[Math.floor(i * step)]
-    if (point) result.push(point)
-  }
-  const last = points[points.length - 1]
-  if (last) result.push(last)
-  return result
-}
 
 export function LineChart({
   points,

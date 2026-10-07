@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useCallback, useState } from 'react'
 import { useNow } from '@/hooks/use-now'
 import { formatAgo } from '@/format'
 import { ALL_ASSETS } from '@/shared/market-data/types.ts'
@@ -7,50 +7,37 @@ import { GlassCard } from '../ui/glass-card'
 import { LoadingState, ErrorState, EmptyState } from '../ui/states'
 import { DataTable, type Column } from '../ui/data-table'
 import { Badge } from '../ui/badge'
+import { Select } from '../ui/select'
 import { usePoll } from '../data/use-poll'
-import { loadDecisions, type DecisionListRow, type DecisionFilters } from '../data/decisions'
+import { loadDecisions, type DecisionListRow } from '../data/decisions'
 import { ACTION_LABEL, ACTION_VARIANT, RISK_STATUS_LABEL, RISK_STATUS_VARIANT, modelCallLabel, isShadowCandidate } from '../data/display'
+import { navigate } from '../router'
 
 const ASSET_OPTIONS = ['all', ...ALL_ASSETS] as const
 const ACTION_OPTIONS = ['all', 'OPEN_LONG', 'OPEN_SHORT', 'HOLD', 'CLOSE', 'ADD', 'REDUCE', 'MODIFY_PROTECTION'] as const
 const RISK_OPTIONS = ['all', 'approved', 'clamped', 'rejected', 'not_applicable'] as const
 const TYPE_OPTIONS = ['all', 'candidate', 'management', 'unset'] as const
 
-function Select<T extends string>({ value, options, onChange, labels }: {
-  value: T
-  options: readonly T[]
-  onChange: (v: T) => void
-  labels?: Partial<Record<T, string>>
-}) {
-  return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.target.value as T)}
-      className="wt-body-sm rounded-md border border-w-border bg-w-bg-raised px-3 py-1.5 text-w-text"
-    >
-      {options.map((opt) => (
-        <option key={opt} value={opt}>
-          {labels?.[opt] ?? opt}
-        </option>
-      ))}
-    </select>
-  )
-}
-
-export function DecisionsPage() {
+export function DecisionsPage({ portfolioId }: { portfolioId?: string }) {
   const [asset, setAsset] = useState<(typeof ASSET_OPTIONS)[number]>('all')
   const [action, setAction] = useState<(typeof ACTION_OPTIONS)[number]>('all')
   const [riskStatus, setRiskStatus] = useState<(typeof RISK_OPTIONS)[number]>('all')
   const [decisionType, setDecisionType] = useState<(typeof TYPE_OPTIONS)[number]>('all')
 
-  const filters: DecisionFilters = {
-    asset: asset === 'all' ? undefined : asset,
-    action: action === 'all' ? undefined : action,
-    riskStatus: riskStatus === 'all' ? undefined : riskStatus,
-    decisionType: decisionType === 'all' ? undefined : decisionType,
-  }
-
-  const { state, refresh } = usePoll(() => loadDecisions(filters), 30_000)
+  const loader = useCallback(
+    () =>
+      loadDecisions(
+        {
+          asset: asset === 'all' ? undefined : asset,
+          action: action === 'all' ? undefined : action,
+          riskStatus: riskStatus === 'all' ? undefined : riskStatus,
+          decisionType: decisionType === 'all' ? undefined : decisionType,
+        },
+        portfolioId,
+      ),
+    [asset, action, riskStatus, decisionType, portfolioId],
+  )
+  const { state, refresh } = usePoll(loader, 30_000)
   const now = useNow()
 
   const columns: Column<DecisionListRow>[] = [
@@ -138,9 +125,7 @@ export function DecisionsPage() {
             columns={columns}
             rows={state.data}
             keyFor={(d) => d.id}
-            onRowClick={(d) => {
-              window.location.hash = `/decisions/${d.id}`
-            }}
+            onRowClick={(d) => navigate(`/decisions/${d.id}`, portfolioId)}
           />
         </GlassCard>
       ) : null}

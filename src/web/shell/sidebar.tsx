@@ -1,17 +1,18 @@
-import { LayoutGrid, ListTree, Wallet, Brain, SlidersHorizontal } from 'lucide-react'
+import { LayoutGrid, ListTree, Wallet, Brain, SlidersHorizontal, FlaskConical } from 'lucide-react'
 import type { Route } from '../router'
 import { hrefFor } from '../router'
 
-const NAV_ITEMS: { route: Route['name']; path: string; label: string; icon: typeof LayoutGrid }[] = [
-  { route: 'overview', path: '/', label: 'Overview', icon: LayoutGrid },
-  { route: 'decisions', path: '/decisions', label: 'Decisions', icon: ListTree },
-  { route: 'positions', path: '/positions', label: 'Positions & Trades', icon: Wallet },
-  { route: 'judgment', path: '/judgment', label: 'AI Judgment', icon: Brain },
-  { route: 'strategy', path: '/strategy', label: 'Strategy & Settings', icon: SlidersHorizontal },
+const NAV_ITEMS: { route: Route['name']; path: string; label: string; icon: typeof LayoutGrid; scoped: boolean }[] = [
+  { route: 'overview', path: '/', label: 'Overview', icon: LayoutGrid, scoped: true },
+  { route: 'experiments', path: '/experiments', label: 'Experiments', icon: FlaskConical, scoped: false },
+  { route: 'decisions', path: '/decisions', label: 'Decisions', icon: ListTree, scoped: true },
+  { route: 'positions', path: '/positions', label: 'Positions & Trades', icon: Wallet, scoped: true },
+  { route: 'judgment', path: '/judgment', label: 'AI Judgment', icon: Brain, scoped: true },
+  { route: 'strategy', path: '/strategy', label: 'Strategy & Settings', icon: SlidersHorizontal, scoped: true },
 ]
 
-export function Sidebar({ active }: { active: Route['name'] }) {
-  const activeRoute = active === 'decision-detail' ? 'decisions' : active
+export function Sidebar({ active, portfolioId, accountName }: { active: Route['name']; portfolioId?: string; accountName?: string | null }) {
+  const activeRoute = active === 'decision-detail' ? 'decisions' : active === 'experiment-detail' ? 'experiments' : active
 
   return (
     <aside className="glass-raised flex w-[232px] shrink-0 flex-col justify-between">
@@ -22,12 +23,12 @@ export function Sidebar({ active }: { active: Route['name'] }) {
         </div>
 
         <nav className="flex flex-col gap-0.5 px-3">
-          {NAV_ITEMS.map(({ route, path, label, icon: Icon }) => {
+          {NAV_ITEMS.map(({ route, path, label, icon: Icon, scoped }) => {
             const isActive = route === activeRoute
             return (
               <a
                 key={route}
-                href={hrefFor(path)}
+                href={hrefFor(path, scoped ? portfolioId : undefined)}
                 className={`flex items-center gap-2.5 rounded-md px-3 py-2.5 transition-colors ${
                   isActive ? 'wt-nav-active bg-w-accent-dim text-w-accent' : 'wt-nav text-w-muted hover:bg-w-glass-strong hover:text-w-text'
                 }`}
@@ -48,8 +49,21 @@ export function Sidebar({ active }: { active: Route['name'] }) {
       </div>
 
       <div className="border-t border-w-border-soft px-5 py-4">
-        <div className="wt-body-sm text-w-text">V0 Paper Portfolio</div>
-        <div className="wt-label text-w-muted mt-0.5">Solo workspace</div>
+        {portfolioId ? (
+          <>
+            <div className="wt-body-sm text-w-text">{accountName ?? 'Test account'}</div>
+            <div className="wt-label text-w-muted mt-0.5">
+              <a href={hrefFor('/')} className="hover:text-w-text">
+                ← Back to the live account
+              </a>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="wt-body-sm text-w-text">V0 Paper Portfolio</div>
+            <div className="wt-label text-w-muted mt-0.5">Solo workspace</div>
+          </>
+        )}
       </div>
     </aside>
   )

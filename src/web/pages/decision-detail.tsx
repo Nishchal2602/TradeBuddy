@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useCallback, type ReactNode } from 'react'
 import { formatUsd, formatPct } from '@/format'
 import { fetchDecisionById, parseEvidence } from '@/features/decision-detail/queries'
 import { PageHeader } from '../shell/page-header'
@@ -27,8 +27,9 @@ async function loadCombined(decisionId: string) {
   return { base, extra }
 }
 
-export function DecisionDetailPage({ decisionId }: { decisionId: string }) {
-  const { state, refresh } = usePoll(() => loadCombined(decisionId), 60_000)
+export function DecisionDetailPage({ decisionId, portfolioId }: { decisionId: string; portfolioId?: string }) {
+  const loader = useCallback(() => loadCombined(decisionId), [decisionId])
+  const { state, refresh } = usePoll(loader, 60_000)
 
   if (state.status === 'loading') return <LoadingState message="Loading decision…" />
   if (state.status === 'error') return <ErrorState title="Could not load this decision" description={state.message} onRetry={refresh} />
@@ -39,12 +40,22 @@ export function DecisionDetailPage({ decisionId }: { decisionId: string }) {
   const evidence = parseEvidence(base.inputPayload, base.asset)
   const isShadow = extra?.decisionType === 'candidate' && base.riskStatus === 'rejected' && extra?.armId
   const model = modelCallLabel(base.modelVersion)
+  const mismatchedAccount = extra && portfolioId && extra.portfolioId !== portfolioId
 
   return (
     <div>
-      <a href={hrefFor('/decisions')} className="wt-body-sm text-w-muted hover:text-w-text mb-6 inline-block">
+      <a href={hrefFor('/decisions', portfolioId)} className="wt-body-sm text-w-muted hover:text-w-text mb-6 inline-block">
         ← Back to decisions
       </a>
+
+      {mismatchedAccount ? (
+        <div className="wt-body-sm glass border-w-neg/30 text-w-neg mb-6 px-5 py-3">
+          This decision belongs to a different account than the one you&apos;re viewing.{' '}
+          <a href={hrefFor(`/decisions/${base.id}`, extra.portfolioId)} className="underline">
+            View it in its own account →
+          </a>
+        </div>
+      ) : null}
 
       <PageHeader
         crumb={`Workspace / Decisions / ${base.asset}`}

@@ -1,10 +1,11 @@
+import { useCallback } from 'react'
 import { formatPct } from '@/format'
 import { PageHeader } from '../shell/page-header'
 import { GlassCard, GlassCardHeader } from '../ui/glass-card'
 import { LoadingState, ErrorState } from '../ui/states'
 import { Badge } from '../ui/badge'
 import { usePoll } from '../data/use-poll'
-import { loadStrategyData, strategyDefinitionFor, riskAppetiteThresholds } from '../data/strategy'
+import { loadStrategyData, strategyDefinitionFor, riskAppetiteThresholds, resolveAccountSettings, type VariantOverrides } from '../data/strategy'
 
 const ARM_REFERENCE = [
   { arm: 'breakout_long', bias: 'LONG', trigger: 'Close above 8-bar high', confirmation: 'Volume ≥1.2× trend + 60m return matches direction' },
@@ -26,8 +27,20 @@ function Row3({ label, profile, ceiling, effective }: { label: string; profile: 
   )
 }
 
-export function StrategyPage() {
-  const { state, refresh } = usePoll(loadStrategyData, 60_000)
+function Row4({ label, global, override, effective }: { label: string; global: string; override: string; effective: string }) {
+  return (
+    <tr className="border-b border-w-border-soft last:border-b-0">
+      <td className="wt-body-sm text-w-text px-4 py-3">{label}</td>
+      <td className="wt-num tabular px-4 py-3 text-right text-w-muted">{global}</td>
+      <td className="wt-num tabular px-4 py-3 text-right text-w-muted">{override}</td>
+      <td className="wt-num tabular px-4 py-3 text-right text-w-accent">{effective}</td>
+    </tr>
+  )
+}
+
+export function StrategyPage({ portfolioId }: { portfolioId?: string }) {
+  const loader = useCallback(() => loadStrategyData(portfolioId), [portfolioId])
+  const { state, refresh } = usePoll(loader, 60_000)
 
   if (state.status === 'loading') return <LoadingState message="Loading strategy & settings…" />
   if (state.status === 'error') return <ErrorState title="Could not load settings" description={state.message} onRetry={refresh} />
@@ -35,6 +48,19 @@ export function StrategyPage() {
   const { data } = state
   const def = strategyDefinitionFor(data.strategyProfile)
   const riskBudgetPct = def.risk.riskBudgetPct ?? riskAppetiteThresholds(data.settings.riskAppetite).riskBudgetPct
+
+  // WEB-2 (2026-10-08) — this account's own effective treatment. For the
+  // champion (no variant) `effective` is `globalTreatment` UNCHANGED BY
+  // IDENTITY (resolveAccountSettings' own behavior-neutrality guarantee),
+  // so every reference to `effective.*` below is byte-identical to the
+  // pre-existing `data.settings.assets` reference for the champion.
+  const globalTreatment: VariantOverrides = {
+    decisionIntervalMinutes: def.decisionIntervalMinutes,
+    assets: data.settings.assets,
+    newsVetoEnabled: data.globalNewsVetoEnabled,
+    managementEnabled: data.globalManagementEnabled,
+  }
+  const effective = resolveAccountSettings(globalTreatment, data.variant)
 
   return (
     <div>
@@ -59,11 +85,67 @@ export function StrategyPage() {
         </div>
       </GlassCard>
 
+      {portfolioId ? (
+        <GlassCard className="mb-6 p-0">
+          <div className="p-6 pb-0">
+            <GlassCardHeader
+              eyebrow="This account"
+              title="Treatment"
+              right={
+                data.variant ? (
+                  <Badge variant="accent">
+                    {data.variant.experimentName} · {data.variant.variantName}
+                  </Badge>
+                ) : (
+                  <Badge variant="muted">No variant — running global defaults</Badge>
+                )
+              }
+            />
+          </div>
+          <table className="w-full border-collapse">
+            <thead>
+              <tr className="bg-w-bg-raised">
+                <th className="wt-label text-w-muted px-4 py-3 text-left">Setting</th>
+                <th className="wt-label text-w-muted px-4 py-3 text-right">Global default</th>
+                <th className="wt-label text-w-muted px-4 py-3 text-right">Variant override</th>
+                <th className="wt-label text-w-muted px-4 py-3 text-right">Effective for this account</th>
+              </tr>
+            </thead>
+            <tbody>
+              <Row4
+                label="Decision cadence"
+                global={`${def.decisionIntervalMinutes} min`}
+                override={data.variant ? `${data.variant.decisionIntervalMinutes} min` : '—'}
+                effective={`${effective.decisionIntervalMinutes} min`}
+              />
+              <Row4
+                label="Trading assets"
+                global={data.settings.assets.join(', ')}
+                override={data.variant ? data.variant.assets.join(', ') : '—'}
+                effective={effective.assets.join(', ')}
+              />
+              <Row4
+                label="News veto"
+                global={data.globalNewsVetoEnabled ? 'Enabled' : 'Disabled'}
+                override={data.variant ? (data.variant.newsVetoEnabled ? 'Enabled' : 'Disabled') : '—'}
+                effective={effective.newsVetoEnabled ? 'Enabled' : 'Disabled'}
+              />
+              <Row4
+                label="Portfolio management"
+                global={data.globalManagementEnabled ? 'Enabled' : 'Disabled'}
+                override={data.variant ? (data.variant.managementEnabled ? 'Enabled' : 'Disabled') : '—'}
+                effective={effective.managementEnabled ? 'Enabled' : 'Disabled'}
+              />
+            </tbody>
+          </table>
+        </GlassCard>
+      ) : null}
+
       <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
         <GlassCard>
           <GlassCardHeader eyebrow="Universe" title="Trading assets" />
           <div className="flex flex-wrap gap-2">
-            {data.settings.assets.map((a) => (
+            {effective.assets.map((a) => (
               <Badge key={a} variant="neutral">
                 {a} · 1× paper, long/short
               </Badge>

@@ -12,13 +12,13 @@ type RunState =
 // own Home screen already uses. No new security surface: the anon key is
 // already public by design, so this is a second caller of an existing
 // endpoint, not a new exposure (WEB-1 plan).
-export function RunAgentButton({ onRan }: { onRan?: () => void }) {
+export function RunAgentButton({ onRan, portfolioId }: { onRan?: () => void; portfolioId?: string }) {
   const [state, setState] = useState<RunState>({ status: 'idle' })
 
   const handleClick = async () => {
     setState({ status: 'running' })
     try {
-      const result = await invokeAgentCycle()
+      const result = await invokeAgentCycle(portfolioId)
       if (result.status === 'completed') {
         setState({ status: 'done', message: `Cycle complete — ${result.decisions.length} decisions made.`, tone: 'success' })
       } else if (result.status === 'duplicate_tick') {
