@@ -26,8 +26,14 @@ import { computeNav } from './broker/accounting.ts'
 import { rowToPosition, toIsoZ } from './db/row-mappers.ts'
 import { toQuoteRow } from './db/quote-rows.ts'
 import { marketBarsFromIntradayMarketData, marketBarsFromNormalizedMarketData, upsertMarketBars } from './db/market-bars.ts'
-import { ensureConfigSeeded, loadActiveIntradayLsConfig } from './db/strategy-config.ts'
+import { ensureConfigSeeded, loadActiveIntradayLsConfig, loadConfigById } from './db/strategy-config.ts'
 import type { LoadedConfig } from './db/strategy-config.ts'
+import { loadVariantForPortfolio } from './db/experiment-account.ts'
+import type { ResolvedVariant } from './db/experiment-account.ts'
+import { loadMarketTick } from './db/market-tick.ts'
+import { persistNews } from './db/news.ts'
+import { readSettings } from './db/settings.ts'
+import { resolveAccountSettings } from './cycle/resolve-account-settings.ts'
 import { buildDecisionIdempotencyKey, classifyRunInsertConflict, parseTrigger, rotateAssetOrder, staleRunCutoffIso } from './cycle/idempotency.ts'
 import type { CycleTrigger } from './cycle/idempotency.ts'
 import { checkStrategyDataSufficiency, clearsEntryTradeabilityFloor, detectAggressiveOpportunity, intradayFeaturesFor, managementAtrPctFor, protectionForEntry, strategyFor } from './strategy/registry.ts'
@@ -41,8 +47,7 @@ import { armFamilyOf } from './strategy/intraday-ls/detectors.ts'
 import type { ArmFamily, ArmId } from './strategy/intraday-ls/detectors.ts'
 import { detectCandidate } from './strategy/intraday-ls/detect-candidate.ts'
 import { riskAppetiteThresholds } from '../../../src/shared/risk/appetite-mapping.ts'
-import type { RiskAppetite, RiskAppetiteThresholds } from '../../../src/shared/risk/appetite-mapping.ts'
-import type { SlTpBounds } from '../../../src/shared/risk/sl-tp.ts'
+import type { RiskAppetiteThresholds } from '../../../src/shared/risk/appetite-mapping.ts'
 import type { RecentStopLossClose } from '../../../src/shared/risk/gate.ts'
 import { evaluateRiskGate } from '../../../src/shared/risk/gate.ts'
 import { deriveRiskBasedNotional } from '../../../src/shared/risk/sizing.ts'
@@ -70,133 +75,6 @@ const CLOSED_BAR_RECONCILIATION_TOLERANCE = 0.005
 // here: the extension reads persisted state via its existing anon-key
 // REST access). No accounting math, risk logic, or model-calling logic
 // lives in this file.
-
-interface Settings {
-  decisionIntervalMinutes: number
-  newsLookbackOverlapMinutes: number
-  maxDataStalenessMinutes: number
-  assets: AssetSymbol[]
-  feeBps: number
-  slippageBps: number
-  riskAppetite: RiskAppetite
-  isPaused: boolean
-  maxSingleTradePct: number
-  maxAssetExposurePct: number
-  stopOutReentryBlockMinutes: number
-  slTpBounds: SlTpBounds
-  // trading-strategy-v1.md §17 / §10 — resolved once per cycle, same as
-  // every other setting above; portfolioRiskCeilingUsd/maxTotalNotionalUsd
-  // themselves are NAV-dependent and computed fresh per asset below, not
-  // stored here.
-  portfolioRiskCeilingMultiplier: number
-  maxTotalNotionalPct: number
-  drawdownBreakerFloorPct: number
-  newsVetoEnabled: boolean
-  // Phase 2.1 (2026-09-23) — gates ONLY the portfolio-management layer
-  // (HOLD/ADD/REDUCE/CLOSE/MODIFY_PROTECTION on an already-open
-  // position), independent of newsVetoEnabled above (which gates ONLY
-  // the entry-veto layer). The two shared one flag for the first hour of
-  // Phase 2's deployment — a real defect, see
-  // cycle/collect-candidates.ts's own comment for the fix.
-  managementEnabled: boolean
-  // Phase 2 (2026-09-22/23) — provisional minimum-trade-notional floor;
-  // applies to ADD and a partial REDUCE only, never to a full CLOSE.
-  minTradeNotionalPct: number
-  minTradeNotionalUsd: number
-  // Strategy profiles (2026-09-23) — which strategy generates every
-  // asset's candidate this cycle. Read fresh every run (no in-memory
-  // cache to go stale); resolved once into a full StrategyDefinition via
-  // strategy/registry.ts's strategyFor() immediately below, in
-  // runAgentCycle. Pass 1 of this migration: wiring only — resolving
-  // 'balanced' produces byte-identical behavior to before this column
-  // existed (src/shared/strategy/profiles.ts's own test suite proves
-  // this), so nothing downstream changes yet.
-  strategyProfile: StrategyProfile
-  // Strategy V4 (2026-10-01) — perpetual-funding rate for a short
-  // position (broker/accounting.ts's computeFundingAccrual) and the two
-  // new intraday_ls-only monitor exits' own thresholds (plan §4.2/§4.3).
-  // Global settings, not per-profile overrides — same discipline as
-  // feeBps/slippageBps above, which every profile already shares.
-  shortFundingBpsPerDay: number
-  timeStopMinutes: number
-  maxHoldMinutes: number
-}
-
-async function readSettings(supabase: SupabaseClient): Promise<Settings> {
-  const { data, error } = await supabase.from('agent_settings').select('*').single()
-  if (error || !data) throw new Error(`could not read agent_settings: ${error?.message}`)
-  return {
-    decisionIntervalMinutes: data.decision_interval_minutes,
-    newsLookbackOverlapMinutes: data.news_lookback_overlap_minutes,
-    maxDataStalenessMinutes: data.max_data_staleness_minutes,
-    assets: data.assets,
-    feeBps: data.fee_bps,
-    slippageBps: data.slippage_bps,
-    riskAppetite: data.risk_appetite,
-    isPaused: data.is_paused,
-    maxSingleTradePct: Number(data.max_single_trade_pct),
-    maxAssetExposurePct: Number(data.max_asset_exposure_pct),
-    stopOutReentryBlockMinutes: data.stop_out_reentry_block_minutes,
-    slTpBounds: {
-      minStopLossPct: Number(data.min_stop_loss_pct),
-      maxStopLossPct: Number(data.max_stop_loss_pct),
-      minTakeProfitPct: Number(data.min_take_profit_pct),
-      maxTakeProfitPct: Number(data.max_take_profit_pct),
-    },
-    portfolioRiskCeilingMultiplier: Number(data.portfolio_risk_ceiling_multiplier),
-    maxTotalNotionalPct: Number(data.max_total_notional_pct),
-    drawdownBreakerFloorPct: Number(data.drawdown_breaker_floor_pct),
-    newsVetoEnabled: data.news_veto_enabled,
-    managementEnabled: data.management_enabled,
-    minTradeNotionalPct: Number(data.min_trade_notional_pct),
-    minTradeNotionalUsd: Number(data.min_trade_notional_usd),
-    strategyProfile: data.strategy_profile,
-    shortFundingBpsPerDay: Number(data.short_funding_bps_per_day),
-    timeStopMinutes: data.time_stop_minutes,
-    maxHoldMinutes: data.max_hold_minutes,
-  }
-}
-
-// Upserts on external_id (dedupes a story re-seen inside the overlapping
-// lookback window) and returns every row — new or pre-existing — with its
-// real news_items.id, since reasons[].newsId (src/shared/decisions/
-// types.ts) is validated as a UUID the model cites back: only a
-// persisted item has one. Only the columns this upsert actually sets are
-// touched on a pre-existing row (PostgREST's merge-duplicates resolution
-// updates exactly the provided columns) — ingested_at's own DEFAULT
-// now() is never re-applied to an already-ingested story.
-async function persistNews(supabase: SupabaseClient, items: NormalizedNewsItem[]): Promise<Map<string, PersistedNewsItem>> {
-  if (items.length === 0) return new Map()
-  const { data, error } = await supabase
-    .from('news_items')
-    .upsert(
-      items.map((i) => ({
-        external_id: i.externalId,
-        source: i.source,
-        headline: i.headline,
-        summary: i.summary,
-        url: i.url,
-        assets: i.assets,
-        published_at: i.publishedAt,
-        raw: i.raw,
-      })),
-      { onConflict: 'external_id' },
-    )
-    .select('id, external_id, source, headline, summary, published_at')
-  if (error) throw new Error(`could not persist news_items: ${error.message}`)
-
-  const byExternalId = new Map<string, PersistedNewsItem>()
-  for (const row of data ?? []) {
-    byExternalId.set(row.external_id, {
-      id: row.id,
-      source: row.source,
-      headline: row.headline,
-      summary: row.summary,
-      publishedAt: toIsoZ(row.published_at),
-    })
-  }
-  return byExternalId
-}
 
 async function readOpenPosition(supabase: SupabaseClient, portfolioId: string, asset: AssetSymbol): Promise<Position | null> {
   const { data, error } = await supabase.from('positions').select('*').eq('portfolio_id', portfolioId).eq('asset', asset).eq('status', 'open').maybeSingle()
@@ -338,6 +216,17 @@ export interface CycleDeps {
   // kept here (not read directly inside this function) so tests can
   // inject a fixed value without touching real env vars.
   coingeckoApiKey?: string
+  // EXP-1 Stage E3 (2026-10-07) — both optional, both default to exactly
+  // today's behavior when absent. portfolioId resolves a SPECIFIC
+  // account instead of the live champion (is_test=false); marketTickId
+  // consumes a pre-fetched market_ticks row instead of calling
+  // CoinGecko/RSS directly — the mechanism that makes "one fetch, shared
+  // by every account due this tick" real. Manual/direct invocation
+  // (every pre-EXP-1 call site, and the live champion's own cron
+  // forever, per this plan's "What does NOT change") passes neither and
+  // is therefore byte-identical to before this stage.
+  portfolioId?: string
+  marketTickId?: string
 }
 
 // Aggressive V3.1 profit recycling (2026-09-23) — assembles the
@@ -400,21 +289,49 @@ function buildAggressiveManagementContext(
 }
 
 export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
-  const { supabase, typesafeApiKey, nowIso, trigger, coingeckoApiKey } = deps
+  const { supabase, typesafeApiKey, nowIso, trigger, coingeckoApiKey, portfolioId, marketTickId } = deps
   const fetchImpl = deps.fetchImpl ?? fetch
 
-  const settings = await readSettings(supabase)
+  const globalSettings = await readSettings(supabase)
   // Strategy profiles (2026-09-23), Pass 1 — resolved once per cycle,
   // read fresh from settings every time (no stale in-memory selection
   // across cycles). `strategy.strategyVersion` is 'v1-regime' for
   // 'balanced' — the exact pre-existing literal — so this line alone
   // changes nothing observable yet; see strategy/registry.ts.
-  const strategy = strategyFor(settings.strategyProfile)
+  //
+  // strategyProfile is deliberately NOT variant-overridable (EXP-1's own
+  // configurability tiering) — every account, champion or experiment,
+  // runs under the SAME globally-active profile. A variant's own
+  // strategy_config_id instead substitutes for WHICH intraday_ls config
+  // content that account uses, resolved further down.
+  const strategy = strategyFor(globalSettings.strategyProfile)
 
-  const { data: portfolio, error: portfolioError } = await supabase.from('portfolios').select('id, cash').single()
+  // EXP-1 (2026-10-07) — portfolioId (present only when the dispatcher
+  // invokes this cycle for a specific account) resolves THAT portfolio;
+  // absent, is_test=false resolves the live champion exactly as every
+  // pre-EXP-1 call site did. Behavior-preserving by construction for the
+  // champion: is_test defaults to false and it is the only such row
+  // today.
+  const portfolioQuery = supabase.from('portfolios').select('id, cash, experiment_variant_id')
+  const { data: portfolio, error: portfolioError } = await (
+    portfolioId ? portfolioQuery.eq('id', portfolioId) : portfolioQuery.eq('is_test', false)
+  ).single()
   if (portfolioError || !portfolio) {
     return { status: 'failed', decisions: [], detail: `could not read portfolio: ${portfolioError?.message}` }
   }
+
+  // EXP-1 (2026-10-07) — null for the champion (experiment_variant_id is
+  // null), always. resolveAccountSettings(globalSettings, null) returns
+  // globalSettings UNCHANGED BY IDENTITY in that case — the direct
+  // behavior-neutrality guarantee the whole stage rests on.
+  const variant: ResolvedVariant | null = await loadVariantForPortfolio(supabase, portfolio.experiment_variant_id)
+  const settings = resolveAccountSettings(globalSettings, variant)
+  // strategy.decisionIntervalMinutes (NOT settings.decisionIntervalMinutes
+  // — that column is display-only, see profiles.ts's own documented
+  // history) is the value every idempotency/rotation call site actually
+  // uses. A variant's own cadence must override THIS value, not the
+  // unused settings one.
+  const effectiveDecisionIntervalMinutes = variant?.decisionIntervalMinutes ?? strategy.decisionIntervalMinutes
 
   if (settings.isPaused) {
     // Deliberately not even an agent_runs row: a paused agent producing an
@@ -444,10 +361,27 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
   // rather than leaving the flat column as the bucket width for every
   // profile. See src/shared/strategy/profiles.ts's own comment on this
   // field for why a per-profile value is correct and the flat one isn't.
-  const idempotencyKey = buildDecisionIdempotencyKey(trigger, nowIso, strategy.decisionIntervalMinutes)
+  // EXP-1 (2026-10-07): effectiveDecisionIntervalMinutes, not
+  // strategy.decisionIntervalMinutes directly, so a variant's own
+  // cadence overrides the bucket width — the champion's value is
+  // unaffected (variant is always null for it).
+  const idempotencyKey = buildDecisionIdempotencyKey(trigger, nowIso, effectiveDecisionIntervalMinutes)
+  // EXP-1 (2026-10-07) — the resolved-treatment snapshot (see
+  // agent_runs' own new columns, migration 20261007130000): null for
+  // every pre-EXP-1 row and for the champion's own runs (variant is
+  // null), by construction.
   const { data: run, error: runInsertError } = await supabase
     .from('agent_runs')
-    .insert({ portfolio_id: portfolio.id, idempotency_key: idempotencyKey, status: 'running', kind: 'decision', started_at: nowIso })
+    .insert({
+      portfolio_id: portfolio.id, idempotency_key: idempotencyKey, status: 'running', kind: 'decision', started_at: nowIso,
+      experiment_id: variant?.experimentId ?? null,
+      experiment_variant_id: variant?.id ?? null,
+      cadence_minutes: effectiveDecisionIntervalMinutes,
+      assets: settings.assets,
+      news_veto_enabled: settings.newsVetoEnabled,
+      management_enabled: settings.managementEnabled,
+      market_tick_id: marketTickId ?? null,
+    })
     .select('id')
     .single()
 
@@ -466,7 +400,21 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
     const marketProvider = new CoinGeckoMarketDataProvider(fetchImpl, undefined, coingeckoApiKey)
     const newsProvider = new RssNewsProvider(fetchImpl)
 
-    const marketData = await marketProvider.getMarketData(settings.assets)
+    // EXP-1 (2026-10-07) — when marketTickId is present, every fetch
+    // this try block would otherwise make is replaced by reading the
+    // SAME pre-fetched market_ticks row every other account due this
+    // tick also reads — the mechanism behind "one fetch, shared by every
+    // account" (see the plan's own cost section). Filtered down to THIS
+    // account's own effective assets, since the tick's own payload
+    // covers the UNION of every due account's asset subset, not just
+    // this one's. market_quotes/market_bars/news persistence are the
+    // DISPATCHER's job for a tick-driven cycle (done once, not once per
+    // account) — entirely skipped here in that case.
+    const sharedTick = marketTickId ? await loadMarketTick(supabase, marketTickId) : null
+
+    const marketData = sharedTick
+      ? sharedTick.payload.marketData.filter((m) => settings.assets.includes(m.asset))
+      : await marketProvider.getMarketData(settings.assets)
     const latestPriceByAsset = new Map(marketData.map((m) => [m.asset, m.price]))
 
     // Best-effort ("market_quotes plan", 2026-09-21): this cycle already
@@ -480,9 +428,14 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
     // returned, so even a cycle this gate is about to skip still updates
     // the display quote. A failure here must never fail the decision
     // cycle itself — it is a side write to a display-only table, not a
-    // trading action.
-    const { error: quotesError } = await supabase.from('market_quotes').upsert(marketData.map(toQuoteRow), { onConflict: 'asset' })
-    if (quotesError) console.error(`agent-cycle: could not upsert market_quotes: ${quotesError.message}`)
+    // trading action. Skipped for a tick-driven cycle: the dispatcher
+    // already did this once for the whole tick; N accounts redundantly
+    // upserting the identical rows would be wasted writes, not a
+    // correctness issue, but there is no reason to pay it.
+    if (!sharedTick) {
+      const { error: quotesError } = await supabase.from('market_quotes').upsert(marketData.map(toQuoteRow), { onConflict: 'asset' })
+      if (quotesError) console.error(`agent-cycle: could not upsert market_quotes: ${quotesError.message}`)
+    }
 
     // Phase 0 wiring fix (2026-10-01) — strategy.maxDataStalenessMinutes
     // (10 for Aggressive, 30 for Balanced) was declared but never read;
@@ -514,14 +467,28 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
     // stay actionable regardless. An empty rawNews here only feeds
     // through to the veto step below, which fails closed on its own when
     // this happened and veto is actually enabled (see vetoCallFailedReason).
+    // EXP-1 (2026-10-07) — a tick-driven cycle reads the ALREADY-fetched,
+    // ALREADY-persisted news the dispatcher produced for this tick
+    // (persistedNewsByExternalId carries the real, already-upserted
+    // news_items rows — this account's own cycle never calls
+    // getRecentNews/persistNews again). newsProviderFailedReason stays
+    // null in that case: the dispatcher's own fetch either succeeded
+    // (producing a ready tick at all) or the tick never reached 'ready'
+    // and loadMarketTick above would already have thrown.
     let rawNews: NormalizedNewsItem[] = []
     let newsProviderFailedReason: string | null = null
-    try {
-      rawNews = await newsProvider.getRecentNews(settings.assets, lookbackMinutes)
-    } catch (error) {
-      newsProviderFailedReason = error instanceof Error ? error.message : String(error)
+    let persistedByExternalId: Map<string, PersistedNewsItem>
+    if (sharedTick) {
+      rawNews = sharedTick.payload.rawNews
+      persistedByExternalId = new Map(Object.entries(sharedTick.payload.persistedNewsByExternalId))
+    } else {
+      try {
+        rawNews = await newsProvider.getRecentNews(settings.assets, lookbackMinutes)
+      } catch (error) {
+        newsProviderFailedReason = error instanceof Error ? error.message : String(error)
+      }
+      persistedByExternalId = await persistNews(supabase, rawNews)
     }
-    const persistedByExternalId = await persistNews(supabase, rawNews)
 
     const appetite = riskAppetiteThresholds(settings.riskAppetite)
 
@@ -689,9 +656,13 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
     // arms run on the identical 30m/5m series Aggressive's own detectors
     // and features use) — extended here rather than duplicating the
     // fetch under a second gate.
+    // EXP-1 (2026-10-07) — tick-driven: filter the shared payload's union
+    // down to this account's own assets, rather than fetching again.
     const intradayByAsset: Partial<Record<AssetSymbol, IntradayMarketData>> =
       settings.strategyProfile === 'aggressive' || settings.strategyProfile === 'intraday_ls'
-        ? await fetchIntradayMarketData(settings.assets, fetchImpl, undefined, coingeckoApiKey)
+        ? sharedTick
+          ? Object.fromEntries(settings.assets.filter((a) => sharedTick.payload.intradayByAsset[a]).map((a) => [a, sharedTick.payload.intradayByAsset[a]!]))
+          : await fetchIntradayMarketData(settings.assets, fetchImpl, undefined, coingeckoApiKey)
         : {}
 
     // CFG-1 (2026-10-06) — config-as-data, scoped to intraday_ls for now.
@@ -700,10 +671,27 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
     // on every read, so a hand-edited row fails loudly rather than being
     // silently trusted. Both calls are skipped entirely for every other
     // profile — no new behavior, no new cost, for 'balanced'/'aggressive'.
+    //
+    // EXP-1 (2026-10-07) — a variant pins its OWN strategy_config_id,
+    // independent of whatever is globally active (loadConfigById, same
+    // validate-and-rehash discipline, by explicit id rather than
+    // is_active). The champion (variant === null) is completely
+    // unaffected — same two calls as before.
     let activeIntradayLsConfig: LoadedConfig | null = null
     if (settings.strategyProfile === 'intraday_ls') {
-      await ensureConfigSeeded(supabase)
-      activeIntradayLsConfig = await loadActiveIntradayLsConfig(supabase)
+      if (variant) {
+        activeIntradayLsConfig = await loadConfigById(supabase, variant.strategyConfigId)
+      } else {
+        await ensureConfigSeeded(supabase)
+        activeIntradayLsConfig = await loadActiveIntradayLsConfig(supabase)
+      }
+      // The resolved-treatment snapshot (agent_runs' own new columns) —
+      // the ONE field not known at insert time, since config resolution
+      // needs intradayByAsset/settings.strategyProfile first. A failure
+      // here is non-fatal, matching every other provenance side-write in
+      // this file (console.error, never fails the cycle).
+      const { error: hashUpdateError } = await supabase.from('agent_runs').update({ strategy_config_hash: activeIntradayLsConfig?.configHash ?? null }).eq('id', runId)
+      if (hashUpdateError) console.error(`agent-cycle: could not persist agent_runs.strategy_config_hash: ${hashUpdateError.message}`)
     }
 
     const passOneResults: PassOneResult[] = []
@@ -715,7 +703,7 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
     // ATR-driven stops or a cash constraint make the caps actually bind.
     // Same floored bucket the idempotency key above already derives from,
     // so a retried/duplicate tick for the same bucket rotates identically.
-    const assetOrder = rotateAssetOrder(settings.assets, nowIso, strategy.decisionIntervalMinutes)
+    const assetOrder = rotateAssetOrder(settings.assets, nowIso, effectiveDecisionIntervalMinutes)
     for (const asset of assetOrder) {
       const assetMarketData = marketData.find((m) => m.asset === asset)
       if (!assetMarketData) throw new Error(`no market data returned for ${asset} despite passing freshness check — should be unreachable`)
@@ -2325,6 +2313,20 @@ Deno.serve(async (req) => {
     body = undefined
   }
   const trigger = parseTrigger(body)
+  // EXP-1 Stage E3 (2026-10-07) — the dispatcher's own invocation body
+  // (never sent by any pre-EXP-1 caller: the extension's manual trigger
+  // sends only {trigger:'manual'}, and the champion's own cron sends no
+  // body at all). Same defensive shape-checking as parseTrigger itself —
+  // an absent or malformed field is simply undefined, which CycleDeps'
+  // own optional portfolioId/marketTickId already treat as "resolve the
+  // champion / fetch live," so a caller that omits these is byte-
+  // identical to every existing call site.
+  const bodyPortfolioId = body && typeof body === 'object' && 'portfolioId' in body && typeof (body as { portfolioId: unknown }).portfolioId === 'string'
+    ? (body as { portfolioId: string }).portfolioId
+    : undefined
+  const bodyMarketTickId = body && typeof body === 'object' && 'marketTickId' in body && typeof (body as { marketTickId: unknown }).marketTickId === 'string'
+    ? (body as { marketTickId: string }).marketTickId
+    : undefined
 
   const supabase = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!)
   // Gemini removed entirely (2026-09-22) — Jev is the sole model
@@ -2339,6 +2341,6 @@ Deno.serve(async (req) => {
   // unset, so coingecko.ts's own `apiKey ?` check degrades to keyless
   // access rather than sending an empty header value.
   const coingeckoApiKey = Deno.env.get('COINGECKO_API_KEY') || undefined
-  const summary = await runAgentCycle({ supabase, typesafeApiKey, nowIso: new Date().toISOString(), trigger, coingeckoApiKey })
+  const summary = await runAgentCycle({ supabase, typesafeApiKey, nowIso: new Date().toISOString(), trigger, coingeckoApiKey, portfolioId: bodyPortfolioId, marketTickId: bodyMarketTickId })
   return new Response(JSON.stringify(summary), { headers: { ...corsHeaders, 'content-type': 'application/json' } })
 })

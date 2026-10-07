@@ -37,7 +37,10 @@ export interface PortfolioSummary {
 }
 
 export async function fetchPortfolio(): Promise<PortfolioSummary> {
-  const { data, error } = await supabase.from('portfolios').select('id, cash, starting_capital').single()
+  // EXP-1 (2026-10-07) — is_test=false: the extension shows the live
+  // champion only, never a test account. Behavior-preserving (champion
+  // is the only is_test=false row today).
+  const { data, error } = await supabase.from('portfolios').select('id, cash, starting_capital').eq('is_test', false).single()
   if (error) throw new Error(`could not load portfolio: ${error.message}`)
   return { id: data.id, cash: Number(data.cash), startingCapital: Number(data.starting_capital) }
 }

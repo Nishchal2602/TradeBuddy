@@ -94,3 +94,29 @@ export async function loadActiveIntradayLsConfig(supabase: SupabaseClient): Prom
 
   return { config: parsed.data, configHash: recomputedHash }
 }
+
+// EXP-1 (2026-10-07) — the same load-validate-rehash discipline as
+// loadActiveIntradayLsConfig above, but by explicit id rather than
+// "whichever is_active". An experiment_variant pins ITS OWN
+// strategy_config_id, independent of whatever is globally active — the
+// whole point of a variant being a reproducible treatment rather than a
+// moving target. is_active is not consulted here at all; a variant may
+// reference an inactive (even permanently retired) config row.
+export async function loadConfigById(supabase: SupabaseClient, configId: string): Promise<LoadedConfig> {
+  const { data, error } = await supabase
+    .from('strategy_configs')
+    .select('config, config_hash')
+    .eq('id', configId)
+    .single()
+  if (error || !data) throw new Error(`could not load strategy_configs row ${configId}: ${error?.message}`)
+
+  const parsed = IntradayLsConfig.safeParse(data.config)
+  if (!parsed.success) throw new Error(`strategy_configs row ${configId} failed schema validation: ${parsed.error.message}`)
+
+  const recomputedHash = await computeConfigHash(parsed.data)
+  if (recomputedHash !== data.config_hash) {
+    throw new Error(`strategy_configs hash mismatch for row ${configId} ('${parsed.data.presetName}') — stored config was edited without recomputing its hash (expected ${data.config_hash}, got ${recomputedHash})`)
+  }
+
+  return { config: parsed.data, configHash: recomputedHash }
+}

@@ -204,7 +204,11 @@ async function main() {
   }
   const supabase = createClient(supabaseUrl, serviceRoleKey)
 
-  const { data: portfolioRow, error: portfolioError } = await supabase.from('portfolios').select('id').limit(1).single()
+  // EXP-1 (2026-10-07) — the golden window this driver replays is the
+  // live champion's own history; is_test=false pins it there explicitly
+  // rather than an unscoped .limit(1), which would silently pick an
+  // arbitrary account once experiment portfolios exist.
+  const { data: portfolioRow, error: portfolioError } = await supabase.from('portfolios').select('id').eq('is_test', false).single()
   if (portfolioError || !portfolioRow) {
     console.error(`could not read portfolio: ${portfolioError?.message}`)
     Deno.exit(1)
