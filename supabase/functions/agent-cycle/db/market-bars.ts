@@ -1,6 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { AssetSymbol, NormalizedMarketData, OhlcCandle } from '../../../../src/shared/market-data/types.ts'
 import type { IntradayMarketData, IntradaySpotPoint } from '../strategy/aggressive/types.ts'
+import { toIsoZ } from './row-mappers.ts'
 
 // market_bars (Strategy V4 Phase 0.6, 2026-10-01) — persistent price
 // history, filled entirely from data agent-cycle ALREADY fetches every
@@ -65,11 +66,15 @@ export interface MarketBarRow {
   isSampled: boolean
   // Provenance — never computed with a bare clock read here; always the
   // caller's own nowIso/runId, so every bar in one write carries the
-  // same values and a replay can group by them.
+  // same values and a replay can group by them. ingestedAt/dataVersion
+  // are nullable (CFG-1 Stage 2, 2026-10-06, widened for marketBarRowFromDbRow
+  // below) ONLY because every pre-Stage-0 row genuinely has NULL here —
+  // every write path (barsFrom*) still always supplies a real value, so
+  // this widening changes nothing about what gets written.
   source: string
-  ingestedAt: string
+  ingestedAt: string | null
   batchId: string | null
-  dataVersion: string
+  dataVersion: string | null
 }
 
 export interface BarProvenance {
@@ -185,6 +190,32 @@ export function filterNewBars(rows: readonly MarketBarRow[], storedMaxOpenTime: 
   if (storedMaxOpenTime === null) return [...rows]
   const maxMs = new Date(storedMaxOpenTime).getTime()
   return rows.filter((r) => new Date(r.openTime).getTime() > maxMs)
+}
+
+// CFG-1 Stage 2 (2026-10-06) — the reverse of toDbRow, for the replay
+// harness (the first and only reader of this table). Co-located with
+// toDbRow rather than split into a separate module, so the one domain
+// type and both its transform directions stay in one place. Same
+// Number(...)/toIsoZ coercion discipline as db/row-mappers.ts's
+// rowToPosition — PostgREST serializes numeric columns as strings and
+// timestamptz as "+00:00", neither of which this table is exempt from.
+export function marketBarRowFromDbRow(row: Record<string, unknown>): MarketBarRow {
+  return {
+    asset: row.asset as AssetSymbol,
+    timeframe: row.timeframe as BarTimeframe,
+    openTime: toIsoZ(row.open_time as string),
+    closeTime: toIsoZ(row.close_time as string),
+    open: row.open === null ? null : Number(row.open),
+    high: row.high === null ? null : Number(row.high),
+    low: row.low === null ? null : Number(row.low),
+    close: Number(row.close),
+    volume: row.volume === null ? null : Number(row.volume),
+    isSampled: row.is_sampled as boolean,
+    source: row.source as string,
+    ingestedAt: row.ingested_at === null ? null : toIsoZ(row.ingested_at as string),
+    batchId: row.batch_id as string | null,
+    dataVersion: row.data_version as string | null,
+  }
 }
 
 function toDbRow(row: MarketBarRow) {

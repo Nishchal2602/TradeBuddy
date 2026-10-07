@@ -36,15 +36,13 @@ import type { OpportunitySignal } from './strategy/aggressive/detectors.ts'
 import type { IntradayMarketData } from './strategy/aggressive/types.ts'
 import { stopLossPctFor, takeProfitPctFor } from './strategy/rules.ts'
 import { computePositionPnlR, computePriceR } from './strategy/aggressive/protection.ts'
-import { evaluateBias } from './strategy/intraday-ls/bias.ts'
 import type { Bias } from './strategy/intraday-ls/bias.ts'
-import { armFamilyOf, detectIntradayLsOpportunity, isOpportunityStillValid } from './strategy/intraday-ls/detectors.ts'
+import { armFamilyOf } from './strategy/intraday-ls/detectors.ts'
 import type { ArmFamily, ArmId } from './strategy/intraday-ls/detectors.ts'
-import { shouldEmitOpportunity } from './strategy/intraday-ls/lifecycle.ts'
+import { detectCandidate } from './strategy/intraday-ls/detect-candidate.ts'
 import { riskAppetiteThresholds } from '../../../src/shared/risk/appetite-mapping.ts'
 import type { RiskAppetite, RiskAppetiteThresholds } from '../../../src/shared/risk/appetite-mapping.ts'
 import type { SlTpBounds } from '../../../src/shared/risk/sl-tp.ts'
-import { computeStopLossTakeProfitPrices } from '../../../src/shared/risk/sl-tp.ts'
 import type { RecentStopLossClose } from '../../../src/shared/risk/gate.ts'
 import { evaluateRiskGate } from '../../../src/shared/risk/gate.ts'
 import { deriveRiskBasedNotional } from '../../../src/shared/risk/sizing.ts'
@@ -854,123 +852,54 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
       let intradayLsOpportunityContext: PassOneResult['intradayLsOpportunityContext']
       let intradayLsCandidate: PassOneResult['intradayLsCandidate']
       let intradayLsComputedPrices: PassOneResult['intradayLsComputedPrices']
-      // CFG-1 (2026-10-06) — observability tracking ONLY, around the
-      // EXISTING detection logic below, unchanged. Each branch that falls
-      // through without emitting an opportunity records WHY, so this
-      // plan's own motivating question ("why does it never short, is it
-      // a bug") is a GROUP BY on agent_decisions going forward, not a
-      // bespoke investigation. regimeStateForRow/eligibleArmsForRow stay
-      // undefined (not merely null) when this cycle isn't even
-      // intraday_ls, matching PassOneResult's own field semantics.
+      // CFG-1 Stage 2 (2026-10-06) — observability tracking ONLY, around
+      // the detection logic, which now lives in the pure
+      // strategy/intraday-ls/detect-candidate.ts (extracted verbatim from
+      // this file's own former inlined block, so the replay harness can
+      // reuse this exact logic rather than reimplement it). Each branch
+      // that falls through without emitting an opportunity records WHY,
+      // so this plan's own motivating question ("why does it never
+      // short, is it a bug") is a GROUP BY on agent_decisions going
+      // forward, not a bespoke investigation. regimeStateForRow/
+      // eligibleArmsForRow stay undefined (not merely null) when this
+      // cycle isn't even intraday_ls, matching PassOneResult's own field
+      // semantics.
+      //
+      // One deliberate, minor, DOCUMENTED cost change from the extraction
+      // (decision outputs are unaffected — see detect-candidate.ts's own
+      // module comment): readLastConsumedOpportunityBarTs now runs
+      // unconditionally for every intraday_ls asset/cycle, where it
+      // previously ran only after sufficiency/bias/arm-detection/cost-gate
+      // had ALL already passed (the inlined code could defer it because
+      // it had direct DB access at that exact point; detectCandidate is
+      // pure and needs the value as an input). The query is a single
+      // cheap point-select against its own partial index
+      // (agent_decisions_opportunity_idx) — not a rate-limited external
+      // call — so this is a few extra trivial Postgres reads per cycle,
+      // never a correctness change (the value depends only on PRIOR
+      // cycles' own writes, never on anything this cycle computes before
+      // reaching this line, so fetching it earlier returns the identical
+      // value every time).
       let regimeStateForRow: PassOneResult['regimeState']
       let eligibleArmsForRow: PassOneResult['eligibleArms']
       let noCandidateReasonForRow: PassOneResult['noCandidateReason']
       if (settings.strategyProfile === 'intraday_ls') {
         const intraday = intradayByAsset[asset]
-        const sufficiency = checkStrategyDataSufficiency('intraday_ls', assetMarketData, intraday)
-        if (!sufficiency.ok || !intraday) {
-          noCandidateReasonForRow = 'data_insufficient'
-        } else {
-          const bias = evaluateBias(assetMarketData.dailyCloseSeries, assetMarketData.candles.map((c) => c.close))
-          regimeStateForRow = bias
-          if (!bias) {
-            noCandidateReasonForRow = 'regime_null'
-          } else {
-            const policyConfig = activeIntradayLsConfig?.config
-            eligibleArmsForRow = policyConfig?.directionPolicy[bias] ?? null
-            const features = intradayFeaturesFor(intraday)
-            const detected = detectIntradayLsOpportunity(
-              bias,
-              intraday.ohlc30m,
-              { ret60mPct: features.ret60mPct, volumeTrendRatio: features.volumeTrendRatio },
-              assetMarketData,
-              policyConfig
-                ? {
-                    directionPolicy: policyConfig.directionPolicy,
-                    arms: policyConfig.arms,
-                    minVolumeTrendRatio: policyConfig.breakoutMinVolumeTrendRatio,
-                    fadeThresholds: { oversold: policyConfig.fadeRsiOversold, overbought: policyConfig.fadeRsiOverbought, rangeAtrMultiple: policyConfig.fadeRangeAtrMultiple },
-                  }
-                : undefined,
-            )
-            if (!detected) {
-              noCandidateReasonForRow = 'no_arm_triggered'
-            } else {
-              const atr30Pct = managementAtrPctFor('intraday_ls', assetMarketData, intraday)
-              const { stopLossPct, takeProfitPct } = protectionForEntry('intraday_ls', atr30Pct, stopLossPctFor, takeProfitPctFor, detected.armId)
-              const estimatedRoundTripCostPct = (2 * (settings.feeBps + settings.slippageBps)) / 10_000
-              if (!clearsEntryTradeabilityFloor('intraday_ls', 0, estimatedRoundTripCostPct, stopLossPct)) {
-                noCandidateReasonForRow = 'cost_gate'
-              } else {
-                const lastConsumed = await readLastConsumedOpportunityBarTs(supabase, portfolio.id, asset)
-                if (!shouldEmitOpportunity(detected.detectedAtBarTs, lastConsumed)) {
-                  noCandidateReasonForRow = 'opportunity_consumed'
-                } else if (
-                  policyConfig?.signalDriftRuleEnforced &&
-                  !isOpportunityStillValid(detected.triggerBarClose, assetMarketData.price, stopLossPct, policyConfig.signalDriftMaxFraction)
-                ) {
-                  // CFG-1 Stage 1B — isOpportunityStillValid wired in
-                  // (plan §3.2/§4.2's drift rule, previously specified,
-                  // tested, and never called from production). Price has
-                  // moved more than signalDriftMaxFraction x stopLossPct
-                  // from the trigger bar's own close since window-scanned
-                  // detection found it — deliberately NOT consumed (no
-                  // intradayLsOpportunityContext, so opportunity_bar_ts is
-                  // never written on this row): the same bar can still
-                  // qualify a later cycle if price reverts, exactly like a
-                  // data_insufficient/regime_null non-event rather than a
-                  // decision that burns the edge.
-                  noCandidateReasonForRow = 'signal_stale'
-                } else {
-                  // arm_id/bias/opportunity_bar_ts persist on the main
-                  // row regardless of what happens next (that gating is
-                  // keyed on intradayLsOpportunityContext alone, below —
-                  // never on intradayLsCandidate), so the opportunity is
-                  // never silently lost even if it's not promoted.
-                  intradayLsOpportunityContext = { armId: detected.armId, bias, direction: detected.direction, opportunityBarTs: detected.detectedAtBarTs }
-                  intradayLsComputedPrices = computeStopLossTakeProfitPrices(detected.direction, assetMarketData.price, stopLossPct, takeProfitPct)
-                  // CFG-1 Stage 1B — "short reachable but disabled": a
-                  // detected short is NOT promoted to a live trade
-                  // proposal when the active config's shortEnabled=false.
-                  // Leaving intradayLsCandidate unset here is deliberately
-                  // the ONLY change needed — both the Jev veto collection
-                  // (collectModelCandidates' own `r.intradayLsCandidate ??
-                  // HOLD` fallback) and the entry/adversarial opportunity
-                  // list (`r.intradayLsCandidate && !r.openPosition`, Pass
-                  // 2) already key on this exact field, so the short is
-                  // correctly never shown to Jev at all — "occupation is
-                  // a structural fact no evaluation could change" applies
-                  // identically here. No second insert, no risk of
-                  // colliding with the one-candidate-row-per-asset-per-run
-                  // uniqueness a FLAT asset's main row already occupies.
-                  // Known, accepted gap: if this SAME cycle is also the
-                  // occupied-asset case (openPosition truthy), the
-                  // existing shadow-candidate block a few lines below
-                  // requires intradayLsCandidate too, so a disabled short
-                  // on an occupied asset records on the management row's
-                  // own metadata only, not a separate shadow row — a rare
-                  // double-edge case, not the primary scenario this fixes.
-                  if (!(detected.direction === 'short' && policyConfig && !policyConfig.shortEnabled)) {
-                    intradayLsCandidate = {
-                      asset,
-                      action: detected.direction === 'long' ? 'OPEN_LONG' : 'OPEN_SHORT',
-                      confidence: 1,
-                      horizonHours: null,
-                      reasons: [{ type: 'TECHNICAL', text: `intraday_ls ${detected.armId} detected under ${bias} bias` }],
-                      invalidation: [{ text: 'Managed by the position-monitor exit set (stop-loss/take-profit/giveback/time-stop), not the daily trend regime' }],
-                      stopLossPct,
-                      takeProfitPct,
-                    }
-                  }
-                  // A real candidate was built (or deliberately suppressed
-                  // above) — no_candidate_reason stays null either way:
-                  // an opportunity WAS detected this cycle, which is what
-                  // that field means.
-                }
-              }
-            }
-          }
-        }
+        const lastConsumed = await readLastConsumedOpportunityBarTs(supabase, portfolio.id, asset)
+        const detection = detectCandidate({
+          assetMarketData,
+          intraday,
+          config: activeIntradayLsConfig?.config,
+          lastConsumedBarTs: lastConsumed,
+          feeBps: settings.feeBps,
+          slippageBps: settings.slippageBps,
+        })
+        regimeStateForRow = detection.regimeState
+        eligibleArmsForRow = detection.eligibleArms
+        noCandidateReasonForRow = detection.noCandidateReason
+        intradayLsOpportunityContext = detection.opportunityContext
+        intradayLsCandidate = detection.candidate
+        intradayLsComputedPrices = detection.computedPrices
       }
 
       passOneResults.push({ asset, assetMarketData, assetInput, regime, candidate, openPosition, recentStopLossClose, aggressiveEntryContext, intradayLsOpportunityContext, intradayLsCandidate, intradayLsComputedPrices, regimeState: regimeStateForRow, eligibleArms: eligibleArmsForRow, noCandidateReason: noCandidateReasonForRow })
