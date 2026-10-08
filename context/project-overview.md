@@ -185,6 +185,24 @@ Each decision records:
 - Everything the 2026-10-03 scope already excludes, unchanged: Jev/any LLM called against historical dates as performance evidence, real-money execution, auto-tuning live parameters from a backtest finding.
 - Everything else still listed under "Out of Scope" above — this change touches only the historical-data-source line.
 
+### Historical Market-Data Scope — amendment (2026-10-08, DT-1 Phase P0b)
+
+**This is the scope amendment the DT-1 plan's own stop gate requires before its Phase 1 feasibility probe may run** (`DT-1` section, `/Users/nishchal/.claude/plans/pricing-and-model-selection-ethereal-fox.md`). DT-1 asks whether R4's daily-trend strategy generalizes to a broader, point-in-time universe of Binance spot assets — building that universe needs contract metadata and delisted-symbol history, neither of which the scope above authorizes (it names only kline/funding **endpoints**, not metadata, and not the archive host below).
+
+**Newly in scope, narrowly:**
+
+- **`GET /api/v3/exchangeInfo`** (`api.binance.com`) — public, read-only, unauthenticated. Returns currently-trading and suspended spot symbol metadata (trading status, base/quote asset, filters). Used only to identify which symbols are presently active; it does **not**, by itself, make a point-in-time universe possible — see the next bullet.
+- **`data.binance.vision`** — Binance's public bulk historical-data archive, a separate **host**, not an API endpoint. Read-only file downloads of historical kline/trade archives, including symbols no longer listed on `exchangeInfo`. Named explicitly here because omitting it would leave Phase 1 unable to retrieve genuinely delisted-symbol history through any authorized path, which would force a survivorship-biased fallback universe for an **administrative** reason (a scope gap we chose not to close) rather than a genuine **data-availability** reason. Phase 1 must still empirically verify this archive actually serves delisted-symbol history before relying on it — this amendment authorizes trying, not a claim that it will succeed.
+
+**Still governed by every existing constraint, unchanged:** public, read-only, unauthenticated only; no API key, no account, no credentials of any kind, ever; fetched into DT-1's own research tables, never mixed into `market_bars` or `historical_bars`' existing rows; deterministic layers only; pre-registration before any result is viewed; no LLM historical replay as performance evidence; no auto-tuning a live parameter from a finding.
+
+**Explicitly still out of scope, not reauthorized by this change:**
+
+- `fapi/v1/klines` (perpetual futures OHLCV) — DT-1's primary analysis is spot-only by design (see the DT-1 plan's own one-variable-test scoping); this amendment does not open the door to futures price data.
+- Any trading/order-placement endpoint, any authenticated endpoint, any write operation against either `api.binance.com` or `data.binance.vision`, and anything resembling live execution.
+- A new **traded** asset for the live system — this widens what historical data DT-1's research universe may examine, never what the live champion or any experiment account may trade.
+- Everything else already excluded above and in the Backtest/Replay Scope — this amendment touches only the two lines named.
+
 ## Success Criteria
 
 1. A scheduled server-side cycle can complete without Chrome being open.
