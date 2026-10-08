@@ -208,6 +208,16 @@ export interface PerformancePanel {
   longestDrawdownDays: number
   calmarRatio: number
   sharpe: number
+  // DT-1 plan, Phase P0 (2026-10-08) — the PER-PERIOD (non-annualized)
+  // Sharpe, i.e. `sharpe / Math.sqrt(annFactor)`. Added because
+  // deflatedSharpeRatio's own input doc (DeflatedSharpeInput.observedSharpe
+  // below) says per-period, but every existing call site was passing the
+  // ANNUALIZED `sharpe` field instead — a real units bug found during DT-1
+  // provenance review: the distortion scales with cadence (sqrt(17520) at
+  // 30m vs sqrt(365) daily), so a 30-minute V4 trial and a daily baseline
+  // trial were never on the same scale. Purely additive: `sharpe` itself
+  // is unchanged, and every existing caller/test of `sharpe` is unaffected.
+  sharpePerPeriod: number
   sortino: number
   downsideDeviation: number
   timeInMarketPct: number
@@ -285,7 +295,8 @@ export function computePerformancePanel(input: BacktestStatsInput, powerOptions:
   const sdReturn = sampleStdev(returns)
   const downsideReturns = returns.filter((r) => r < 0)
   const downsideDeviation = sampleStdev(downsideReturns) * Math.sqrt(annFactor)
-  const sharpe = sdReturn > 0 ? (meanReturn / sdReturn) * Math.sqrt(annFactor) : 0
+  const sharpePerPeriod = sdReturn > 0 ? meanReturn / sdReturn : 0
+  const sharpe = sharpePerPeriod * Math.sqrt(annFactor)
   const sortino = downsideDeviation > 0 ? (meanReturn * annFactor) / downsideDeviation : 0
 
   const dd = maxDrawdown(navSeries)
@@ -350,6 +361,7 @@ export function computePerformancePanel(input: BacktestStatsInput, powerOptions:
     longestDrawdownDays: dd.longestDays,
     calmarRatio: dd.pct > 0 ? cagr / dd.pct : cagr > 0 ? Infinity : 0,
     sharpe,
+    sharpePerPeriod,
     sortino,
     downsideDeviation,
     timeInMarketPct: navSeries.length > 0 ? inMarketCount / navSeries.length : 0,

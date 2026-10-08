@@ -3,6 +3,7 @@ import type { BacktestParams, ClosedBacktestTrade } from './backtest-engine.ts'
 import { runDailyTrendBacktest } from './baseline-daily-trend.ts'
 import { buildCpcvSplits, computePerformancePanel, deflatedSharpeRatio } from './stats.ts'
 import type { PerformancePanel, StatsNavPoint } from './stats.ts'
+import { resampleNavToDailyCloseUtc } from './daily-resample.ts'
 import { buildRandomEntryDetector, computeIntradayLsProtectionFromConfig, resolveDailyOnlyBias } from './variants.ts'
 import { V4_COMPAT_CONFIG } from '../../../../src/shared/strategy/config-presets.ts'
 import type { IntradayLsConfig } from '../../../../src/shared/strategy/config-schema.ts'
@@ -31,7 +32,7 @@ const CPCV_NUM_GROUPS = 10
 const CPCV_TEST_GROUPS = 2
 const CPCV_EMBARGO_V4_MS = 2 * 86_400_000
 const CPCV_EMBARGO_BASELINE_MS = 14 * 86_400_000
-const DSR_NUM_TRIALS = 13 // the pre-registration's own honest count
+export const DSR_NUM_TRIALS = 13 // the pre-registration's own honest count
 
 const ALL_ARM_IDS: ArmId[] = ['breakout_long', 'breakout_short', 'pullback_long', 'pullback_short', 'fade_long', 'fade_short']
 
@@ -64,13 +65,13 @@ function baseV4Params(assets: AssetSymbol[], config: IntradayLsConfig): Omit<Bac
   }
 }
 
-interface Variant {
+export interface Variant {
   name: string
   cpcvEmbargoMs: number
   run: (asset: AssetSymbol, bars: HistoricalBarRow[]) => { closedTrades: ClosedBacktestTrade[]; navSeries: StatsNavPoint[]; rejectionsByReason: Record<string, number> }
 }
 
-const VARIANTS: Variant[] = [
+export const VARIANTS: Variant[] = [
   { name: 'v4-compat (control)', cpcvEmbargoMs: CPCV_EMBARGO_V4_MS, run: (a, b) => runBacktest({ [a]: b }, baseV4Params([a], V4_COMPAT_CONFIG)) },
   ...ALL_ARM_IDS.map((armId): Variant => ({
     name: `${armId} only`,
@@ -146,10 +147,10 @@ function periodicReturns(navSeries: readonly StatsNavPoint[]): number[] {
   return returns
 }
 
-function mean(xs: number[]): number {
+export function mean(xs: number[]): number {
   return xs.length === 0 ? 0 : xs.reduce((s, x) => s + x, 0) / xs.length
 }
-function variance(xs: number[]): number {
+export function variance(xs: number[]): number {
   if (xs.length < 2) return 0
   const m = mean(xs)
   return xs.reduce((s, x) => s + (x - m) ** 2, 0) / (xs.length - 1)
@@ -169,7 +170,7 @@ function quartile(xs: number[], q: number): number {
   return sorted[base + 1] !== undefined ? sorted[base]! + rest * (sorted[base + 1]! - sorted[base]!) : sorted[base]!
 }
 
-interface VariantResult {
+export interface VariantResult {
   name: string
   trainPanel: PerformancePanel
   holdoutPanel: PerformancePanel
@@ -178,9 +179,23 @@ interface VariantResult {
   cpcvOosRatios: number[]
   trainSharpe: number
   trainReturns: number[]
+  // DT-1 plan, Phase P0 (2026-10-08) — the per-period Sharpe computed on
+  // the TRAIN nav series resampled to one point per UTC calendar day,
+  // regardless of the variant's native cadence (30-minute for every V4
+  // variant, already-daily for the baseline). This is what makes every
+  // trial's Sharpe comparable before pooling them into
+  // sharpeVarianceAcrossTrials — see research/daily-resample.ts and the
+  // DSR unit-fix / trial-registry work this field feeds.
+  trainSharpeDailyResampled: number
+  // The daily-resampled returns series trainSharpeDailyResampled was
+  // itself computed from — passed to deflatedSharpeRatio's `returns` so
+  // its skew/kurtosis adjustment matches the same per-period basis as
+  // observedSharpe, rather than mixing a daily Sharpe with 30-minute
+  // higher moments.
+  trainReturnsDailyResampled: number[]
 }
 
-function runVariantForAsset(variant: Variant, asset: AssetSymbol, bars: HistoricalBarRow[]): VariantResult {
+export function runVariantForAsset(variant: Variant, asset: AssetSymbol, bars: HistoricalBarRow[]): VariantResult {
   const result = variant.run(asset, bars)
   const { train: trainTrades, holdout: holdoutTrades } = splitByHoldout(result.closedTrades, HOLDOUT_START_MS)
   const { train: trainNav, holdout: holdoutNav } = splitByHoldout(result.navSeries, HOLDOUT_START_MS)
@@ -197,6 +212,9 @@ function runVariantForAsset(variant: Variant, asset: AssetSymbol, bars: Historic
     return sd > 0 ? mean(rs) / sd : 0
   })
 
+  const trainNavDailyResampled = resampleNavToDailyCloseUtc(trainNav)
+  const trainSharpeDailyResampled = computePerformancePanel({ trades: [], navSeries: trainNavDailyResampled }).sharpePerPeriod
+
   return {
     name: variant.name,
     trainPanel,
@@ -206,18 +224,18 @@ function runVariantForAsset(variant: Variant, asset: AssetSymbol, bars: Historic
     cpcvOosRatios,
     trainSharpe: trainPanel.sharpe,
     trainReturns: periodicReturns(trainNav),
+    trainSharpeDailyResampled,
+    trainReturnsDailyResampled: periodicReturns(trainNavDailyResampled),
   }
 }
 
-async function main() {
-  const jsonPath = Deno.args[0]
-  if (!jsonPath) {
-    console.error('usage: deno run --allow-read run-backtest.ts <bars.json>')
-    Deno.exit(1)
-  }
-
-  console.log(`Reading ${jsonPath}...`)
-  const text = await Deno.readTextFile(jsonPath!)
+// Extracted unchanged from main() below (DT-1 plan, Phase P0) so the
+// DSR-correction script (research/dsr-correction.ts) can load the exact
+// same bars.json without duplicating this parsing logic. No behavior
+// change to main() itself — verified byte-identical output before and
+// after this extraction.
+export async function loadBarsByAsset(jsonPath: string): Promise<Map<AssetSymbol, HistoricalBarRow[]>> {
+  const text = await Deno.readTextFile(jsonPath)
   // deno-lint-ignore no-explicit-any
   const parsed: any = JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1))
   const barsByAsset = new Map<AssetSymbol, HistoricalBarRow[]>()
@@ -237,6 +255,18 @@ async function main() {
       volume: Number(r.volume),
     })
   }
+  return barsByAsset
+}
+
+async function main() {
+  const jsonPath = Deno.args[0]
+  if (!jsonPath) {
+    console.error('usage: deno run --allow-read run-backtest.ts <bars.json>')
+    Deno.exit(1)
+  }
+
+  console.log(`Reading ${jsonPath}...`)
+  const barsByAsset = await loadBarsByAsset(jsonPath!)
   console.log(`Loaded assets: ${[...barsByAsset.keys()].join(', ')}`)
 
   const lines: string[] = []

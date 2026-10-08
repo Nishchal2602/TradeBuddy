@@ -31,8 +31,20 @@ function canonicalJson(value: unknown): string {
   return JSON.stringify(value)
 }
 
+// DT-1 plan, Phase P0 (2026-10-08) — extracted so a second, non-
+// IntradayLsConfig strategy schema (daily-trend's DailyTrendConfig) can
+// be hashed through the identical canonical-JSON + SHA-256 recipe without
+// forking it. Behavior-preserving: computeConfigHash below now delegates
+// here and produces byte-identical output to before this extraction (same
+// canonicalJson, same hashPromptContent call, same single-element array
+// wrapping) — verified by the existing strategy_configs hash-mismatch
+// tests, which pass unedited.
+export async function computeCanonicalHash(hashInput: unknown): Promise<string> {
+  return hashPromptContent([canonicalJson(hashInput)])
+}
+
 export async function computeConfigHash(config: IntradayLsConfig): Promise<string> {
-  return hashPromptContent([canonicalJson(configHashInput(config))])
+  return computeCanonicalHash(configHashInput(config))
 }
 
 export interface LoadedConfig {

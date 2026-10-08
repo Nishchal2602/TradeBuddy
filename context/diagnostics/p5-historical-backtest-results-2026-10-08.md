@@ -61,3 +61,48 @@ Pre-registered in `p5-pre-registration-2026-10-08.md`. Executed by `research/run
 - **Stop/target geometry was not re-tuned from this run** — geometry-alt-1/2 were the two pre-registered alternatives only; no new variant was mined from these results, consistent with the pre-registration's own binding rule against post-hoc tuning.
 - **SUI/AVAX are explicitly deferred**, per the pre-registration's own stated scope — a dated follow-up appendix using this identical methodology, not a new or re-tuned pass.
 - **The sealed holdout was evaluated exactly once**, per the pre-registration; these numbers are final and are not re-run or cherry-picked.
+
+---
+
+## DSR unit-fix amendment — 2026-10-08
+
+**Dated, visibly-appended amendment, never an in-place edit of the table above.** `deflatedSharpeRatio` expects a per-period Sharpe (`stats.ts`'s own `DeflatedSharpeInput.observedSharpe` doc comment); the original run above passed the ANNUALIZED `sharpe` field instead. The distortion scales with cadence (sqrt(17520) at 30-minute vs sqrt(365) daily), so the twelve 30-minute V4 trials and the one daily baseline trial were never on a comparable scale when pooled into `sharpeVarianceAcrossTrials`. This amendment re-executes the IDENTICAL, unmodified strategy code and config against the SAME historical_bars dataset and recomputes the DSR statistic two ways: **'legacy, recomputed'** reproduces the original (buggy) call exactly, as a correctness check — it must equal the DSR column already published above; **'corrected'** uses every trial's Sharpe resampled to a common daily basis regardless of native cadence (`research/daily-resample.ts`). The legacy column is invalid and must never be cited as evidence going forward. The corrected column is canonical. The decision threshold (0.95) is unchanged.
+
+### BTC (corrected)
+
+| Variant | DSR — legacy, recomputed (INVALID, audit only) | DSR — corrected (per-period, daily-resampled — CANONICAL) |
+|---|---|---|
+| v4-compat (control) | 0.000 | 0.000 |
+| breakout_long only | 0.000 | 0.000 |
+| breakout_short only | 0.000 | 0.000 |
+| pullback_long only | 0.000 | 0.000 |
+| pullback_short only | 0.000 | 0.000 |
+| fade_long only | 0.000 | 0.000 |
+| fade_short only | 0.000 | 0.000 |
+| random-entry baseline (long) | 0.000 | 0.000 |
+| random-entry baseline (short) | 0.000 | 0.000 |
+| daily-only bias | 0.000 | 0.000 |
+| geometry-alt-1 (wider stop) | 0.000 | 0.000 |
+| geometry-alt-2 (higher reward:risk) | 0.000 | 0.000 |
+| daily-trend + inverse-vol-targeting baseline | 0.000 | 0.000 |
+
+### ETH (corrected)
+
+| Variant | DSR — legacy, recomputed (INVALID, audit only) | DSR — corrected (per-period, daily-resampled — CANONICAL) |
+|---|---|---|
+| v4-compat (control) | 0.000 | 0.000 |
+| breakout_long only | 0.000 | 0.000 |
+| breakout_short only | 0.000 | 0.000 |
+| pullback_long only | 0.000 | 0.000 |
+| pullback_short only | 0.000 | 0.000 |
+| fade_long only | 0.000 | 0.000 |
+| fade_short only | 0.000 | 0.000 |
+| random-entry baseline (long) | 0.000 | 0.000 |
+| random-entry baseline (short) | 0.000 | 0.000 |
+| daily-only bias | 0.000 | 0.000 |
+| geometry-alt-1 (wider stop) | 0.000 | 0.000 |
+| geometry-alt-2 (higher reward:risk) | 0.000 | 0.000 |
+| daily-trend + inverse-vol-targeting baseline | 0.000 | 0.000 |
+
+**Worked consistency check**: the "legacy, recomputed" column above reproduces the original table's DSR values exactly (both read 0.000 for every cell) — confirming this amendment changed nothing about HOW the strategy ran, only the units of ONE downstream statistic. The corrected per-period scale does not change which cell clears the pre-registered decision rule either — every arm/geometry/random/daily-only variant still deflates to ≈0.000 (strongly negative trial Sharpes dominate regardless of annualization), and the daily-trend baseline still fails on actionability rather than DSR. This is a units correction, not a result-flattering change.
+

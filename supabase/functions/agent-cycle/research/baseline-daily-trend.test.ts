@@ -134,3 +134,58 @@ Deno.test('runDailyTrendBacktest: a stop-loss exit fires via true-OHLC breach on
   assertEquals(result.closedTrades[0]!.closeReason, 'stop_loss')
   assertEquals(result.closedTrades[0]!.realizedPnl < 0, true)
 })
+
+// DT-1 plan, Phase P0, stop gate S1c — "unmodified" must be PROVEN, not
+// asserted. These three tests run EVERY existing fixture above through
+// three configurations and show the membership gate changes nothing by
+// default, and changes ONLY opens when it is active.
+Deno.test('S1c identity: canOpen OMITTED reproduces every existing fixture byte-for-byte', () => {
+  const fixtures: { bars: HistoricalBarRow[] }[] = [
+    { bars: [...dailyBars('BTC', risingThenGentleDecline()), ...mildVolatilityFourH('BTC', 300)] },
+    { bars: [...dailyBars('BTC', Array.from({ length: 60 }, () => 100)), ...flatFourH('BTC', 100, 100)] },
+    { bars: [...dailyBars('BTC', risingThenCrashCloses()), ...flatFourH('BTC', 100, 100)] },
+  ]
+  for (const { bars } of fixtures) {
+    const withoutCanOpen = runDailyTrendBacktest({ BTC: bars }, baseParams())
+    const withAlwaysTrue = runDailyTrendBacktest({ BTC: bars }, baseParams({ canOpen: () => true }))
+    assertEquals(withAlwaysTrue, withoutCanOpen)
+  }
+})
+
+Deno.test('S1c identity: canOpen ALWAYS-TRUE is byte-identical to a fresh baseline run (not just to itself)', () => {
+  const bars = [...dailyBars('BTC', risingThenGentleDecline()), ...mildVolatilityFourH('BTC', 300)]
+  const baseline = runDailyTrendBacktest({ BTC: bars }, baseParams())
+  const gated = runDailyTrendBacktest({ BTC: bars }, baseParams({ canOpen: (_asset, _barCloseIso) => true }))
+  assertEquals(gated.closedTrades, baseline.closedTrades)
+  assertEquals(gated.navSeries, baseline.navSeries)
+  assertEquals(gated.openAtEnd, baseline.openAtEnd)
+  assertEquals(gated.rejectionsByReason, baseline.rejectionsByReason)
+})
+
+Deno.test('S1c: canOpen ALWAYS-FALSE suppresses every open and produces ZERO trades, never touching an unrelated path', () => {
+  // Not edge-triggered: buildCandidateProposal re-proposes OPEN_LONG on
+  // EVERY tick while FLAT+UP (unlike V4's six arms), so a fully-suppressed
+  // asset accumulates one rejection per UP-regime day it stays flat, not
+  // just one at the edge -- hence >0 here, not a specific hardcoded count.
+  const bars = [...dailyBars('BTC', risingThenGentleDecline()), ...mildVolatilityFourH('BTC', 300)]
+  const result = runDailyTrendBacktest({ BTC: bars }, baseParams({ canOpen: () => false }))
+  assertEquals(result.closedTrades.length, 0)
+  assertEquals(result.openAtEnd.length, 0)
+  assertEquals((result.rejectionsByReason.canOpen_suppressed ?? 0) > 0, true)
+})
+
+Deno.test('S1c: canOpen gates OPENS only — an already-open position still exits normally via its own three R4 exits', () => {
+  // Let the position open normally (canOpen true throughout the ascent),
+  // then flip canOpen to false for the remainder — the position must
+  // still close on the regime flip, proving canOpen cannot suppress or
+  // alter an EXIT, only an entry.
+  const closes = risingThenGentleDecline()
+  const bars = [...dailyBars('BTC', closes), ...mildVolatilityFourH('BTC', 300)]
+  const openedAt = new Date('2024-01-01T00:00:00.000Z').getTime() + 49 * DAY // the 50th daily bar, first UP tick
+  const result = runDailyTrendBacktest({ BTC: bars }, baseParams({
+    canOpen: (_asset, barCloseIso) => new Date(barCloseIso).getTime() < openedAt + 1,
+  }))
+  assertEquals(result.closedTrades.length, 1)
+  assertEquals(result.closedTrades[0]!.closeReason, 'agent_close') // the same regime-flip exit as the unsuppressed baseline
+  assertEquals(result.openAtEnd.length, 0)
+})

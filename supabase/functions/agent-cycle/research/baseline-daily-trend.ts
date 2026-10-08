@@ -65,6 +65,17 @@ export interface DailyTrendBacktestParams {
   drawdownBreakerFloorPct: number
   stopOutReentryBlockMinutes: number
   slTpBounds: SlTpBounds
+  // DT-1 plan, Phase P0 (2026-10-08) — OPTIONAL, default-inert membership
+  // gate. Checked at exactly ONE point, immediately before an OPEN_LONG
+  // candidate acts, and nowhere else: it can only ever SUPPRESS an open,
+  // never force one, alter an exit, change sizing, or touch an existing
+  // position. This is what lets DT-1 express "this asset may not open a
+  // position this month" (a point-in-time universe gate) without forking
+  // the strategy loop. The S1c identity test in
+  // baseline-daily-trend.test.ts proves that omitting this parameter (or
+  // always returning true) reproduces R4's exact byte-for-byte output —
+  // "unmodified" is proven here, not merely asserted.
+  canOpen?: (asset: AssetSymbol, barCloseIso: string) => boolean
 }
 
 export interface DailyTrendBacktestResult {
@@ -209,6 +220,12 @@ export function runDailyTrendBacktest(barsByAsset: Partial<Record<AssetSymbol, r
         cash = closeRes.cashAfter
         closedTrades.push(toClosedTrade(asset, open.get(asset)!, closeRes, tick))
         open.delete(asset)
+      } else if (candidate.action === 'OPEN_LONG' && params.canOpen && !params.canOpen(asset, tick)) {
+        // Membership gate suppressed this open — the ONLY effect
+        // canOpen may ever have. No gate evaluation, no sizing, no
+        // state mutation of any kind; the asset simply stays FLAT this
+        // tick, exactly as if the regime itself had not turned UP.
+        rejectionsByReason['canOpen_suppressed'] = (rejectionsByReason['canOpen_suppressed'] ?? 0) + 1
       } else if (candidate.action === 'OPEN_LONG') {
         const nav = computeNavNow()
         const otherOpen = [...open.values()].filter((o) => o.asset !== asset)

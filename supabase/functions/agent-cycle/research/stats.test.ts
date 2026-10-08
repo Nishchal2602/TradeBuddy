@@ -128,6 +128,38 @@ Deno.test('computePerformancePanel: a monotonically falling NAV series has a neg
   assertEquals(panel.sharpe < 0, true)
 })
 
+// DT-1 plan, Phase P0 — sharpePerPeriod is purely additive; this pins the
+// exact relationship (`sharpe === sharpePerPeriod * sqrt(annFactor)`) on
+// two different cadences, so the units fix can't silently drift apart from
+// the annualized `sharpe` field everything else already depends on.
+Deno.test('computePerformancePanel: sharpePerPeriod * sqrt(annFactor) === sharpe, on a daily-cadence series', () => {
+  const navSeries = Array.from({ length: 30 }, (_, i) => ({
+    timestamp: new Date(Date.UTC(2024, 0, 1 + i)).toISOString(),
+    nav: 10_000 * (1 + (i % 2 === 0 ? 0.01 : -0.004)),
+  }))
+  const panel = computePerformancePanel({ trades: [], navSeries })
+  const annFactor = 365 // daily ticks -> 1-day median gap -> 365/1
+  assertAlmostEquals(panel.sharpePerPeriod * Math.sqrt(annFactor), panel.sharpe, 1e-9)
+})
+
+Deno.test('computePerformancePanel: sharpePerPeriod * sqrt(annFactor) === sharpe, on a 30-minute-cadence series', () => {
+  const THIRTY_MIN = 30 * 60_000
+  const navSeries = Array.from({ length: 40 }, (_, i) => ({
+    timestamp: new Date(Date.UTC(2024, 0, 1, 0, 0, 0) + i * THIRTY_MIN).toISOString(),
+    nav: 10_000 * (1 + (i % 2 === 0 ? 0.005 : -0.002)),
+  }))
+  const panel = computePerformancePanel({ trades: [], navSeries })
+  const annFactor = (365 * 86_400_000) / THIRTY_MIN // 17,520
+  assertAlmostEquals(panel.sharpePerPeriod * Math.sqrt(annFactor), panel.sharpe, 1e-9)
+  // The decisive proof of the units bug this field exists to fix: the
+  // SAME underlying per-period Sharpe reads wildly different once
+  // annualized at a 30-minute cadence vs. a daily one (sqrt(17520) vs
+  // sqrt(365)) -- exactly why a raw `sharpe` comparison across R4's
+  // 30-minute V4 trials and its daily baseline trial was never apples-
+  // to-apples.
+  assertEquals(Math.abs(panel.sharpe) > Math.abs(panel.sharpePerPeriod) * 10, true)
+})
+
 Deno.test('computePerformancePanel: splits expectancy by direction and by asset independently', () => {
   const trades: StatsTrade[] = [
     trade({ asset: 'BTC', direction: 'long', realizedPnl: 100, initialRiskUsd: 50 }),
