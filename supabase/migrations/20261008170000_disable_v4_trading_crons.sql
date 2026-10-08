@@ -1,0 +1,56 @@
+-- ============================================================================
+-- DT-1 plan, Phase P-1 (2026-10-08) — stop the three live trading crons.
+--
+-- V4 (intraday_ls) is rejected by R4's own evidence (see
+-- context/diagnostics/p5-historical-backtest-results-2026-10-08.md): every
+-- V4-style variant showed a robust, CPCV-confirmed negative expectancy,
+-- statistically indistinguishable from random entry, across 9.1 years of
+-- real BTC/ETH history. Every 15-minute tick since has continued spending
+-- CoinGecko API quota to generate decisions for a strategy already decided
+-- against. This migration stops that spend. It is operational cleanup, NOT
+-- a strategy decision — recording V4 as formally REJECTED/RETIRED belongs
+-- to a separate, independent lifecycle unit (not yet built; see the DT-1
+-- plan's §9.4), deliberately not bundled here.
+--
+-- VERIFIED LIVE IMMEDIATELY BEFORE THIS MIGRATION WAS WRITTEN (both queries
+-- re-run a second time at execution):
+--   select count(*) from positions where status = 'open';   -- => 0
+--   select jobid, jobname, schedule, active from cron.job;  -- all 3 below active=true
+--
+-- Zero open positions across every portfolio (champion + all EXP-1 test
+-- accounts) is the decisive operational fact: there is nothing for
+-- position-monitor to protect, so there is no staged-shutdown problem and
+-- no window in which a position would sit unprotected. All three jobs can
+-- stop in any order, in one migration.
+--
+-- Disabled:
+--   agent-cycle-15min       (id 6) — the live champion account's decisions
+--   cycle-dispatcher-15min  (id 7) — the four exp1-e4-dry-run test accounts
+--   position-monitor-10min  (id 1) — SL/TP/time-stop protection (included
+--                                    ONLY because there are no open
+--                                    positions to protect right now; if one
+--                                    were open, this job would need to stay
+--                                    scheduled until that position closed —
+--                                    it is this project's sole automatic
+--                                    protection mechanism)
+--
+-- market-refresh-5min (id 2) was already inactive before this migration —
+-- untouched here.
+--
+-- Expected saving: ~21 requests/cycle x 96 cycles/day for the champion
+-- (the documented 1+5N shape at N=4), plus the dispatcher's own shared
+-- fetch for the four test accounts — on the order of 2,000+ CoinGecko
+-- requests/day against the 10,000/month Demo cap.
+--
+-- Reversible: `select cron.schedule('agent-cycle-15min', '*/15 * * * *', ...)`
+-- etc., re-run with the same net.http_post body as the migrations that
+-- originally created these jobs (20260923190000 era for agent-cycle,
+-- 20260918124421 for position-monitor, 20261007140000 for the dispatcher).
+-- No job definition is deleted — cron.unschedule removes the pg_cron
+-- registration; the HTTP call bodies live in those earlier migration files,
+-- unaffected.
+-- ============================================================================
+
+select cron.unschedule('agent-cycle-15min');
+select cron.unschedule('cycle-dispatcher-15min');
+select cron.unschedule('position-monitor-10min');
