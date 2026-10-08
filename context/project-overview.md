@@ -14,6 +14,14 @@ A Chrome extension that gives a single user a live window into an AI crypto pape
 4. Simulate realistic paper execution using configurable fees and slippage rather than frictionless fills.
 5. Give the user a focused Chrome extension UI for decisions, portfolio state, positions, and agent controls.
 
+## Return Objective (2026-10-08, DT-1 Phase P1b prerequisite)
+
+**TradeBuddy's standing target: 12–15% annual net return** — net of simulated fees and slippage, the actual costs this project already models (`feeBps`/`slippageBps`), not a gross figure. Stated here because the DT-1 plan's own economic advancement framework (`DT-1` section, `/Users/nishchal/.claude/plans/pricing-and-model-selection-ethereal-fox.md`, §6.8) is denominated in this objective, and that plan's own stop gate (S12) forbids referencing an objective that exists only inside a pre-registration document — it must be project context first.
+
+**What this does and does not fix:** the 12–15% figure is the full objective as given; it does not, by itself, fix a single required-Sharpe number. Per §6.8's own formula, a return target translates to a required Sharpe only once the strategy's own realized volatility is known — `requiredSharpe ≈ targetReturn / realizedVolatility`, both measured from the actual evaluation period's own data. That measurement happens downstream (DT-1's own E1 series, once computed), not here. This section fixes the objective; it deliberately does not fix a Sharpe threshold in advance of having real volatility data to divide by.
+
+**Not yet specified, and not invented here:** a formal multi-year horizon beyond "annual," and any risk-tolerance input independent of the strategy's own measured volatility (none is needed — §6.8's formula derives the required band from realized volatility directly, not from a separately stated risk appetite). If a future evaluation needs either, that is a new, explicit decision to add here as a dated amendment, not to infer from this paragraph.
+
 ## Core User Flow
 
 1. User opens the Chrome extension.
