@@ -43,9 +43,17 @@ import type { IntradayMarketData } from './strategy/aggressive/types.ts'
 import { stopLossPctFor, takeProfitPctFor } from './strategy/rules.ts'
 import { computePositionPnlR, computePriceR } from './strategy/aggressive/protection.ts'
 import type { Bias } from './strategy/intraday-ls/bias.ts'
+import { evaluateH4Trend } from './strategy/intraday-ls/bias.ts'
 import { armFamilyOf } from './strategy/intraday-ls/detectors.ts'
 import type { ArmFamily, ArmId } from './strategy/intraday-ls/detectors.ts'
 import { detectCandidate } from './strategy/intraday-ls/detect-candidate.ts'
+import { detectAllOpportunities, SHADOW_DETECTOR_VERSION } from './strategy/intraday-ls/detect-all-opportunities.ts'
+import { buildBaselineOpportunities } from './strategy/intraday-ls/shadow-baseline.ts'
+import { computeIntradayLsProtection } from './strategy/intraday-ls/protection.ts'
+import { insertShadowCandidates } from './db/shadow-candidates.ts'
+import type { ShadowCandidateRow } from './db/shadow-candidates.ts'
+import { calculateRSI } from './indicators/calculate.ts'
+import { computeStopLossTakeProfitPrices } from '../../../src/shared/risk/sl-tp.ts'
 import { riskAppetiteThresholds } from '../../../src/shared/risk/appetite-mapping.ts'
 import type { RiskAppetiteThresholds } from '../../../src/shared/risk/appetite-mapping.ts'
 import type { RecentStopLossClose } from '../../../src/shared/risk/gate.ts'
@@ -888,6 +896,106 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
         intradayLsOpportunityContext = detection.opportunityContext
         intradayLsCandidate = detection.candidate
         intradayLsComputedPrices = detection.computedPrices
+
+        // STRAT-1 P3 (2026-10-08) — event-keyed shadow candidates + a
+        // random-entry baseline (plan "Event-keyed shadows with a
+        // baseline"). Runs ONLY when bias actually resolved this cycle
+        // (regimeStateForRow non-null) and a config is loaded — both the
+        // daily and 4h legs are then guaranteed known, so regime_daily/
+        // regime_4h are never null on a written row. Entirely SEPARATE
+        // from `detection` above: nothing in this block feeds back into
+        // intradayLsCandidate/intradayLsOpportunityContext, so a bug here
+        // can write a wrong or missing shadow row but can never alter the
+        // real candidate. Non-fatal, observational telemetry only — same
+        // discipline as the occupied-asset shadow insert and the
+        // market_bars upsert a few lines up in this same Pass 1 loop.
+        if (regimeStateForRow && intraday && activeIntradayLsConfig?.config) {
+          try {
+            const policyConfig = activeIntradayLsConfig.config
+            const features = intradayFeaturesFor(intraday)
+            const eligibleArmsThisCycle = policyConfig.directionPolicy[regimeStateForRow] ?? []
+            const regime4h = evaluateH4Trend(assetMarketData.candles.map((c) => c.close))
+            if (regime4h) {
+              const atrPct = managementAtrPctFor('intraday_ls', assetMarketData, intraday)
+              const closes = assetMarketData.closeSeries.map((p) => p.close)
+              const rsi14 = closes.length >= 15 ? calculateRSI([...closes], 14) : null
+
+              const detectedAll = detectAllOpportunities({
+                bars30m: intraday.ohlc30m,
+                breakoutConfirmation: { ret60mPct: features.ret60mPct, volumeTrendRatio: features.volumeTrendRatio },
+                marketData: assetMarketData,
+                eligibleArms: eligibleArmsThisCycle,
+                arms: policyConfig.arms,
+                shortEnabled: policyConfig.shortEnabled,
+                minVolumeTrendRatio: policyConfig.breakoutMinVolumeTrendRatio,
+                fadeThresholds: {
+                  oversold: policyConfig.fadeRsiOversold,
+                  overbought: policyConfig.fadeRsiOverbought,
+                  rangeAtrMultiple: policyConfig.fadeRangeAtrMultiple,
+                },
+                takenArmId: intradayLsOpportunityContext?.armId,
+              })
+
+              const cycleClock = new Date(nowIso)
+              const hourOfDay = cycleClock.getUTCHours()
+              const dayOfWeek = cycleClock.getUTCDay()
+
+              const rowFor = (
+                armId: ShadowCandidateRow['armId'],
+                armFamily: ShadowCandidateRow['armFamily'],
+                direction: ShadowCandidateRow['direction'],
+                shadowCause: ShadowCandidateRow['shadowCause'],
+                triggerBarTs: string,
+                triggerBarClose: number,
+              ): ShadowCandidateRow => {
+                // Fades use their own 1.5 reward:risk inside
+                // computeIntradayLsProtection (keyed off armId.startsWith
+                // ('fade')) — a baseline row has no real arm id, so
+                // 'breakout_long'/'breakout_short' stands in purely for
+                // the DEFAULT 2.0 reward:risk geometry, never for any
+                // detector behavior.
+                const protectionArmId: ArmId = armId === 'baseline_long' ? 'breakout_long' : armId === 'baseline_short' ? 'breakout_short' : armId
+                const protection = computeIntradayLsProtection(protectionArmId, atrPct)
+                const prices = computeStopLossTakeProfitPrices(direction, assetMarketData.price, protection.stopLossPct, protection.takeProfitPct)
+                return {
+                  asset,
+                  armId,
+                  armFamily,
+                  direction,
+                  detectorVersion: SHADOW_DETECTOR_VERSION,
+                  triggerBarTs,
+                  regimeDaily: regime.regime,
+                  regime4h,
+                  biasResolved: regimeStateForRow,
+                  shadowCause,
+                  triggerBarClose,
+                  referencePrice: assetMarketData.price,
+                  stopLossPct: protection.stopLossPct,
+                  takeProfitPct: protection.takeProfitPct,
+                  stopLossPrice: prices.stopLossPrice,
+                  takeProfitPrice: prices.takeProfitPrice,
+                  atrPct,
+                  rsi14,
+                  ret60mPct: features.ret60mPct,
+                  hourOfDay,
+                  dayOfWeek,
+                  strategyConfigHash: activeIntradayLsConfig.configHash,
+                  portfolioId: portfolio.id,
+                  runId,
+                }
+              }
+
+              const shadowRows = detectedAll.map((hit) => rowFor(hit.armId, hit.armFamily, hit.direction, hit.shadowCause, hit.detectedAtBarTs, hit.triggerBarClose))
+              const baselineRows = buildBaselineOpportunities(intraday.ohlc30m).map((b) =>
+                rowFor(b.direction === 'long' ? 'baseline_long' : 'baseline_short', 'baseline', b.direction, 'baseline', b.triggerBarTs, b.triggerBarClose),
+              )
+
+              await insertShadowCandidates(supabase, [...shadowRows, ...baselineRows])
+            }
+          } catch (shadowError) {
+            console.error(`shadow_candidates: skipped for ${asset} this cycle: ${shadowError instanceof Error ? shadowError.message : String(shadowError)}`)
+          }
+        }
       }
 
       passOneResults.push({ asset, assetMarketData, assetInput, regime, candidate, openPosition, recentStopLossClose, aggressiveEntryContext, intradayLsOpportunityContext, intradayLsCandidate, intradayLsComputedPrices, regimeState: regimeStateForRow, eligibleArms: eligibleArmsForRow, noCandidateReason: noCandidateReasonForRow })

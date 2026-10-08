@@ -1,5 +1,5 @@
 import { assertEquals } from 'jsr:@std/assert@1'
-import { evaluateBias } from './bias.ts'
+import { evaluateBias, evaluateH4Trend } from './bias.ts'
 
 const DAY = 86_400_000
 
@@ -46,4 +46,28 @@ Deno.test('evaluateBias: exactly 50 daily and 50 4h closes is valid (boundary in
   assertEquals(evaluateBias(UP_DAILY, RISING_H4), 'LONG')
   assertEquals(UP_DAILY.length, 50)
   assertEquals(RISING_H4.length, 50)
+})
+
+// --- evaluateH4Trend (CFG-1 Stage 2 P3, 2026-10-08, additive) --------------
+
+Deno.test('evaluateH4Trend: EMA20 > EMA50 -> "Up"', () => {
+  assertEquals(evaluateH4Trend(RISING_H4), 'Up')
+})
+
+Deno.test('evaluateH4Trend: EMA20 < EMA50 -> "Down"', () => {
+  assertEquals(evaluateH4Trend(FALLING_H4), 'Down')
+})
+
+Deno.test('evaluateH4Trend: fewer than MIN_H4_CLOSES (50) fails closed (null), same floor as evaluateBias\'s own 4h leg', () => {
+  assertEquals(evaluateH4Trend(RISING_H4.slice(0, 49)), null)
+})
+
+Deno.test('evaluateH4Trend: agrees with evaluateBias\'s own internal 4h leg on every bias fixture in this file', () => {
+  // Cross-check, not a duplicate: evaluateBias is untouched by this
+  // addition, so its resolved bias and this function's own leg must
+  // never silently diverge.
+  assertEquals(evaluateH4Trend(RISING_H4), 'Up')
+  assertEquals(evaluateBias(UP_DAILY, RISING_H4), 'LONG') // UP regime + Up 4h -> LONG, confirming the Up leg
+  assertEquals(evaluateH4Trend(FALLING_H4), 'Down')
+  assertEquals(evaluateBias(DOWN_DAILY, FALLING_H4), 'SHORT') // DOWN regime + Down 4h -> SHORT, confirming the Down leg
 })

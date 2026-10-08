@@ -79,9 +79,9 @@ Deno.test("strategyDefinitionFor('intraday_ls'): decisionIntervalMinutes matches
   assertEquals(strategyDefinitionFor('intraday_ls').decisionIntervalMinutes, 15)
 })
 
-Deno.test("strategyDefinitionFor('intraday_ls'): risk policy — 0.50% budget, 15%/60% caps (single-trade halved 2026-10-03 for the 4-asset universe, plan ASSET-4), same 60-minute (one-cycle) re-entry block as its own cadence", () => {
+Deno.test("strategyDefinitionFor('intraday_ls'): risk policy — 0.15% budget (lowered 2026-10-08, plan STRAT-1 P1, so the 15% single-trade cap stops being the thing that always binds — see profiles.ts's own comment), 15%/60% caps (single-trade halved 2026-10-03 for the 4-asset universe, plan ASSET-4), same 60-minute (one-cycle) re-entry block as its own cadence", () => {
   const def = strategyDefinitionFor('intraday_ls')
-  assertEquals(def.risk.riskBudgetPct, 0.005)
+  assertEquals(def.risk.riskBudgetPct, 0.0015)
   assertEquals(def.risk.maxSingleTradePct, 0.15)
   assertEquals(def.risk.maxTotalNotionalPct, 0.60)
   assertEquals(def.risk.stopOutReentryBlockMinutes, 60)

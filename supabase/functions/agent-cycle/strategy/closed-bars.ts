@@ -46,6 +46,45 @@ export function closedPoints<T extends { timestamp: string }>(
   return [...points]
 }
 
+// Plan STRAT-1 P2 (2026-10-08) — a confirmed look-ahead defect
+// `closedPoints` alone does not catch. Live-measured against `market_bars`:
+// the daily (`1d`) series' most recent row kept advancing by ~15 minutes
+// between consecutive agent-cycle runs (05:13:10, 04:58:40, 04:43:30, ...),
+// instead of sitting still until a genuine new calendar day closed — 24
+// off-grid rows accumulated for one single in-progress day. Root cause:
+// CoinGecko's `days=120` daily series intermittently OMITS today's own
+// 00:00 point entirely. When it does, the trailing live point's gap from
+// YESTERDAY's 00:00 point is `24h + elapsed-today` — at or above DAY_MS —
+// so `closedPoints`'s own gap heuristic (correctly designed for the single
+// "one extra point, always off-grid, always a short gap" case) concludes
+// nothing needs dropping. The live point is then read as "today's close,"
+// when it is actually the current spot price — i.e. `regime.dailyClose`
+// was the live spot price, not a closed daily close, on exactly the cycles
+// where this happens. Confirmed unaffected: the hourly and 5-minute series
+// never exhibit this (their trailing point's gap is always short).
+//
+// This is a SEPARATE, grid-based check — not a gap heuristic — because the
+// defect here is specifically "the point doesn't land on its own interval's
+// grid," which a gap-from-predecessor calculation cannot detect when the
+// gap itself looks superficially large enough to be genuine. Deliberately
+// a trim loop, not a single conditional pop: defensive against CoinGecko
+// ever returning more than one trailing off-grid point in one response,
+// even though live observation shows exactly one per cycle today. Never
+// applied to `candles`/`ohlc30m` — same reasoning as `closedPoints` itself
+// not applying there (module comment above): those series are genuinely
+// close-stamped and complete, confirmed by `reconcileClosedBar`'s own
+// ongoing runtime check.
+export function gridAlignedTail<T extends { timestamp: string }>(
+  points: readonly T[],
+  intervalMs: number,
+): T[] {
+  const result = [...points]
+  while (result.length > 0 && new Date(result[result.length - 1]!.timestamp).getTime() % intervalMs !== 0) {
+    result.pop()
+  }
+  return result
+}
+
 export interface ClosedBarReconciliationResult {
   ok: boolean
   reason: string | null

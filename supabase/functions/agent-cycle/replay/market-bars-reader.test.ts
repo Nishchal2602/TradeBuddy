@@ -15,6 +15,7 @@ function row(overrides: Partial<MarketBarRow> = {}): MarketBarRow {
     ingestedAt: '2026-10-06T12:00:30.000Z',
     batchId: 'batch-1',
     dataVersion: 'v1',
+    isOffGrid: false,
     ...overrides,
   }
 }
@@ -111,6 +112,31 @@ Deno.test('assembleAsOfCycle: each timeframe lands in its own series, never cros
   assertEquals(result.ohlc30m[0]!.close, 3)
   assertEquals(result.spot5m.length, 1)
   assertEquals(result.spot5m[0]!.price, 4)
+})
+
+// --- isOffGrid quarantine (plan STRAT-1 P2, 2026-10-08) -------------------
+
+Deno.test('assembleAsOfCycle: a 1d row flagged isOffGrid is excluded from dailyCloseSeries even though it would otherwise be visible', () => {
+  const bars = [row({ timeframe: '1d', close: 1, isOffGrid: true })]
+  const result = assembleAsOfCycle('BTC', bars, '2026-10-06T12:15:00.000Z')
+  assertEquals(result.dailyCloseSeries.length, 0)
+})
+
+Deno.test('assembleAsOfCycle: a genuine (non-off-grid) 1d row is unaffected by the isOffGrid filter', () => {
+  const bars = [row({ timeframe: '1d', close: 1, isOffGrid: false })]
+  const result = assembleAsOfCycle('BTC', bars, '2026-10-06T12:15:00.000Z')
+  assertEquals(result.dailyCloseSeries.length, 1)
+})
+
+Deno.test('assembleAsOfCycle: one off-grid row among several genuine 1d rows is dropped, the rest survive', () => {
+  const bars = [
+    row({ timeframe: '1d', openTime: '2026-10-04T00:00:00.000Z', closeTime: '2026-10-04T00:00:00.000Z', close: 1, isOffGrid: false }),
+    row({ timeframe: '1d', openTime: '2026-10-05T00:00:00.000Z', closeTime: '2026-10-05T00:00:00.000Z', close: 2, isOffGrid: false }),
+    row({ timeframe: '1d', openTime: '2026-10-06T05:13:10.000Z', closeTime: '2026-10-06T05:13:10.000Z', close: 3, isOffGrid: true }),
+  ]
+  const result = assembleAsOfCycle('BTC', bars, '2026-10-06T12:15:00.000Z')
+  assertEquals(result.dailyCloseSeries.length, 2)
+  assertEquals(result.dailyCloseSeries.map((p) => p.close), [1, 2])
 })
 
 // --- sorting --------------------------------------------------------------

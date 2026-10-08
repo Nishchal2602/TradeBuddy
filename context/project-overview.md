@@ -171,6 +171,20 @@ Each decision records:
 - Any form of real-money execution, exchange integration, or auto-tuning live strategy parameters from backtest results. A backtest finding is advisory input to a human-reviewed version bump, exactly like every other strategy-constant change — never a direct write path.
 - Everything else still listed under "Out of Scope" above — this change touches only the backtesting line. Streaming feeds, multi-agent architecture, RAG, real leverage, exchange credentials, etc. are all unaffected and remain excluded.
 
+### Historical Market-Data Scope (2026-10-08)
+
+**This is the scope change plan `RESEARCH-1` (`/Users/nishchal/.claude/plans/pricing-and-model-selection-ethereal-fox.md`) required before any historical exchange-data ingestion could begin** — the Backtest/Replay Scope above authorizes replaying the deterministic layers only over already-stored `market_bars` history, which starts 2026-09-30. It does not authorize fetching from an exchange. This is that explicit, narrow authorization, given on explicit user instruction ("I give you permission to make changes to the exchange API scope change").
+
+**In scope, narrowly:** public, read-only, unauthenticated market-data endpoints from established exchanges (Binance spot klines, Binance USDS-margined futures funding-rate history) — OHLCV candles and perpetual funding rates only, fetched into a new, separate table (`historical_bars`/`historical_funding_rates`), never mixed into `market_bars`. No API key, no account, no credentials of any kind, ever — both endpoints used are genuinely public and unauthenticated, verified directly against Binance's own API documentation before any code was written.
+
+**This is a data source for the existing, already-authorized deterministic replay harness (2026-10-03 scope) — it does not change what that harness is allowed to do, only what historical range it can do it over.** Every constraint the 2026-10-03 scope already states (deterministic layers only, pre-registration before results, Deflated Sharpe never raw, CPCV with purging/embargoing, no LLM historical replay as performance evidence, no auto-tuning live parameters) applies identically here, unchanged.
+
+**Explicitly still out of scope, not reauthorized by this change:**
+
+- **Any trading/order-placement endpoint, any authenticated endpoint, any write operation against an exchange, and anything resembling live execution** — this change authorizes reading public candles and funding history, nothing else, ever.
+- Everything the 2026-10-03 scope already excludes, unchanged: Jev/any LLM called against historical dates as performance evidence, real-money execution, auto-tuning live parameters from a backtest finding.
+- Everything else still listed under "Out of Scope" above — this change touches only the historical-data-source line.
+
 ## Success Criteria
 
 1. A scheduled server-side cycle can complete without Chrome being open.

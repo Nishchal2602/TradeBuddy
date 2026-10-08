@@ -67,17 +67,23 @@ const MARKET_CHART_WITH_LIVE_POINT_FIXTURE = {
 }
 
 // Real /market_chart?days=120 timestamps are exactly 24h (86_400_000ms)
-// apart, plus one trailing live point (live-verified, strategy-v1 Phase 0).
+// apart AND land exactly on UTC midnight (live-verified, plan STRAT-1 P2 —
+// market_bars' own '1d' rows for a genuine closed day are always
+// '...T00:00:00+00'), plus one trailing live point (live-verified,
+// strategy-v1 Phase 0). 1787011200000 = 2026-08-18T00:00:00.000Z exactly —
+// NOT an arbitrary 24h-apart pair (an earlier version of this fixture used
+// 08:00-UTC-aligned values, which gridAlignedTail correctly flags as never
+// occurring in the real API).
 const DAILY_CHART_FIXTURE = {
   prices: [
-    [1787040000000, 64000.0],
-    [1787126400000, 64500.0], // +24h
-    [1787126400000 + 5 * 60 * 60 * 1000, 64550.0], // +5h, the live point
+    [1787011200000, 64000.0], // 2026-08-18T00:00:00.000Z
+    [1787097600000, 64500.0], // 2026-08-19T00:00:00.000Z, +24h
+    [1787097600000 + 5 * 60 * 60 * 1000, 64550.0], // +5h, the live point
   ],
   total_volumes: [
-    [1787040000000, 30000000000],
-    [1787126400000, 31000000000],
-    [1787126400000 + 5 * 60 * 60 * 1000, 12000000000],
+    [1787011200000, 30000000000],
+    [1787097600000, 31000000000],
+    [1787097600000 + 5 * 60 * 60 * 1000, 12000000000],
   ],
 }
 
@@ -139,8 +145,8 @@ Deno.test('getMarketData: normalizes a happy-path response for both assets', asy
   // DAILY_CHART_FIXTURE has 3 raw points (2 genuine daily + 1 trailing
   // live point at +5h) -> closedPoints drops exactly the live one.
   assertEquals(btc.dailyCloseSeries.length, 2)
-  assertEquals(btc.dailyCloseSeries[0], { timestamp: '2026-08-18T08:00:00.000Z', close: 64000.0 })
-  assertEquals(btc.dailyCloseSeries[1], { timestamp: '2026-08-19T08:00:00.000Z', close: 64500.0 })
+  assertEquals(btc.dailyCloseSeries[0], { timestamp: '2026-08-18T00:00:00.000Z', close: 64000.0 })
+  assertEquals(btc.dailyCloseSeries[1], { timestamp: '2026-08-19T00:00:00.000Z', close: 64500.0 })
 
   const eth = result.find((r) => r.asset === 'ETH')!
   assertEquals(eth.price, 2459.19)

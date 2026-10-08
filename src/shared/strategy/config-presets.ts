@@ -96,7 +96,10 @@ export const V4_COMPAT_CONFIG: IntradayLsConfig = {
   givebackEnabledForIntradayLs: false,
 
   // src/shared/strategy/profiles.ts STRATEGY_PROFILES.intraday_ls.risk.
-  riskBudgetPct: 0.005,
+  // 0.005 -> 0.0015 (2026-10-08, plan STRAT-1 P1) — see that file's own
+  // comment: the 15% single-trade cap was binding on 20 of 23 real sized
+  // decisions at 0.005, making every risk multiplier inert.
+  riskBudgetPct: 0.0015,
   maxSingleTradePct: 0.15,
   maxTotalNotionalPct: 0.60,
   stopOutReentryBlockMinutes: 60,

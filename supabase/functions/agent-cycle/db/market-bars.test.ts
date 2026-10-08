@@ -28,6 +28,7 @@ Deno.test('barsFromOhlcCandles: maps every field, true OHLC, isSampled=false, pr
     asset: 'BTC', timeframe: '4h', openTime: '2026-10-01T04:00:00.000Z', closeTime: '2026-10-01T04:00:00.000Z',
     open: 100, high: 105, low: 98, close: 103, volume: null, isSampled: false,
     source: 'coingecko', ingestedAt: '2026-10-06T12:00:00.000Z', batchId: '11111111-1111-1111-1111-111111111111', dataVersion: MARKET_BARS_DATA_VERSION,
+    isOffGrid: false,
   }])
 })
 
@@ -37,6 +38,7 @@ Deno.test('barsFromCloseSeries: close only, open/high/low/volume null, isSampled
     asset: 'ETH', timeframe: '1d', openTime: '2026-09-30T00:00:00.000Z', closeTime: '2026-09-30T00:00:00.000Z',
     open: null, high: null, low: null, close: 2700, volume: null, isSampled: true,
     source: 'coingecko', ingestedAt: '2026-10-06T12:00:00.000Z', batchId: '11111111-1111-1111-1111-111111111111', dataVersion: MARKET_BARS_DATA_VERSION,
+    isOffGrid: false,
   }])
 })
 
@@ -46,6 +48,7 @@ Deno.test('barsFromSpotPoints: price becomes close, volume carried, isSampled=tr
     asset: 'BTC', timeframe: '5m', openTime: '2026-10-01T09:55:00.000Z', closeTime: '2026-10-01T09:55:00.000Z',
     open: null, high: null, low: null, close: 83700, volume: 12.5, isSampled: true,
     source: 'coingecko', ingestedAt: '2026-10-06T12:00:00.000Z', batchId: '11111111-1111-1111-1111-111111111111', dataVersion: MARKET_BARS_DATA_VERSION,
+    isOffGrid: false,
   }])
 })
 
@@ -87,6 +90,7 @@ function barAt(iso: string): MarketBarRow {
   return {
     asset: 'BTC', timeframe: '5m', openTime: iso, closeTime: iso, open: null, high: null, low: null, close: 1, volume: null, isSampled: true,
     source: 'coingecko', ingestedAt: PROVENANCE.nowIso, batchId: PROVENANCE.batchId, dataVersion: MARKET_BARS_DATA_VERSION,
+    isOffGrid: false,
   }
 }
 

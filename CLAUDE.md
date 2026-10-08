@@ -263,6 +263,7 @@ V0 deliberately excludes:
 - buy-and-hold benchmark
 - event-driven triggers on the decision cycle (the position monitor is a separate, deterministic exception — it exists for SL/TP execution, not for triggering new decisions)
 - ~~backtesting~~ — **superseded 2026-10-03.** A narrowly-bounded deterministic replay/backtest harness is now in scope; the canonical boundary (what's in, what's explicitly still out — especially: LLM historical replay never counts as performance evidence) lives in `context/project-overview.md`'s "Backtest/Replay Scope" subsection, not restated here.
+- ~~exchange API integrations~~ — **superseded 2026-10-08, for historical market DATA only, explicit user instruction.** Public, read-only, unauthenticated exchange kline/funding endpoints (Binance) may now be fetched to extend the backtest harness's historical range — canonical boundary in `context/project-overview.md`'s "Historical Market-Data Scope" subsection, not restated here. No trading/order endpoint, no credentials, no new traded asset, no live exchange execution — none of that is reauthorized by this.
 - streaming feeds
 - real leverage, funding, or exchange-style liquidation
 - limit orders

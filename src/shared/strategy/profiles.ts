@@ -168,7 +168,25 @@ export const STRATEGY_PROFILES: Record<StrategyProfile, StrategyDefinition> = {
     newsLookbackMinutes: 195,
     maxDataStalenessMinutes: 10,
     risk: {
-      riskBudgetPct: 0.005,
+      // 0.005 -> 0.0015 (2026-10-08, plan STRAT-1 P1 — "sizing fix, do
+      // first"). Verified live before this change: deriveRiskBasedNotional
+      // (src/shared/risk/sizing.ts) computes notionalPct = riskBudgetPct /
+      // stopLossPct. At 0.005 and the common 1.2% stop floor (BTC/ETH),
+      // that's 0.005/0.012 = 41.7% NAV — far above the 15% single-trade
+      // cap (maxSingleTradePct below), so the cap bound on 20 of 23 real
+      // sized decisions (size_cap_applied='single_trade', approved_size_pct
+      // pinned at exactly 0.1500 regardless of ATR). Every multiplier that
+      // scales riskBudgetPct — the existing fade half-risk, the correlation
+      // cut, and any future regime-based multiplier (plan STRAT-1 P6) — was
+      // therefore INERT: halving an already-3x-oversized budget still
+      // leaves it oversized, so size never actually changed.
+      // 0.0015 at the 1.2% floor = 0.0015/0.012 = 12.5% NAV, comfortably
+      // under the 15% cap (so the cap stops being the thing that always
+      // binds) and under the 60% total-notional ceiling across all 4
+      // assets (12.5% x 4 = 50%). A multiplier now does what its own
+      // number says: a 0.5x cut actually halves notional instead of
+      // clamping to the identical 15%.
+      riskBudgetPct: 0.0015,
       // 0.30 -> 0.15 (2026-10-03, plan ASSET-4, explicit user instruction:
       // 4-asset universe, same aggregate risk). At the 1.2% stop floor,
       // live-verified before this change: NAV $10,006.28, BTC $3,001.54

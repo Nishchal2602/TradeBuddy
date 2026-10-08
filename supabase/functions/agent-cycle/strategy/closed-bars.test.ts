@@ -1,5 +1,5 @@
 import { assertEquals } from 'jsr:@std/assert@1'
-import { closedPoints, reconcileClosedBar } from './closed-bars.ts'
+import { closedPoints, gridAlignedTail, reconcileClosedBar } from './closed-bars.ts'
 
 const HOUR = 60 * 60 * 1000
 const DAY = 24 * HOUR
@@ -73,6 +73,69 @@ Deno.test('closedPoints: does not mutate the input array', () => {
   const before = [...points]
   closedPoints(points, DAY)
   assertEquals(points, before)
+})
+
+// --- gridAlignedTail (2026-10-08, plan STRAT-1 P2) ------------------------
+
+Deno.test('gridAlignedTail: a series already ending on a genuine midnight-aligned point is unchanged', () => {
+  const points = [point('2026-10-05T00:00:00.000Z'), point('2026-10-06T00:00:00.000Z'), point('2026-10-07T00:00:00.000Z')]
+  assertEquals(gridAlignedTail(points, DAY), points)
+})
+
+Deno.test('gridAlignedTail: the real failing case — closedPoints left a live point behind because its gap looked >= 24h', () => {
+  // The exact live scenario: CoinGecko omitted today's own 00:00 point, so
+  // the trailing live point's gap from yesterday's 00:00 is >24h and
+  // closedPoints (gap-based) does not drop it, even though it is not
+  // midnight-aligned.
+  const points = [
+    point('2026-10-06T00:00:00.000Z'),
+    point('2026-10-07T00:00:00.000Z'),
+    point('2026-10-08T05:13:10.000Z'), // live spot, mislabeled as "today's close"
+  ]
+  const result = gridAlignedTail(points, DAY)
+  assertEquals(result.length, 2)
+  assertEquals(result[result.length - 1]!.timestamp, '2026-10-07T00:00:00.000Z')
+})
+
+Deno.test('gridAlignedTail: trims more than one trailing off-grid point, defensively', () => {
+  const points = [
+    point('2026-10-06T00:00:00.000Z'),
+    point('2026-10-07T12:00:00.000Z'), // off-grid
+    point('2026-10-07T18:00:00.000Z'), // off-grid
+  ]
+  const result = gridAlignedTail(points, DAY)
+  assertEquals(result, [point('2026-10-06T00:00:00.000Z')])
+})
+
+Deno.test('gridAlignedTail: an empty series is returned unchanged', () => {
+  assertEquals(gridAlignedTail([], DAY), [])
+})
+
+Deno.test('gridAlignedTail: every point off-grid trims down to empty, never throws', () => {
+  const points = [point('2026-10-07T12:00:00.000Z'), point('2026-10-08T05:13:10.000Z')]
+  assertEquals(gridAlignedTail(points, DAY), [])
+})
+
+Deno.test('gridAlignedTail: does not mutate the input array', () => {
+  const points = [point('2026-10-06T00:00:00.000Z'), point('2026-10-08T05:13:10.000Z')]
+  const before = [...points]
+  gridAlignedTail(points, DAY)
+  assertEquals(points, before)
+})
+
+Deno.test('gridAlignedTail: composes with closedPoints — the real coingecko.ts call shape, end to end', () => {
+  // closedPoints first drops nothing (gap looks >= 24h, its own design);
+  // gridAlignedTail then catches the residual off-grid point.
+  const points = [
+    point('2026-10-06T00:00:00.000Z'),
+    point('2026-10-07T00:00:00.000Z'),
+    point('2026-10-08T05:13:10.000Z'),
+  ]
+  const afterClosedPoints = closedPoints(points, DAY)
+  assertEquals(afterClosedPoints, points, 'precondition: closedPoints alone does not drop this point')
+  const result = gridAlignedTail(afterClosedPoints, DAY)
+  assertEquals(result.length, 2)
+  assertEquals(result[result.length - 1]!.timestamp, '2026-10-07T00:00:00.000Z')
 })
 
 // --- reconcileClosedBar (2026-10-03, plan §5-IMPL review item 3) ----------

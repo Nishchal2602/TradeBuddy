@@ -75,6 +75,14 @@ export interface MarketBarRow {
   ingestedAt: string | null
   batchId: string | null
   dataVersion: string | null
+  // Plan STRAT-1 P2 (2026-10-08) — true only for a pre-fix '1d' row whose
+  // openTime is not UTC-midnight-aligned (a confirmed look-ahead defect:
+  // the live spot price, mislabeled as a closed daily close). Defaults
+  // false in the DB and in every write path (barsFrom* below never sets
+  // it) — the daily-series fix (providers/coingecko.ts's gridAlignedTail)
+  // means no NEW row should ever need this flag; it exists to mark the
+  // historical rows a migration backfilled. Always false for 5m/30m/4h.
+  isOffGrid: boolean
 }
 
 export interface BarProvenance {
@@ -106,6 +114,7 @@ export function barsFromOhlcCandles(
     ingestedAt: provenance.nowIso,
     batchId: provenance.batchId,
     dataVersion: MARKET_BARS_DATA_VERSION,
+    isOffGrid: false,
   }))
 }
 
@@ -130,6 +139,11 @@ export function barsFromCloseSeries(
     ingestedAt: provenance.nowIso,
     batchId: provenance.batchId,
     dataVersion: MARKET_BARS_DATA_VERSION,
+    // Always false for a NEW write — dailyCloseSeries is now
+    // gridAlignedTail-trimmed at the provider boundary (plan STRAT-1 P2),
+    // so a '1d' row reaching this function can never be the off-grid
+    // live-spot-price case the flag exists to mark historically.
+    isOffGrid: false,
   }))
 }
 
@@ -154,6 +168,7 @@ export function barsFromSpotPoints(
     ingestedAt: provenance.nowIso,
     batchId: provenance.batchId,
     dataVersion: MARKET_BARS_DATA_VERSION,
+    isOffGrid: false,
   }))
 }
 
@@ -215,6 +230,7 @@ export function marketBarRowFromDbRow(row: Record<string, unknown>): MarketBarRo
     ingestedAt: row.ingested_at === null ? null : toIsoZ(row.ingested_at as string),
     batchId: row.batch_id as string | null,
     dataVersion: row.data_version as string | null,
+    isOffGrid: row.is_off_grid as boolean,
   }
 }
 
@@ -234,6 +250,7 @@ function toDbRow(row: MarketBarRow) {
     ingested_at: row.ingestedAt,
     batch_id: row.batchId,
     data_version: row.dataVersion,
+    is_off_grid: row.isOffGrid,
   }
 }
 
@@ -256,11 +273,23 @@ export async function upsertMarketBars(supabase: SupabaseClient, rows: readonly 
 
   for (const group of byKey.values()) {
     const { asset, timeframe } = group[0]!
+    // Plan STRAT-1 P2 (2026-10-08) — excludes is_off_grid rows from the
+    // "stored max" computation. Found live, not assumed: without this,
+    // a pre-fix off-grid '1d' row (the live spot price, future-dated
+    // relative to the real calendar day it was mistakenly written for —
+    // e.g. '...T06:43:20' instead of '...T00:00:00') permanently poisons
+    // filterNewBars' own comparison. Every GENUINE future daily close
+    // (always midnight-aligned, so always numerically EARLIER in the day
+    // than a bogus intraday timestamp) would then be rejected as "not
+    // newer than what's stored" forever, silently stopping the '1d'
+    // series from ever accumulating a real row again. Harmless for
+    // 30m/4h/5m — is_off_grid is always false there.
     const { data, error: readError } = await supabase
       .from('market_bars')
       .select('open_time')
       .eq('asset', asset)
       .eq('timeframe', timeframe)
+      .eq('is_off_grid', false)
       .order('open_time', { ascending: false })
       .limit(1)
       .maybeSingle()

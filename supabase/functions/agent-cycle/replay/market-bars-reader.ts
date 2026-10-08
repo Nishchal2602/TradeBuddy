@@ -117,7 +117,15 @@ export function assembleAsOfCycle(asset: AssetSymbol, bars: readonly MarketBarRo
   const cutoffMs = new Date(asOfCycleIso).getTime()
   const forAsset = bars.filter((b) => b.asset === asset)
 
-  const daily = visibleSeries(forAsset.filter((b) => b.timeframe === '1d'), cutoffMs)
+  // Plan STRAT-1 P2 (2026-10-08) — '1d' rows flagged isOffGrid are a
+  // confirmed look-ahead defect (the live spot price, mislabeled as a
+  // closed daily close — see market-bars.ts's own comment on the field)
+  // and must never enter a replayed dailyCloseSeries. Excluded before
+  // visibleSeries runs, not after: visibleSeries' own closeTime <=
+  // confirmedThroughMs logic has no way to know these specific rows are
+  // untrustworthy, and letting one through would silently reproduce the
+  // exact defect this fix exists to close.
+  const daily = visibleSeries(forAsset.filter((b) => b.timeframe === '1d' && !b.isOffGrid), cutoffMs)
   const fourH = visibleSeries(forAsset.filter((b) => b.timeframe === '4h'), cutoffMs)
   const thirtyM = visibleSeries(forAsset.filter((b) => b.timeframe === '30m'), cutoffMs)
   const fiveM = visibleSeries(forAsset.filter((b) => b.timeframe === '5m'), cutoffMs)

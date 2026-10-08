@@ -14,7 +14,7 @@ import {
 // triggers.ts), matching how NormalizedMarketData is owned by
 // src/shared/market-data/types.ts and merely produced here.
 import type { PricePoint } from '../../position-monitor/triggers.ts'
-import { closedPoints } from '../strategy/closed-bars.ts'
+import { closedPoints, gridAlignedTail } from '../strategy/closed-bars.ts'
 
 const HOUR_MS = 60 * 60 * 1000
 const DAY_MS = 24 * HOUR_MS
@@ -279,8 +279,21 @@ export class CoinGeckoMarketDataProvider implements MarketDataProvider {
       chart.total_volumes.map(([ts, volume]) => ({ timestamp: msToIso(ts), volume })),
       HOUR_MS,
     )
-    const dailyCloseSeries = closedPoints(
-      daily.prices.map(([ts, price]) => ({ timestamp: msToIso(ts), close: price })),
+    // Plan STRAT-1 P2 (2026-10-08) — closedPoints alone is insufficient for
+    // the daily series specifically: CoinGecko's days=120 response
+    // sometimes omits today's own 00:00 point, in which case the trailing
+    // live point's gap from yesterday's 00:00 looks >= 24h and closedPoints
+    // correctly (by its own gap-based design) leaves it alone — but it is
+    // still the live spot price, not a closed daily close. gridAlignedTail
+    // is the grid-based backstop: trims any trailing point that isn't
+    // exactly UTC-midnight-aligned, which a gap check cannot detect on its
+    // own. See closed-bars.ts's own comment on gridAlignedTail for the full
+    // live-measured evidence.
+    const dailyCloseSeries = gridAlignedTail(
+      closedPoints(
+        daily.prices.map(([ts, price]) => ({ timestamp: msToIso(ts), close: price })),
+        DAY_MS,
+      ),
       DAY_MS,
     )
 

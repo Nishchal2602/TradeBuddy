@@ -36,3 +36,17 @@ export function evaluateBias(dailyCloses: readonly { timestamp: string; close: n
   if (regime.regime === 'DOWN' && !h4Up) return 'SHORT'
   return 'NEUTRAL'
 }
+
+// CFG-1 Stage 2 P3 (2026-10-08) — ADDITIVE export only; evaluateBias's own
+// signature and behavior are completely unchanged. Exposes the 4h leg in
+// isolation (today fused into evaluateBias's single returned Bias) so
+// shadow_candidates can persist regime_daily and regime_4h as SEPARATE
+// sliceable columns (plan P3), rather than only the fused bias value.
+// null exactly when evaluateBias itself would fail closed on this leg
+// (< MIN_H4_CLOSES) — same floor, same meaning.
+export function evaluateH4Trend(h4Closes: readonly number[]): 'Up' | 'Down' | null {
+  if (h4Closes.length < MIN_H4_CLOSES) return null
+  const mutableH4Closes = [...h4Closes]
+  const h4Up = calculateEMA(mutableH4Closes, H4_EMA_FAST_PERIOD) > calculateEMA(mutableH4Closes, H4_EMA_SLOW_PERIOD)
+  return h4Up ? 'Up' : 'Down'
+}
