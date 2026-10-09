@@ -1,8 +1,8 @@
-# DT-1 pre-registration — STAGE A (draft, pending final sign-off on 5 flagged items)
+# DT-1 pre-registration — STAGE A (FROZEN 2026-10-08)
 
 **2026-10-08.** Per the DT-1 plan's two-stage pre-registration split (§6.7b): Stage A freezes everything that does **not** depend on the real universe's own price data existing. Stage B (ρ̄/N/T measured from that data, the power simulation across both grids, and its stop-rule outcome) follows only after Stage A is frozen and the universe is built.
 
-**This document is a draft, not yet frozen.** Five items are marked `[DEFAULT — confirm or override]` — a reasoned default is stated for each so this can be approved in one pass rather than reopening the whole design. Everything else here reflects decisions already made explicitly in this review (committed in `5b8a5ef`..`29467bf`) and is not reopened.
+**STAGE A IS NOW FROZEN.** All five previously-flagged items were signed off explicitly on 2026-10-08, with one substantive decision on A10 (see §11 and the table at the end). Nothing in this document is reopened absent new evidence — per the plan's own stop gate S3b, a universe or methodology change contemplated after this freeze is a hard stop, not a revision. Everything else here reflects decisions already made explicitly in this review (committed in `5b8a5ef`..`29467bf`) and is not reopened either.
 
 ---
 
@@ -24,13 +24,13 @@ Recovered from committed code only (never documentation), per stop gate S1. Incl
 
 **Ranking**: mean daily quote volume over the preceding 30 days. `N = min(20, eligible)`.
 
-**A6 — `[DEFAULT — confirm or override]`**: rank the true top 20 **including** BTC/ETH (they are genuinely the most liquid; excluding them from the ranking step would silently redefine the universe), then exclude them from the **primary** analysis only, leaving ~18 external sleeves. The secondary full-universe analysis (§6.9) includes them.
+**A6 — CONFIRMED 2026-10-08**: rank the true top 20 **including** BTC/ETH (they are genuinely the most liquid; excluding them from the ranking step would silently redefine the universe), then exclude them from the **primary** analysis only, leaving ~18 external sleeves. The secondary full-universe analysis (§6.9) includes them.
 
 **Exclusion list (A1)** — census-derived, named, not a description (`dt1-phase1c-pit-census-2026-10-08.md`):
 
 - **11 leveraged tokens** (Binance's own 3x long/short products, excluded by construction): `BTCUPUSDT`, `BTCDOWNUSDT`, `ETHBULLUSDT`, `ETHBEARUSDT`, `EOSBULLUSDT`, `EOSBEARUSDT`, `BULLUSDT`, `BEARUSDT`, `LINKDOWNUSDT`, `XRPUPUSDT`, `XRPDOWNUSDT`
 - **4 stablecoins**: `PAXUSDT`, `BUSDUSDT`, `USTUSDT`, `USDSOLDUSDT`
-- **`[DEFAULT — confirm or override]` `WRXUSDT`** (WazirX, an exchange-affiliated token fitting no named exclusion category): proposed default is **exclude**, on the reasoning that an exchange token's value is tied to a specific platform's own fortunes rather than being an ordinary open-market asset — but this was never one of the plan's originally-named categories, so it is flagged rather than silently folded in.
+- **`WRXUSDT` — CONFIRMED EXCLUDED 2026-10-08.** **"Exchange-affiliated token" is now a sixth named exclusion category**, alongside leveraged-index products / stablecoins / wrapped tokens / LSTs, applied consistently rather than as a discretionary per-asset call. Rationale: an exchange token's value is tied to a specific platform's own fortunes rather than being an ordinary open-market asset. Any future census hit matching this category (a token whose issuing or namesake entity is itself an exchange) is excluded under the same rule, not re-litigated asset by asset.
 
 **Contract/underlying mapping** — 7 renames, every one live-verified against `exchangeInfo` (not assumed):
 
@@ -58,7 +58,7 @@ Flat 10bps fee, 5bps slippage, global (not per-asset). Funding excluded from the
 
 **Newey-West (E2)**: automatic lag rule `L=floor(4·(T/100)^(2/9))` (≈4 at the realistic `T≈108` months), no discretion left; small-sample correction via `T/(T-1)` variance scaling and a Student-*t*(`T-1`) reference. Series construction corrected: each trade assigned only to its closing month; `E2 = (Σ monthly sums of R) / (Σ monthly trade counts)`; standard error via the delta method on the HAC-estimated variance/covariance of the two monthly series, with zero-trade months correctly defined as `(0,0)`, never dropped.
 
-**Block bootstrap**: 10,000 resamples, 90% CI. **A7 — `[DEFAULT — confirm or override]`**: mean block length via the Politis-White automatic selection algorithm, computed from the real portfolio series once it exists (the algorithm is frozen now; its numeric output cannot be known before the data does). This is the one dependence parameter with no explicit sign-off yet, unlike the Newey-West lag above.
+**Block bootstrap**: 10,000 resamples, 90% CI. **A7 — CONFIRMED 2026-10-08**: mean block length via the Politis-White automatic selection algorithm. The *algorithm* is frozen now, by this sign-off; its *numeric output* is computed later, from the real assembled portfolio series once it exists (Stage B) — freezing the algorithm now and deferring only the number it produces is the point, not a gap.
 
 **Direction-disagreement rule (E2 only — E1 has a single interval method and needs no tie-break)**: significant only if all three E2 intervals exclude zero in the same direction; any interval including zero → not significant; two excluding zero in opposite directions → "estimator conflict," reported as its own finding, never resolved by majority.
 
@@ -81,7 +81,7 @@ Flat 10bps fee, 5bps slippage, global (not per-asset). Funding excluded from the
 
 Reported in full per §6.3/§6.6: `expectancyR.actionable` at n_eff; DSR>0.95 on E1's daily-resampled per-period series at both N=1 and N=14; CPCV median sign agreement. Concrete justification for the demotion, verified at full precision: BTC's daily-trend per-period Sharpe (+0.0214) sits against an `SR0` benchmark of 0.0949 — annualizing that benchmark back (≈1.81) lands **above the realistic 0.5–1.2 crypto-trend range**, meaning this clause could never have passed regardless of whether the strategy actually works.
 
-**A9 — still open, `[DEFAULT — confirm or override]`**: the per-sleeve drawdown-breaker truncation bias (R4's own `drawdownBreakerFloorPct=0.5` halts a losing sleeve permanently, biasing pooled expectancy upward) is distinct from the MaxDD veto above (which measures drawdown on the bootstrap-*scaled* series, not the breaker-truncation effect itself). Proposed default: report the breaker-disabled run as a **secondary**, not co-primary — the primary stays faithful to R4's exact execution rules (including its own risk breaker), and the disabled-breaker variant quantifies the bias's magnitude separately. Flagged because the plan never resolved this one.
+**A9 — CONFIRMED 2026-10-08**: the per-sleeve drawdown-breaker truncation bias (R4's own `drawdownBreakerFloorPct=0.5` halts a losing sleeve permanently, biasing pooled expectancy upward) is distinct from the MaxDD veto above (which measures drawdown on the bootstrap-*scaled* series, not the breaker-truncation effect itself). **The primary keeps R4's exact risk breaker, unmodified.** The breaker-disabled run is a **secondary quantification of the bias's magnitude only — never co-primary, never substituted into the primary estimate.**
 
 ## 7. Trial registry and counting (§6.6)
 
@@ -107,20 +107,30 @@ Per-year breakdown + leave-one-year-out · contribution concentration (best year
 
 ## 11. Power simulation — Stage B, not frozen here
 
-Specified in full (§6.7b): DGP measured from R4's own real trade population (skew/kurtosis) and BTC's own real regime-timing sequence (temporal/cross-sectional structure); `ρ̄` measured from the real universe's price data (not borrowed from ASSET-4) **once it exists**, swept across `{0.5, 0.65, 0.8}`; Sharpe grid `{0, 0.3, 0.5, 0.8, 1.2}`.
+Specified in full (§6.7b): DGP measured from R4's own real trade population (skew/kurtosis) and BTC's own real regime-timing sequence (temporal/cross-sectional structure); `ρ̄` measured from the real universe's price data (not borrowed from ASSET-4) **once it exists**, swept across `{0.5, 0.65, 0.8}`; Sharpe grid **`{0, 0.3, 0.5, 0.54, 0.8, 1.2}`** — widened from the plan's original `{0, 0.3, 0.5, 0.8, 1.2}` by inserting **0.54 exactly** (see A10 below: the economic hurdle is computed *at* 0.54, not interpolated from the nearby 0.5 grid point).
 
-**A10 — open, no default proposed.** The power simulation's exact numeric stop-rule threshold (e.g. minimum acceptable economic power at Sharpe=0.5) has no confirmed value — 50% was proposed in the original review package but never addressed in the subsequent correction round. This is the one item left genuinely open rather than defaulted, because a wrong default here directly risks manufacturing a pass or an unnecessary stop.
+**A10 — CONFIRMED 2026-10-08. Minimum economic power threshold: 80%, evaluated at true Sharpe = 0.54 (the exact economic hurdle, §5 above), not at 0.5.**
+
+**The rule, frozen exactly, with no further discretion left at Stage B:**
+
+1. **Primary power threshold**: at least **80%** probability that the pre-registered E1 economic-advancement criterion (§5 — E1 above 0.54, MaxDD veto not triggered, robustness condition holds) is satisfied, when the simulation's true input Sharpe is **0.54**.
+2. **Implementation**: `0.54` is an explicit point on the simulation's Sharpe grid (see the widened grid above) — never interpolated from the neighboring `0.5` point. This removes a free choice (which interpolation method, what error it introduces) that would otherwise exist at the exact hurdle value that matters most.
+3. **If power at Sharpe=0.54 is below 80%**: DT-1 is labeled **underpowered for the economic-advancement decision**. DT-1 may still run in full and report its estimates and intervals (E1, E2, with their CIs) — those remain valid descriptive output — but **it cannot earn a "supported" verdict on this study's evidence alone.** This is not a stop on running DT-1; it is a pre-committed cap on what conclusion the run is allowed to produce.
+4. **Sensitivity**: power at Sharpe=0.54 is computed and reported at **all three** `ρ̄` grid points (`{0.5, 0.65, 0.8}`). If the 80%-threshold verdict (pass/fail) changes across that grid, this is reported explicitly as **"power conclusion: fragile"** in the Stage B write-up — never silently resolved by picking whichever `ρ̄` is most convenient.
+5. **No threshold changes after seeing DT-1's actual performance, ever.** 80% is frozen by this sign-off. A different number proposed after the power-simulation's real output exists, or after DT-1's own result exists, is not a refinement — it is exactly the threshold-relaxation-to-manufacture-a-pass that stop gate S11 and the plan's own "never relax a threshold" instruction forbid.
+
+**Why 80% and not the originally-proposed 50%**: 50% would mean DT-1 is as likely to fail to detect a real, at-the-hurdle effect as to detect it — a coin flip is not a basis for a "supported" verdict on a question this consequential (whether a strategy advances past a research gate). 80% is the conventional minimum for a power analysis to be considered informative at all, and is consistent with the power convention already adopted elsewhere in this plan (§6.4, alpha=0.10/power=0.80 for the n_eff MDE calculations) — this closes the one place where DT-1's own gate was about to use a laxer standard than the rest of the design.
 
 ---
 
-## Items requiring sign-off before this freezes
+## Items signed off 2026-10-08 — STAGE A FROZEN
 
-| # | Item | Proposed default |
+| # | Item | Decision |
 |---|---|---|
-| A6 | BTC/ETH occupy 2 of the top-20 ranking slots, then excluded from primary | Rank including them, exclude from primary only |
-| A1 (WRX) | `WRXUSDT` exclusion | Exclude (exchange token) |
-| A7 | Block-bootstrap mean length algorithm | Politis-White automatic selection |
-| A9 | Drawdown-breaker-truncation bias treatment | Secondary run, not co-primary |
-| A10 | Power-simulation stop-rule threshold | **No default — needs your number** |
+| A6 | BTC/ETH occupy 2 of the top-20 ranking slots, then excluded from primary | **Confirmed**: rank including them, exclude from primary only (~18 external sleeves) |
+| A1 (WRX) | `WRXUSDT` exclusion | **Confirmed excluded**; "exchange-affiliated token" is now a named 6th exclusion category, applied consistently |
+| A7 | Block-bootstrap mean length algorithm | **Confirmed**: Politis-White automatic selection, algorithm frozen now, numeric output computed at Stage B |
+| A9 | Drawdown-breaker-truncation bias treatment | **Confirmed**: R4's exact breaker stays in the primary; breaker-disabled run is a secondary quantification only, never co-primary |
+| A10 | Power-simulation stop-rule threshold | **Confirmed: minimum 80% power, evaluated at true Sharpe=0.54 (added explicitly to the grid, not interpolated), reported across the full ρ̄∈{0.5,0.65,0.8} grid, fragility flagged if the verdict changes across it. No threshold changes after seeing DT-1 performance.** |
 
-Everything else in this document is settled and will not be reopened absent new evidence.
+Everything in this document is now settled and will not be reopened absent new evidence. Per the plan's own 5-step Order of Work, Stage A being frozen means the next steps are: (4) build the universe data (Phase 3 infrastructure), measure `ρ̄`/realized-N-over-time/`T` from that real price data — data only, never strategy performance — then implement and run the power simulation across the `ρ̄` × Sharpe grid above; (5) freeze Stage B (including the A10 stop-rule's actual outcome), then proceed to the DT-1 backtest run itself.
