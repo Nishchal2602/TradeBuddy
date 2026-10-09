@@ -1,5 +1,5 @@
 import { assertEquals } from 'jsr:@std/assert@1'
-import { buildResearchContracts, classifyUsdtSymbol, isLeveragedToken, KNOWN_EXCHANGE_TOKENS, KNOWN_RENAMES, KNOWN_STABLECOINS } from './contracts.ts'
+import { buildResearchContracts, classifyUsdtSymbol, isLeveragedToken, KNOWN_EXCHANGE_TOKENS, KNOWN_FIAT_CURRENCIES, KNOWN_RENAMES, KNOWN_STABLECOINS } from './contracts.ts'
 import type { ExchangeInfoSymbol } from '../../providers/binance.ts'
 
 function sym(symbol: string, quoteAsset = 'USDT', status = 'TRADING'): ExchangeInfoSymbol {
@@ -49,6 +49,27 @@ Deno.test('classifyUsdtSymbol: every known exchange token is excluded with a rea
   for (const symbol of KNOWN_EXCHANGE_TOKENS) {
     const result = classifyUsdtSymbol(symbol)
     assertEquals(result.assetClass, 'exchange_token')
+    assertEquals(result.excluded, true)
+  }
+})
+
+Deno.test('classifyUsdtSymbol: every known fiat currency pair is excluded with a reason', () => {
+  for (const symbol of KNOWN_FIAT_CURRENCIES) {
+    const result = classifyUsdtSymbol(symbol)
+    assertEquals(result.assetClass, 'fiat_currency')
+    assertEquals(result.excluded, true)
+  }
+})
+
+// Regression guard for the two stablecoins found via the live price-
+// volatility sweep (2026-10-09) rather than by name alone -- USD1 and
+// RLUSD's tickers give no textual hint of being dollar-pegged, which is
+// exactly why a name-based classifier alone cannot be fully trusted (see
+// contracts.ts's own KNOWN_STABLECOINS comment).
+Deno.test('classifyUsdtSymbol: USD1USDT, RLUSDUSDT, UUSDT (found via price-volatility, not name) are excluded stablecoins', () => {
+  for (const symbol of ['USD1USDT', 'RLUSDUSDT', 'UUSDT']) {
+    const result = classifyUsdtSymbol(symbol)
+    assertEquals(result.assetClass, 'stablecoin')
     assertEquals(result.excluded, true)
   }
 })

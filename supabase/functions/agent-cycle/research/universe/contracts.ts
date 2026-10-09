@@ -33,7 +33,7 @@ import type { ResearchSymbol } from '../types.ts'
 // seen before in this project's research still classifies correctly on
 // first encounter.
 
-export type ResearchAssetClass = 'ordinary' | 'stablecoin' | 'leveraged_index' | 'wrapped' | 'lst' | 'exchange_token'
+export type ResearchAssetClass = 'ordinary' | 'stablecoin' | 'leveraged_index' | 'wrapped' | 'lst' | 'exchange_token' | 'fiat_currency'
 
 export interface ResearchContractClassification {
   underlyingId: ResearchSymbol
@@ -62,9 +62,27 @@ export const KNOWN_RENAMES: Readonly<Record<string, ResearchSymbol>> = {
 
 // Stablecoins, USDT-quoted, that must never be ranked as an ordinary risk
 // asset. The first 4 are the P1c census's own named delisted findings;
-// the rest are well-known currently-trading stablecoin tickers added so
-// the mechanical classifier does not silently admit them as "ordinary"
-// the first time this runs against a live exchangeInfo dump.
+// several more are well-known currently-trading stablecoin tickers added
+// so the mechanical classifier does not silently admit them as
+// "ordinary" the first time this runs against a live exchangeInfo dump.
+//
+// IMPORTANT LIMITATION, read before trusting this list alone: unlike
+// leveraged tokens, stablecoins have no universal Binance naming
+// convention a regex can safely generalize from (a name-based substring
+// rule would both miss real cases -- PAX/UST/DAI contain no "USD"
+// substring at all -- and risk false positives on an ordinary coin that
+// happens to contain "USD" in its name). unused at symbol-classification
+// time anyway: this classifier runs on exchangeInfo alone, before any
+// price history is ingested, so it CANNOT check price behavior.
+//
+// The real safety net is therefore a SEPARATE, price-behavior-based
+// sweep run AFTER ingestion, over whatever actually lands in a built
+// universe -- coefficient of variation of daily close price across an
+// asset's full history; genuine crypto assets never sit anywhere near a
+// stablecoin's ~0.05% figure. USD1 and RLUSD below were found EXACTLY
+// this way (2026-10-09, both appeared in the live-built dt1-v1 universe
+// before this fix, at CoV 0.0005 and 0.0005 respectively) -- added here
+// as a dated, named correction, not inferred from their tickers alone.
 export const KNOWN_STABLECOINS: ReadonlySet<string> = new Set([
   'PAXUSDT', // Paxos Standard
   'BUSDUSDT', // Binance USD
@@ -76,7 +94,19 @@ export const KNOWN_STABLECOINS: ReadonlySet<string> = new Set([
   'DAIUSDT',
   'USDPUSDT',
   'GUSDUSDT',
+  'USD1USDT', // World Liberty Financial USD1 -- found via the price-volatility sweep, 2026-10-09
+  'RLUSDUSDT', // Ripple USD -- found via the price-volatility sweep, 2026-10-09
+  'UUSDT', // found via the price-volatility sweep, 2026-10-09 -- CoV 0.0005, same signature as the two above
 ])
+
+// A fiat currency pair (Binance lists spot EUR/USDT as an ordinary
+// trading pair), not a cryptocurrency at all -- out of scope for a
+// strategy-generalization test over a CRYPTO universe regardless of how
+// its volatility compares to a stablecoin's. Also found via the
+// price-volatility sweep (2026-10-09): CoV 0.05, clearly not pegged like
+// a stablecoin, but its multi-year 0.96-1.26 range is ordinary FX
+// movement, not crypto risk-asset behavior.
+export const KNOWN_FIAT_CURRENCIES: ReadonlySet<string> = new Set(['EURUSDT'])
 
 // Exchange-affiliated tokens -- Stage A sign-off (2026-10-08): a named
 // exclusion category (an exchange token's value is tied to a specific
@@ -117,6 +147,9 @@ export function classifyUsdtSymbol(symbol: string): ResearchContractClassificati
   }
   if (KNOWN_STABLECOINS.has(symbol)) {
     return { underlyingId: stripUsdtSuffix(symbol), assetClass: 'stablecoin', excluded: true, exclusionReason: 'stablecoin, not an ordinary risk asset' }
+  }
+  if (KNOWN_FIAT_CURRENCIES.has(symbol)) {
+    return { underlyingId: stripUsdtSuffix(symbol), assetClass: 'fiat_currency', excluded: true, exclusionReason: 'fiat currency pair, not a cryptocurrency' }
   }
   if (KNOWN_EXCHANGE_TOKENS.has(symbol)) {
     return { underlyingId: stripUsdtSuffix(symbol), assetClass: 'exchange_token', excluded: true, exclusionReason: "exchange-affiliated token -- value tied to a specific platform's own fortunes, not an ordinary open-market asset (Stage A sign-off, 2026-10-08)" }
@@ -192,7 +225,7 @@ export async function fetchAndBuildResearchContracts(
   const rows = buildResearchContracts(symbols, mappingVersion)
   await upsertResearchContracts(supabase, rows)
 
-  const byClass: Record<ResearchAssetClass, number> = { ordinary: 0, stablecoin: 0, leveraged_index: 0, wrapped: 0, lst: 0, exchange_token: 0 }
+  const byClass: Record<ResearchAssetClass, number> = { ordinary: 0, stablecoin: 0, leveraged_index: 0, wrapped: 0, lst: 0, exchange_token: 0, fiat_currency: 0 }
   let excluded = 0
   for (const row of rows) {
     byClass[row.assetClass]++
