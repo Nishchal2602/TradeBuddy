@@ -1,4 +1,5 @@
 import type { AssetSymbol } from '../../../../src/shared/market-data/types.ts'
+import type { ResearchSymbol } from './types.ts'
 import type { CloseReason, Direction, Position } from '../../../../src/shared/positions/types.ts'
 import type { SlTpBounds } from '../../../../src/shared/risk/sl-tp.ts'
 import type { IntradayLsConfig } from '../../../../src/shared/strategy/config-schema.ts'
@@ -91,7 +92,17 @@ export interface BacktestParams {
 }
 
 export interface ClosedBacktestTrade {
-  asset: AssetSymbol
+  // DT-1 (2026-10-09) — widened AssetSymbol -> ResearchSymbol (plan §5.2,
+  // §9.1) so this shape is shareable with baseline-daily-trend.ts's wider
+  // universe, per this file's own header comment: "both loops emit the
+  // SAME ClosedBacktestTrade/OpenBacktestPosition shapes, so their results
+  // are directly comparable." Type-only widening (ResearchSymbol ⊇
+  // AssetSymbol as a string) — runBacktest below still only ever receives
+  // AssetSymbol values via its own BacktestParams.assets: AssetSymbol[],
+  // so this engine's own behavior and call surface are UNCHANGED (plan
+  // §9.3: "intraday_ls and all V4 detectors and replay infrastructure"
+  // stay untouched).
+  asset: ResearchSymbol
   direction: Direction
   // 'daily_trend' is the baseline-daily-trend.ts strategy's own literal —
   // that strategy has no six-arm concept at all (one archetype, not six),
@@ -115,7 +126,9 @@ export interface ClosedBacktestTrade {
 }
 
 export interface OpenBacktestPosition {
-  asset: AssetSymbol
+  // DT-1 (2026-10-09) — same widening and the same reasoning as
+  // ClosedBacktestTrade.asset above.
+  asset: ResearchSymbol
   // 'daily_trend' is the baseline-daily-trend.ts strategy's own literal —
   // that strategy has no six-arm concept at all (one archetype, not six),
   // widened here (rather than kept as two separate, non-comparable
@@ -240,7 +253,11 @@ export function runBacktest(barsByAsset: Partial<Record<AssetSymbol, readonly Hi
   const open = new Map<AssetSymbol, OpenBacktestPosition>()
   const lastConsumedBarTs = new Map<AssetSymbol, string | null>()
   const recentStopLossClose = new Map<AssetSymbol, RecentStopLossClose | null>()
-  const latestPrice = new Map<AssetSymbol, number>()
+  // ResearchSymbol-keyed (not AssetSymbol), since it is read via
+  // OpenBacktestPosition.asset below (now ResearchSymbol-typed) — this
+  // engine's own callers still only ever insert AssetSymbol values
+  // (params.assets: AssetSymbol[]), so behavior is unchanged.
+  const latestPrice = new Map<ResearchSymbol, number>()
   const closedTrades: ClosedBacktestTrade[] = []
   const rejectionsByReason: Record<string, number> = {}
   const navSeries: { timestamp: string; nav: number }[] = []

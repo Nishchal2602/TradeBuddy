@@ -1,6 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
-import type { AssetSymbol } from '../../../../../src/shared/market-data/types.ts'
 import type { HistoricalTimeframe } from '../../providers/binance.ts'
+import type { ResearchSymbol } from '../types.ts'
 import type { HistoricalBarRow } from './historical-bars.ts'
 import type { HistoricalFundingRateRow } from './historical-funding.ts'
 
@@ -15,7 +15,7 @@ const PAGE_SIZE = 1000
 
 export async function fetchHistoricalBarsInRange(
   supabase: SupabaseClient,
-  asset: AssetSymbol,
+  asset: ResearchSymbol,
   timeframe: HistoricalTimeframe,
   fromIso: string,
   toIso: string,
@@ -25,7 +25,7 @@ export async function fetchHistoricalBarsInRange(
   for (;;) {
     const { data, error } = await supabase
       .from('historical_bars')
-      .select('asset, timeframe, open_time, close_time, open, high, low, close, volume')
+      .select('asset, timeframe, open_time, close_time, open, high, low, close, volume, quote_volume')
       .eq('asset', asset)
       .eq('timeframe', timeframe)
       .gte('open_time', fromIso)
@@ -45,6 +45,7 @@ export async function fetchHistoricalBarsInRange(
         low: Number(r.low),
         close: Number(r.close),
         volume: Number(r.volume),
+        quoteVolume: r.quote_volume === null ? Number.NaN : Number(r.quote_volume),
       })
     }
     if (data.length < PAGE_SIZE) break
@@ -55,7 +56,7 @@ export async function fetchHistoricalBarsInRange(
 
 export async function fetchHistoricalFundingRatesInRange(
   supabase: SupabaseClient,
-  asset: AssetSymbol,
+  asset: ResearchSymbol,
   fromIso: string,
   toIso: string,
 ): Promise<HistoricalFundingRateRow[]> {

@@ -1,6 +1,7 @@
 import { createClient } from '@supabase/supabase-js'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { AssetSymbol } from '../../../src/shared/market-data/types.ts'
+import { BINANCE_FUTURES_SYMBOL, BINANCE_SPOT_SYMBOL } from '../agent-cycle/providers/binance.ts'
 import { countHistoricalBars } from '../agent-cycle/research/db/historical-bars.ts'
 import { countHistoricalFundingRates } from '../agent-cycle/research/db/historical-funding.ts'
 import { HISTORICAL_TIMEFRAMES, ingestFundingFor, ingestKlinesFor } from '../agent-cycle/research/ingest-core.ts'
@@ -28,33 +29,61 @@ import { HISTORICAL_TIMEFRAMES, ingestFundingFor, ingestKlinesFor } from '../age
 // research tool, invoked manually/scripted only while backfilling or
 // extending the historical range.
 
+// DT-1 (2026-10-09) — the request body now accepts EITHER shape:
+//   { asset: 'BTC'|'ETH'|'SUI'|'AVAX', ... }                   — legacy,
+//     unchanged behavior, still AssetSymbol-validated.
+//   { binanceSymbol: 'BCCUSDT', storageAsset: 'BCH', ... }      — new, the
+//     PIT universe path: an arbitrary Binance USDT pair, written under its
+//     underlying ResearchSymbol rather than a live AssetSymbol. Two
+//     separate fields, never a widened `asset`, because one underlying can
+//     have more than one binanceSymbol over non-overlapping date ranges
+//     (research_contracts is where that mapping is frozen) — see
+//     ingest-core.ts's own comment on why ingestKlinesFor/ingestFundingFor
+//     take them as two parameters.
 interface IngestRequestBody {
   kind: 'klines' | 'funding'
-  asset: string
+  asset?: string
+  binanceSymbol?: string
+  storageAsset?: string
   timeframe?: string
   requestBudget?: number
+  endAtMs?: number
+  // DT-1 (2026-10-09) — see ingestKlinesFor's own comment: a deliberate,
+  // non-destructive backfill mode (full-row upsert overwrites a stale
+  // NULL quote_volume), never used by the normal resumable flow.
+  forceFromEarliest?: boolean
+}
+
+function resolveSymbols(body: IngestRequestBody, lookup: Record<AssetSymbol, string>): { binanceSymbol: string; storageAsset: string } | { error: string } {
+  if (body.binanceSymbol && body.storageAsset) {
+    return { binanceSymbol: body.binanceSymbol, storageAsset: body.storageAsset }
+  }
+  if (body.asset) {
+    const assetResult = AssetSymbol.safeParse(body.asset)
+    if (!assetResult.success) return { error: `invalid asset: ${body.asset}` }
+    return { binanceSymbol: lookup[assetResult.data], storageAsset: assetResult.data }
+  }
+  return { error: 'request body must supply either "asset" or both "binanceSymbol" and "storageAsset"' }
 }
 
 async function handleRequest(supabase: SupabaseClient, body: IngestRequestBody) {
-  const assetResult = AssetSymbol.safeParse(body.asset)
-  if (!assetResult.success) {
-    return { status: 400 as const, body: { error: `invalid asset: ${body.asset}` } }
-  }
-  const asset = assetResult.data
-
   if (body.kind === 'funding') {
-    const result = await ingestFundingFor(supabase, asset, body.requestBudget ?? 50)
-    const totalStored = await countHistoricalFundingRates(supabase, asset)
-    return { status: 200 as const, body: { ...result, asset, kind: 'funding', totalStored } }
+    const resolved = resolveSymbols(body, BINANCE_FUTURES_SYMBOL)
+    if ('error' in resolved) return { status: 400 as const, body: { error: resolved.error } }
+    const result = await ingestFundingFor(supabase, resolved.binanceSymbol, resolved.storageAsset, body.requestBudget ?? 50)
+    const totalStored = await countHistoricalFundingRates(supabase, resolved.storageAsset)
+    return { status: 200 as const, body: { ...result, ...resolved, kind: 'funding', totalStored } }
   }
 
   if (!body.timeframe || !HISTORICAL_TIMEFRAMES.includes(body.timeframe as (typeof HISTORICAL_TIMEFRAMES)[number])) {
     return { status: 400 as const, body: { error: `invalid or missing timeframe for kind=klines: ${body.timeframe}` } }
   }
   const timeframe = body.timeframe as (typeof HISTORICAL_TIMEFRAMES)[number]
-  const result = await ingestKlinesFor(supabase, asset, timeframe, body.requestBudget ?? 300)
-  const totalStored = await countHistoricalBars(supabase, asset, timeframe)
-  return { status: 200 as const, body: { ...result, asset, timeframe, kind: 'klines', totalStored } }
+  const resolved = resolveSymbols(body, BINANCE_SPOT_SYMBOL)
+  if ('error' in resolved) return { status: 400 as const, body: { error: resolved.error } }
+  const result = await ingestKlinesFor(supabase, resolved.binanceSymbol, resolved.storageAsset, timeframe, body.requestBudget ?? 300, 150, body.endAtMs, body.forceFromEarliest ?? false)
+  const totalStored = await countHistoricalBars(supabase, resolved.storageAsset, timeframe)
+  return { status: 200 as const, body: { ...result, ...resolved, timeframe, kind: 'klines', totalStored } }
 }
 
 Deno.serve(async (req) => {

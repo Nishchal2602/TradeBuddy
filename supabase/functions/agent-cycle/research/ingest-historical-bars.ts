@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js'
 import { ALL_ASSETS } from '../../../../src/shared/market-data/types.ts'
+import { BINANCE_FUTURES_SYMBOL, BINANCE_SPOT_SYMBOL } from '../providers/binance.ts'
 import { countHistoricalBars } from './db/historical-bars.ts'
 import { countHistoricalFundingRates } from './db/historical-funding.ts'
 import { HISTORICAL_TIMEFRAMES, ingestFundingFor, ingestKlinesFor } from './ingest-core.ts'
@@ -29,10 +30,11 @@ async function main() {
 
   console.log('Ingesting Binance spot klines...')
   for (const asset of ALL_ASSETS) {
+    const binanceSymbol = BINANCE_SPOT_SYMBOL[asset]
     for (const timeframe of HISTORICAL_TIMEFRAMES) {
       let caughtUp = false
       while (!caughtUp) {
-        const result = await ingestKlinesFor(supabase, asset, timeframe)
+        const result = await ingestKlinesFor(supabase, binanceSymbol, asset, timeframe)
         caughtUp = result.reachedPresent
       }
       const total = await countHistoricalBars(supabase, asset, timeframe)
@@ -42,9 +44,10 @@ async function main() {
 
   console.log('\nIngesting Binance USDS-M funding-rate history...')
   for (const asset of ALL_ASSETS) {
+    const binanceSymbol = BINANCE_FUTURES_SYMBOL[asset]
     let caughtUp = false
     while (!caughtUp) {
-      const result = await ingestFundingFor(supabase, asset)
+      const result = await ingestFundingFor(supabase, binanceSymbol, asset)
       caughtUp = result.reachedPresent
     }
     const total = await countHistoricalFundingRates(supabase, asset)

@@ -1,13 +1,19 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
-import type { AssetSymbol } from '../../../../../src/shared/market-data/types.ts'
 import type { HistoricalKline, HistoricalTimeframe } from '../../providers/binance.ts'
+import type { ResearchSymbol } from '../types.ts'
 
 // RESEARCH-1 (2026-10-08) — same pure-row-shaping / impure-write split as
 // db/market-bars.ts, for the SEPARATE historical_bars table (never
 // market_bars — see the migration's own comment on why).
+//
+// DT-1 (2026-10-09) — `asset` widened from AssetSymbol to ResearchSymbol
+// (plan §5.2): the table column itself was always plain `text`, so this is
+// a type-only change here, not a schema change. The existing four live
+// assets are simply ResearchSymbol values that happen to also be
+// AssetSymbol values.
 
 export interface HistoricalBarRow extends HistoricalKline {
-  asset: AssetSymbol
+  asset: ResearchSymbol
   timeframe: HistoricalTimeframe
 }
 
@@ -22,11 +28,12 @@ function toDbRow(row: HistoricalBarRow) {
     low: row.low,
     close: row.close,
     volume: row.volume,
+    quote_volume: row.quoteVolume,
     source: 'binance',
   }
 }
 
-export function historicalBarRowFromKline(asset: AssetSymbol, timeframe: HistoricalTimeframe, kline: HistoricalKline): HistoricalBarRow {
+export function historicalBarRowFromKline(asset: ResearchSymbol, timeframe: HistoricalTimeframe, kline: HistoricalKline): HistoricalBarRow {
   return { asset, timeframe, ...kline }
 }
 
@@ -38,7 +45,7 @@ export async function upsertHistoricalBars(supabase: SupabaseClient, rows: reado
 
 // Resumable ingestion — the stored max open_time for (asset, timeframe),
 // or null if nothing has been ingested yet (start from the beginning).
-export async function fetchStoredMaxOpenTime(supabase: SupabaseClient, asset: AssetSymbol, timeframe: HistoricalTimeframe): Promise<string | null> {
+export async function fetchStoredMaxOpenTime(supabase: SupabaseClient, asset: ResearchSymbol, timeframe: HistoricalTimeframe): Promise<string | null> {
   const { data, error } = await supabase
     .from('historical_bars')
     .select('open_time')
@@ -51,7 +58,7 @@ export async function fetchStoredMaxOpenTime(supabase: SupabaseClient, asset: As
   return data?.open_time ?? null
 }
 
-export async function countHistoricalBars(supabase: SupabaseClient, asset: AssetSymbol, timeframe: HistoricalTimeframe): Promise<number> {
+export async function countHistoricalBars(supabase: SupabaseClient, asset: ResearchSymbol, timeframe: HistoricalTimeframe): Promise<number> {
   const { count, error } = await supabase
     .from('historical_bars')
     .select('*', { count: 'exact', head: true })

@@ -1,4 +1,5 @@
 import type { AssetSymbol } from '../../../../src/shared/market-data/types.ts'
+import type { ResearchSymbol } from './types.ts'
 import type { CloseReason, Direction, Position } from '../../../../src/shared/positions/types.ts'
 import { derivePositionState } from '../../../../src/shared/positions/types.ts'
 import type { SlTpBounds } from '../../../../src/shared/risk/sl-tp.ts'
@@ -52,7 +53,7 @@ const DAILY_WINDOW = 120 // matches what live code's own daily fetch covers (~12
 const FOUR_H_WINDOW = 180 // matches live code's own 4h fetch (~30 days); Balanced's ATR is 4-hourly, never daily
 
 export interface DailyTrendBacktestParams {
-  assets: AssetSymbol[]
+  assets: ResearchSymbol[]
   startingCapitalUsd: number
   feeBps: number
   slippageBps: number
@@ -75,7 +76,14 @@ export interface DailyTrendBacktestParams {
   // baseline-daily-trend.test.ts proves that omitting this parameter (or
   // always returning true) reproduces R4's exact byte-for-byte output —
   // "unmodified" is proven here, not merely asserted.
-  canOpen?: (asset: AssetSymbol, barCloseIso: string) => boolean
+  //
+  // DT-1 (2026-10-09) — widened AssetSymbol -> ResearchSymbol (plan §5.2)
+  // so canOpen can express "this EXTERNAL asset may not open a position
+  // this month" (the PIT universe membership gate), not only the four
+  // live assets. Every existing R4 caller passes an AssetSymbol value,
+  // which is a valid ResearchSymbol by construction — S1c's identity test
+  // (below) still asserts byte-for-byte reproduction on R4's own fixtures.
+  canOpen?: (asset: ResearchSymbol, barCloseIso: string) => boolean
 }
 
 export interface DailyTrendBacktestResult {
@@ -107,10 +115,10 @@ function pessimisticPoints(direction: Direction, bar: HistoricalBarRow): PricePo
     : [{ timestamp: bar.closeTime, price: bar.high }, { timestamp: bar.closeTime, price: bar.low }]
 }
 
-export function runDailyTrendBacktest(barsByAsset: Partial<Record<AssetSymbol, readonly HistoricalBarRow[]>>, params: DailyTrendBacktestParams): DailyTrendBacktestResult {
-  const seriesByAsset = new Map<AssetSymbol, AssetDailySeries>()
-  const dailyIdxByAsset = new Map<AssetSymbol, number>()
-  const fourHIdxByAsset = new Map<AssetSymbol, number>()
+export function runDailyTrendBacktest(barsByAsset: Partial<Record<ResearchSymbol, readonly HistoricalBarRow[]>>, params: DailyTrendBacktestParams): DailyTrendBacktestResult {
+  const seriesByAsset = new Map<ResearchSymbol, AssetDailySeries>()
+  const dailyIdxByAsset = new Map<ResearchSymbol, number>()
+  const fourHIdxByAsset = new Map<ResearchSymbol, number>()
   for (const asset of params.assets) {
     seriesByAsset.set(asset, buildSeries(barsByAsset[asset] ?? []))
     dailyIdxByAsset.set(asset, 0)
@@ -125,9 +133,9 @@ export function runDailyTrendBacktest(barsByAsset: Partial<Record<AssetSymbol, r
 
   let cash = params.startingCapitalUsd
   let peakNav = params.startingCapitalUsd
-  const open = new Map<AssetSymbol, OpenBacktestPosition>()
-  const recentStopLossClose = new Map<AssetSymbol, RecentStopLossClose | null>()
-  const latestPrice = new Map<AssetSymbol, number>()
+  const open = new Map<ResearchSymbol, OpenBacktestPosition>()
+  const recentStopLossClose = new Map<ResearchSymbol, RecentStopLossClose | null>()
+  const latestPrice = new Map<ResearchSymbol, number>()
   const closedTrades: ClosedBacktestTrade[] = []
   const rejectionsByReason: Record<string, number> = {}
   const navSeries: { timestamp: string; nav: number }[] = []
@@ -202,7 +210,15 @@ export function runDailyTrendBacktest(barsByAsset: Partial<Record<AssetSymbol, r
 
       const regime = evaluateTrendRegime(dailyWindow.map((b) => ({ timestamp: b.closeTime, close: b.close })))
       const currentState = derivePositionState(open.get(asset)?.position ?? null)
-      const candidate = buildCandidateProposal({ asset, currentState, regime, atrPct })
+      // DT-1 (2026-10-09) — cast at the boundary into LIVE code
+      // (strategy/rules.ts, explicitly UNCHANGED/protected — plan §9.3).
+      // CandidateInput/ModelDecisionProposal's `asset: AssetSymbol` is
+      // never run through a runtime Zod parse inside rules.ts (grepped for
+      // `.parse(`/`.safeParse(` before relying on this) — it is carried
+      // through purely for bookkeeping/string-interpolation, so widening
+      // the VALUE this project passes through it is runtime-safe even
+      // though the live TYPE itself must stay exactly AssetSymbol.
+      const candidate = buildCandidateProposal({ asset: asset as AssetSymbol, currentState, regime, atrPct })
 
       if (candidate.action === 'CLOSE') {
         const position = open.get(asset)!.position
@@ -266,8 +282,14 @@ export function runDailyTrendBacktest(barsByAsset: Partial<Record<AssetSymbol, r
         }
         if ((gateResult.riskStatus === 'approved' || gateResult.riskStatus === 'clamped') && gateResult.approvedSizePct !== null) {
           const notionalUsd = gateResult.approvedSizePct * nav
+          // DT-1 (2026-10-09) — same boundary-cast reasoning as the
+          // buildCandidateProposal call above: openPosition
+          // (broker/accounting.ts, explicitly UNCHANGED/protected — plan
+          // §9.3) builds a plain Position object literal with no runtime
+          // Zod parse on `asset` (verified), so this is a type-only
+          // widening, not a behavior change.
           const openRes = openPosition({
-            asset,
+            asset: asset as AssetSymbol,
             direction: 'long',
             referencePrice: bar.close,
             notionalUsd,
@@ -308,7 +330,7 @@ export function runDailyTrendBacktest(barsByAsset: Partial<Record<AssetSymbol, r
 }
 
 function toClosedTrade(
-  asset: AssetSymbol,
+  asset: ResearchSymbol,
   existing: OpenBacktestPosition,
   closeRes: { closedPosition: Position; trade: { fillPrice: number; fee: number; slippageCost: number }; realizedPnl: number; fundingCost: number },
   closedAt: string,

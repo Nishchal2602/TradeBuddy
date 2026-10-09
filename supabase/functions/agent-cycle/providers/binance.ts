@@ -60,6 +60,16 @@ export interface HistoricalKline {
   low: number
   close: number
   volume: number
+  // DT-1 (2026-10-09) — quoteAssetVolume (tuple index 7), the USD-quote
+  // volume the PIT universe's 30-day ADV ranking needs (plan §5.3).
+  // Previously validated and silently discarded (the plan's own G3 gap
+  // finding) — now surfaced, purely additive to this interface. OPTIONAL:
+  // fetchKlines below always populates it on a real response, but keeping
+  // it optional on the shared interface avoids forcing every synthetic
+  // test fixture across this codebase to supply a value it doesn't care
+  // about (historical_bars.quote_volume is nullable for the identical
+  // reason — pre-2026-10-09 rows predate this field).
+  quoteVolume?: number
 }
 
 export interface HistoricalFundingRate {
@@ -138,15 +148,23 @@ function parseOrThrow<T>(schema: z.ZodType<T>, raw: unknown, context: string): T
 
 // Spot klines — true OHLCV, the live strategy's own signal source.
 // startTimeMs/endTimeMs are both inclusive per Binance's own docs.
+//
+// DT-1 (2026-10-09) — `symbol` is now the raw Binance exchange symbol
+// string (e.g. 'BTCUSDT', or a historical contract like 'BCCUSDT'),
+// never an AssetSymbol index. This is what lets the PIT universe fetch
+// ANY Binance USDT pair, including a renamed/delisted contract that has
+// no AssetSymbol mapping at all — the four live assets keep working
+// identically, just with BINANCE_SPOT_SYMBOL's lookup now performed by
+// the caller (research/ingest-core.ts) instead of inside this function;
+// the bytes sent over the wire are unchanged either way.
 export async function fetchKlines(
-  asset: AssetSymbol,
+  symbol: string,
   interval: HistoricalTimeframe,
   startTimeMs: number,
   endTimeMs?: number,
   limit: number = BINANCE_KLINE_MAX_LIMIT,
   fetchImpl: typeof fetch = fetch,
 ): Promise<HistoricalKline[]> {
-  const symbol = BINANCE_SPOT_SYMBOL[asset]
   const params = new URLSearchParams({ symbol, interval, startTime: String(startTimeMs), limit: String(limit) })
   if (endTimeMs !== undefined) params.set('endTime', String(endTimeMs))
   const raw = await fetchJson(`${SPOT_BASE_URL}/klines?${params}`, fetchImpl)
@@ -159,6 +177,7 @@ export async function fetchKlines(
     close: Number(k[4]),
     volume: Number(k[5]),
     closeTime: new Date(k[6]).toISOString(),
+    quoteVolume: Number(k[7]),
   }))
 }
 
@@ -166,14 +185,16 @@ export async function fetchKlines(
 // never consumed by the live trading path (which has its own, separate,
 // currently-dormant-since-shortEnabled=false funding model in
 // broker/accounting.ts, unmodified by this file).
+//
+// DT-1 (2026-10-09) — `symbol` is the raw Binance futures symbol string,
+// same reasoning as fetchKlines above.
 export async function fetchFundingRateHistory(
-  asset: AssetSymbol,
+  symbol: string,
   startTimeMs: number,
   endTimeMs?: number,
   limit: number = BINANCE_FUNDING_MAX_LIMIT,
   fetchImpl: typeof fetch = fetch,
 ): Promise<HistoricalFundingRate[]> {
-  const symbol = BINANCE_FUTURES_SYMBOL[asset]
   const params = new URLSearchParams({ symbol, startTime: String(startTimeMs), limit: String(limit) })
   if (endTimeMs !== undefined) params.set('endTime', String(endTimeMs))
   const raw = await fetchJson(`${FUTURES_BASE_URL}/fundingRate?${params}`, fetchImpl)
@@ -183,4 +204,39 @@ export async function fetchFundingRateHistory(
     fundingRate: Number(f.fundingRate),
     markPrice: Number(f.markPrice),
   }))
+}
+
+// --- exchangeInfo ----------------------------------------------------
+//
+// DT-1 (2026-10-09, Order-of-Work step 4) — symbol metadata for the PIT
+// universe's contract mapping (plan §5.7, §9.1: research/universe/
+// contracts.ts). Live-verified during Phase P1 (2026-10-08,
+// dt1-phase1-feasibility-2026-10-08.md): returns EVERY symbol Binance has
+// ever listed on spot, trading or not (status TRADING | BREAK), never
+// silently drops a delisted one — confirmed against known historical
+// delistings before relying on it. Carries NO listing/delisting
+// timestamp field; those are still inferred from a symbol's own
+// earliest/latest kline, exactly as Phase 1 already established.
+
+export interface ExchangeInfoSymbol {
+  symbol: string
+  status: string
+  baseAsset: string
+  quoteAsset: string
+}
+
+const BinanceExchangeInfoSymbol = z.object({
+  symbol: z.string(),
+  status: z.string(),
+  baseAsset: z.string(),
+  quoteAsset: z.string(),
+})
+const BinanceExchangeInfoResponse = z.object({
+  symbols: z.array(BinanceExchangeInfoSymbol),
+})
+
+export async function fetchExchangeInfo(fetchImpl: typeof fetch = fetch): Promise<ExchangeInfoSymbol[]> {
+  const raw = await fetchJson(`${SPOT_BASE_URL}/exchangeInfo`, fetchImpl)
+  const parsed = parseOrThrow(BinanceExchangeInfoResponse, raw, 'exchangeInfo')
+  return parsed.symbols
 }

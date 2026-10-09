@@ -1,9 +1,9 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
-import type { AssetSymbol } from '../../../../../src/shared/market-data/types.ts'
 import type { HistoricalFundingRate } from '../../providers/binance.ts'
+import type { ResearchSymbol } from '../types.ts'
 
 export interface HistoricalFundingRateRow extends HistoricalFundingRate {
-  asset: AssetSymbol
+  asset: ResearchSymbol
 }
 
 function toDbRow(row: HistoricalFundingRateRow) {
@@ -22,7 +22,7 @@ export async function upsertHistoricalFundingRates(supabase: SupabaseClient, row
   if (error) throw new Error(`upsertHistoricalFundingRates: ${error.message}`)
 }
 
-export async function fetchStoredMaxFundingTime(supabase: SupabaseClient, asset: AssetSymbol): Promise<string | null> {
+export async function fetchStoredMaxFundingTime(supabase: SupabaseClient, asset: ResearchSymbol): Promise<string | null> {
   const { data, error } = await supabase
     .from('historical_funding_rates')
     .select('funding_time')
@@ -34,7 +34,7 @@ export async function fetchStoredMaxFundingTime(supabase: SupabaseClient, asset:
   return data?.funding_time ?? null
 }
 
-export async function countHistoricalFundingRates(supabase: SupabaseClient, asset: AssetSymbol): Promise<number> {
+export async function countHistoricalFundingRates(supabase: SupabaseClient, asset: ResearchSymbol): Promise<number> {
   const { count, error } = await supabase.from('historical_funding_rates').select('*', { count: 'exact', head: true }).eq('asset', asset)
   if (error) throw new Error(`countHistoricalFundingRates: ${error.message}`)
   return count ?? 0

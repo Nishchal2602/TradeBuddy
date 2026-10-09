@@ -1,7 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
-import type { AssetSymbol } from '../../../../src/shared/market-data/types.ts'
 import { fetchFundingRateHistory, fetchKlines } from '../providers/binance.ts'
 import type { HistoricalTimeframe } from '../providers/binance.ts'
+import type { ResearchSymbol } from './types.ts'
 import { fetchStoredMaxOpenTime, historicalBarRowFromKline, upsertHistoricalBars } from './db/historical-bars.ts'
 import { fetchStoredMaxFundingTime, upsertHistoricalFundingRates } from './db/historical-funding.ts'
 
@@ -32,34 +32,64 @@ export interface IngestResult {
   reachedPresent: boolean
 }
 
-// Ingests ONE (asset, timeframe) pair to completion (resumable — picks up
-// from the stored max open_time). requestBudget bounds how many paginated
-// requests this single call may make, so one Edge Function invocation
-// stays safely within its own wall-clock limit; call again (same args) to
-// continue from where it left off.
+// Ingests ONE (binanceSymbol, timeframe) pair to completion (resumable —
+// picks up from the stored max open_time, keyed on storageAsset), writing
+// under storageAsset rather than binanceSymbol. requestBudget bounds how
+// many paginated requests this single call may make, so one Edge Function
+// invocation stays safely within its own wall-clock limit; call again
+// (same args) to continue from where it left off.
+//
+// DT-1 (2026-10-09) — binanceSymbol (what to fetch, e.g. 'BCCUSDT') and
+// storageAsset (what to store it under, e.g. 'BCH') are DELIBERATELY two
+// separate parameters, never one: Binance treats a rename as
+// delist-old/list-new, so one underlying asset can have more than one
+// binanceSymbol over non-overlapping date ranges (research_contracts is
+// where that mapping lives). For the four live assets, binanceSymbol ===
+// BINANCE_SPOT_SYMBOL[asset] and storageAsset === asset — identical to the
+// pre-2026-10-09 behavior, just resolved one level up by the caller
+// instead of inside fetchKlines itself (see binance.ts's own comment).
+// endAtMs optionally bounds ingestion to a contract's own delisting/rename
+// date, so a later contract's bars are never attributed to an earlier
+// one's symbol.
+//
+// forceFromEarliest (DT-1, 2026-10-09) — when true, ignores the stored
+// max and re-fetches from EARLIEST_START_MS regardless. upsertHistoricalBars
+// is a full-row upsert (onConflict asset,timeframe,open_time), so this is
+// a NON-destructive backfill, never a delete: an already-stored row with
+// a pre-quote_volume NULL is simply overwritten with the freshly-fetched
+// row, which does carry it. Used once, deliberately, to backfill
+// BTC/ETH/SUI/AVAX's 1d rows ingested under RESEARCH-1 (2026-10-08,
+// before quote_volume existed as a column) — never on the hot path.
 export async function ingestKlinesFor(
   supabase: SupabaseClient,
-  asset: AssetSymbol,
+  binanceSymbol: string,
+  storageAsset: ResearchSymbol,
   timeframe: HistoricalTimeframe,
   requestBudget = 300,
   requestDelayMs = 150,
+  endAtMs?: number,
+  forceFromEarliest = false,
 ): Promise<IngestResult> {
-  const storedMax = await fetchStoredMaxOpenTime(supabase, asset, timeframe)
+  const storedMax = forceFromEarliest ? null : await fetchStoredMaxOpenTime(supabase, storageAsset, timeframe)
   let cursor = storedMax ? new Date(storedMax).getTime() + 1 : EARLIEST_START_MS
   let totalIngested = 0
   let requests = 0
   let reachedPresent = false
 
+  if (endAtMs !== undefined && cursor >= endAtMs) {
+    return { ingested: 0, totalRequests: 0, reachedPresent: true }
+  }
+
   while (requests < requestBudget) {
-    const klines = await fetchKlines(asset, timeframe, cursor)
+    const klines = await fetchKlines(binanceSymbol, timeframe, cursor, endAtMs)
     requests++
     if (klines.length === 0) {
       reachedPresent = true
       break
     }
 
-    const nowMs = Date.now()
-    const closed = klines.filter((k) => new Date(k.closeTime).getTime() < nowMs)
+    const ceilingMs = endAtMs ?? Date.now()
+    const closed = klines.filter((k) => new Date(k.closeTime).getTime() < ceilingMs)
     if (closed.length === 0) {
       reachedPresent = true
       break
@@ -67,12 +97,12 @@ export async function ingestKlinesFor(
 
     await upsertHistoricalBars(
       supabase,
-      closed.map((k) => historicalBarRowFromKline(asset, timeframe, k)),
+      closed.map((k) => historicalBarRowFromKline(storageAsset, timeframe, k)),
     )
     totalIngested += closed.length
     cursor = new Date(closed[closed.length - 1]!.closeTime).getTime() + 1
 
-    if (klines.length < 1000) {
+    if (klines.length < 1000 || (endAtMs !== undefined && cursor >= endAtMs)) {
       reachedPresent = true
       break
     }
@@ -84,18 +114,19 @@ export async function ingestKlinesFor(
 
 export async function ingestFundingFor(
   supabase: SupabaseClient,
-  asset: AssetSymbol,
+  binanceSymbol: string,
+  storageAsset: ResearchSymbol,
   requestBudget = 50,
   requestDelayMs = 150,
 ): Promise<IngestResult> {
-  const storedMax = await fetchStoredMaxFundingTime(supabase, asset)
+  const storedMax = await fetchStoredMaxFundingTime(supabase, storageAsset)
   let cursor = storedMax ? new Date(storedMax).getTime() + 1 : EARLIEST_START_MS
   let totalIngested = 0
   let requests = 0
   let reachedPresent = false
 
   while (requests < requestBudget) {
-    const rates = await fetchFundingRateHistory(asset, cursor)
+    const rates = await fetchFundingRateHistory(binanceSymbol, cursor)
     requests++
     if (rates.length === 0) {
       reachedPresent = true
@@ -104,7 +135,7 @@ export async function ingestFundingFor(
 
     await upsertHistoricalFundingRates(
       supabase,
-      rates.map((r) => ({ asset, ...r })),
+      rates.map((r) => ({ asset: storageAsset, ...r })),
     )
     totalIngested += rates.length
     cursor = new Date(rates[rates.length - 1]!.fundingTime).getTime() + 1
