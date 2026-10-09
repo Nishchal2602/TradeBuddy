@@ -1,0 +1,464 @@
+{
+  "runAt": "2026-10-09T15:54:00.265Z",
+  "config": {
+    "rhoBarGrid": [
+      0.45,
+      0.5,
+      0.65,
+      0.8
+    ],
+    "sharpeGrid": [
+      0,
+      0.3,
+      0.5,
+      0.54,
+      0.8,
+      1.2
+    ],
+    "numReplicatesPerCell": 400,
+    "bootstrapResamplesPerReplicate": 500,
+    "requiredSharpe": 0.54,
+    "powerThreshold": 0.8,
+    "fromMonth": "2018-03",
+    "toMonth": "2026-09",
+    "matureN": 20,
+    "tradesPerSleevePerMonth": 1.7087378640776698
+  },
+  "s11Gate": {
+    "perRhoBar": [
+      {
+        "rhoBar": 0.45,
+        "power": 0.035,
+        "passes": false
+      },
+      {
+        "rhoBar": 0.5,
+        "power": 0.035,
+        "passes": false
+      },
+      {
+        "rhoBar": 0.65,
+        "power": 0.03,
+        "passes": false
+      },
+      {
+        "rhoBar": 0.8,
+        "power": 0.04,
+        "passes": false
+      }
+    ],
+    "allPass": false,
+    "allFail": true,
+    "fragile": false
+  },
+  "cells": [
+    {
+      "rhoBar": 0.45,
+      "trueAnnualizedSharpe": 0,
+      "meanE1CiWidth": 1.1133298358079997,
+      "economicPower": 0,
+      "robustnessHoldRate": 0.345,
+      "verdictCounts": {
+        "not_significant": 375,
+        "significant_negative": 19,
+        "significant_positive": 6
+      },
+      "dsrN1PassRate": 0.0425,
+      "dsrN14PassRate": 0,
+      "cpcvAgreeRate": 0.93,
+      "threeClauseFullPassRateN1": 0.04,
+      "threeClauseFullPassRateN14": 0
+    },
+    {
+      "rhoBar": 0.45,
+      "trueAnnualizedSharpe": 0.3,
+      "meanE1CiWidth": 1.1079777575275938,
+      "economicPower": 0,
+      "robustnessHoldRate": 0.57,
+      "verdictCounts": {
+        "not_significant": 383,
+        "significant_positive": 9,
+        "significant_negative": 8
+      },
+      "dsrN1PassRate": 0.195,
+      "dsrN14PassRate": 0,
+      "cpcvAgreeRate": 0.915,
+      "threeClauseFullPassRateN1": 0.18,
+      "threeClauseFullPassRateN14": 0
+    },
+    {
+      "rhoBar": 0.45,
+      "trueAnnualizedSharpe": 0.5,
+      "meanE1CiWidth": 1.1020982451358832,
+      "economicPower": 0.0225,
+      "robustnessHoldRate": 0.7475,
+      "verdictCounts": {
+        "not_significant": 382,
+        "significant_negative": 9,
+        "significant_positive": 9
+      },
+      "dsrN1PassRate": 0.3775,
+      "dsrN14PassRate": 0,
+      "cpcvAgreeRate": 0.9225,
+      "threeClauseFullPassRateN1": 0.35,
+      "threeClauseFullPassRateN14": 0
+    },
+    {
+      "rhoBar": 0.45,
+      "trueAnnualizedSharpe": 0.54,
+      "meanE1CiWidth": 1.1025208399027995,
+      "economicPower": 0.035,
+      "robustnessHoldRate": 0.7925,
+      "verdictCounts": {
+        "not_significant": 382,
+        "significant_positive": 9,
+        "significant_negative": 9
+      },
+      "dsrN1PassRate": 0.4025,
+      "dsrN14PassRate": 0,
+      "cpcvAgreeRate": 0.9275,
+      "threeClauseFullPassRateN1": 0.375,
+      "threeClauseFullPassRateN14": 0
+    },
+    {
+      "rhoBar": 0.45,
+      "trueAnnualizedSharpe": 0.8,
+      "meanE1CiWidth": 1.0986262872996186,
+      "economicPower": 0.0725,
+      "robustnessHoldRate": 0.9,
+      "verdictCounts": {
+        "not_significant": 376,
+        "significant_positive": 16,
+        "significant_negative": 8
+      },
+      "dsrN1PassRate": 0.585,
+      "dsrN14PassRate": 0,
+      "cpcvAgreeRate": 0.93,
+      "threeClauseFullPassRateN1": 0.5425,
+      "threeClauseFullPassRateN14": 0
+    },
+    {
+      "rhoBar": 0.45,
+      "trueAnnualizedSharpe": 1.2,
+      "meanE1CiWidth": 1.0878796158399147,
+      "economicPower": 0.3525,
+      "robustnessHoldRate": 0.99,
+      "verdictCounts": {
+        "not_significant": 375,
+        "significant_positive": 24,
+        "significant_negative": 1
+      },
+      "dsrN1PassRate": 0.8875,
+      "dsrN14PassRate": 0,
+      "cpcvAgreeRate": 0.9325,
+      "threeClauseFullPassRateN1": 0.8325,
+      "threeClauseFullPassRateN14": 0
+    },
+    {
+      "rhoBar": 0.5,
+      "trueAnnualizedSharpe": 0,
+      "meanE1CiWidth": 1.1175306343957194,
+      "economicPower": 0,
+      "robustnessHoldRate": 0.2975,
+      "verdictCounts": {
+        "not_significant": 383,
+        "significant_negative": 12,
+        "significant_positive": 5
+      },
+      "dsrN1PassRate": 0.045,
+      "dsrN14PassRate": 0,
+      "cpcvAgreeRate": 0.935,
+      "threeClauseFullPassRateN1": 0.045,
+      "threeClauseFullPassRateN14": 0
+    },
+    {
+      "rhoBar": 0.5,
+      "trueAnnualizedSharpe": 0.3,
+      "meanE1CiWidth": 1.1043314115284313,
+      "economicPower": 0.0075,
+      "robustnessHoldRate": 0.6075,
+      "verdictCounts": {
+        "not_significant": 382,
+        "significant_positive": 9,
+        "significant_negative": 9
+      },
+      "dsrN1PassRate": 0.21,
+      "dsrN14PassRate": 0,
+      "cpcvAgreeRate": 0.9175,
+      "threeClauseFullPassRateN1": 0.2,
+      "threeClauseFullPassRateN14": 0
+    },
+    {
+      "rhoBar": 0.5,
+      "trueAnnualizedSharpe": 0.5,
+      "meanE1CiWidth": 1.1046357778603149,
+      "economicPower": 0.0275,
+      "robustnessHoldRate": 0.7625,
+      "verdictCounts": {
+        "not_significant": 378,
+        "significant_negative": 7,
+        "significant_positive": 15
+      },
+      "dsrN1PassRate": 0.355,
+      "dsrN14PassRate": 0,
+      "cpcvAgreeRate": 0.925,
+      "threeClauseFullPassRateN1": 0.3275,
+      "threeClauseFullPassRateN14": 0
+    },
+    {
+      "rhoBar": 0.5,
+      "trueAnnualizedSharpe": 0.54,
+      "meanE1CiWidth": 1.1027969163748121,
+      "economicPower": 0.035,
+      "robustnessHoldRate": 0.8025,
+      "verdictCounts": {
+        "not_significant": 372,
+        "significant_positive": 15,
+        "significant_negative": 13
+      },
+      "dsrN1PassRate": 0.38,
+      "dsrN14PassRate": 0,
+      "cpcvAgreeRate": 0.92,
+      "threeClauseFullPassRateN1": 0.355,
+      "threeClauseFullPassRateN14": 0
+    },
+    {
+      "rhoBar": 0.5,
+      "trueAnnualizedSharpe": 0.8,
+      "meanE1CiWidth": 1.0931984279441953,
+      "economicPower": 0.12,
+      "robustnessHoldRate": 0.9225,
+      "verdictCounts": {
+        "not_significant": 378,
+        "significant_negative": 6,
+        "significant_positive": 16
+      },
+      "dsrN1PassRate": 0.64,
+      "dsrN14PassRate": 0,
+      "cpcvAgreeRate": 0.93,
+      "threeClauseFullPassRateN1": 0.605,
+      "threeClauseFullPassRateN14": 0
+    },
+    {
+      "rhoBar": 0.5,
+      "trueAnnualizedSharpe": 1.2,
+      "meanE1CiWidth": 1.0898203094291972,
+      "economicPower": 0.38,
+      "robustnessHoldRate": 0.99,
+      "verdictCounts": {
+        "not_significant": 366,
+        "significant_positive": 23,
+        "significant_negative": 11
+      },
+      "dsrN1PassRate": 0.91,
+      "dsrN14PassRate": 0,
+      "cpcvAgreeRate": 0.925,
+      "threeClauseFullPassRateN1": 0.845,
+      "threeClauseFullPassRateN14": 0
+    },
+    {
+      "rhoBar": 0.65,
+      "trueAnnualizedSharpe": 0,
+      "meanE1CiWidth": 1.115961693200347,
+      "economicPower": 0,
+      "robustnessHoldRate": 0.3125,
+      "verdictCounts": {
+        "not_significant": 390,
+        "significant_negative": 7,
+        "significant_positive": 3
+      },
+      "dsrN1PassRate": 0.055,
+      "dsrN14PassRate": 0,
+      "cpcvAgreeRate": 0.915,
+      "threeClauseFullPassRateN1": 0.0525,
+      "threeClauseFullPassRateN14": 0
+    },
+    {
+      "rhoBar": 0.65,
+      "trueAnnualizedSharpe": 0.3,
+      "meanE1CiWidth": 1.1074022009816866,
+      "economicPower": 0.005,
+      "robustnessHoldRate": 0.615,
+      "verdictCounts": {
+        "not_significant": 380,
+        "significant_negative": 14,
+        "significant_positive": 6
+      },
+      "dsrN1PassRate": 0.19,
+      "dsrN14PassRate": 0,
+      "cpcvAgreeRate": 0.9275,
+      "threeClauseFullPassRateN1": 0.1725,
+      "threeClauseFullPassRateN14": 0
+    },
+    {
+      "rhoBar": 0.65,
+      "trueAnnualizedSharpe": 0.5,
+      "meanE1CiWidth": 1.1049002414559013,
+      "economicPower": 0.02,
+      "robustnessHoldRate": 0.7275,
+      "verdictCounts": {
+        "not_significant": 381,
+        "significant_positive": 11,
+        "significant_negative": 8
+      },
+      "dsrN1PassRate": 0.3525,
+      "dsrN14PassRate": 0,
+      "cpcvAgreeRate": 0.94,
+      "threeClauseFullPassRateN1": 0.3325,
+      "threeClauseFullPassRateN14": 0
+    },
+    {
+      "rhoBar": 0.65,
+      "trueAnnualizedSharpe": 0.54,
+      "meanE1CiWidth": 1.1010712605106654,
+      "economicPower": 0.03,
+      "robustnessHoldRate": 0.8225,
+      "verdictCounts": {
+        "not_significant": 378,
+        "significant_negative": 11,
+        "significant_positive": 11
+      },
+      "dsrN1PassRate": 0.3825,
+      "dsrN14PassRate": 0,
+      "cpcvAgreeRate": 0.9275,
+      "threeClauseFullPassRateN1": 0.345,
+      "threeClauseFullPassRateN14": 0
+    },
+    {
+      "rhoBar": 0.65,
+      "trueAnnualizedSharpe": 0.8,
+      "meanE1CiWidth": 1.0928070610316474,
+      "economicPower": 0.1525,
+      "robustnessHoldRate": 0.935,
+      "verdictCounts": {
+        "not_significant": 380,
+        "significant_positive": 14,
+        "significant_negative": 6
+      },
+      "dsrN1PassRate": 0.655,
+      "dsrN14PassRate": 0,
+      "cpcvAgreeRate": 0.935,
+      "threeClauseFullPassRateN1": 0.62,
+      "threeClauseFullPassRateN14": 0
+    },
+    {
+      "rhoBar": 0.65,
+      "trueAnnualizedSharpe": 1.2,
+      "meanE1CiWidth": 1.0844961611883277,
+      "economicPower": 0.505,
+      "robustnessHoldRate": 0.9975,
+      "verdictCounts": {
+        "not_significant": 364,
+        "significant_positive": 31,
+        "significant_negative": 5
+      },
+      "dsrN1PassRate": 0.96,
+      "dsrN14PassRate": 0,
+      "cpcvAgreeRate": 0.925,
+      "threeClauseFullPassRateN1": 0.8875,
+      "threeClauseFullPassRateN14": 0
+    },
+    {
+      "rhoBar": 0.8,
+      "trueAnnualizedSharpe": 0,
+      "meanE1CiWidth": 1.1171239286744992,
+      "economicPower": 0,
+      "robustnessHoldRate": 0.285,
+      "verdictCounts": {
+        "not_significant": 381,
+        "significant_negative": 12,
+        "significant_positive": 7
+      },
+      "dsrN1PassRate": 0.0425,
+      "dsrN14PassRate": 0,
+      "cpcvAgreeRate": 0.95,
+      "threeClauseFullPassRateN1": 0.0425,
+      "threeClauseFullPassRateN14": 0
+    },
+    {
+      "rhoBar": 0.8,
+      "trueAnnualizedSharpe": 0.3,
+      "meanE1CiWidth": 1.1061087022624252,
+      "economicPower": 0.0225,
+      "robustnessHoldRate": 0.6175,
+      "verdictCounts": {
+        "not_significant": 382,
+        "significant_negative": 11,
+        "significant_positive": 7
+      },
+      "dsrN1PassRate": 0.25,
+      "dsrN14PassRate": 0,
+      "cpcvAgreeRate": 0.91,
+      "threeClauseFullPassRateN1": 0.225,
+      "threeClauseFullPassRateN14": 0
+    },
+    {
+      "rhoBar": 0.8,
+      "trueAnnualizedSharpe": 0.5,
+      "meanE1CiWidth": 1.1021278878414014,
+      "economicPower": 0.0325,
+      "robustnessHoldRate": 0.81,
+      "verdictCounts": {
+        "not_significant": 379,
+        "significant_positive": 9,
+        "significant_negative": 12
+      },
+      "dsrN1PassRate": 0.385,
+      "dsrN14PassRate": 0,
+      "cpcvAgreeRate": 0.9375,
+      "threeClauseFullPassRateN1": 0.3625,
+      "threeClauseFullPassRateN14": 0
+    },
+    {
+      "rhoBar": 0.8,
+      "trueAnnualizedSharpe": 0.54,
+      "meanE1CiWidth": 1.1038549354591618,
+      "economicPower": 0.04,
+      "robustnessHoldRate": 0.84,
+      "verdictCounts": {
+        "not_significant": 389,
+        "significant_negative": 5,
+        "significant_positive": 6
+      },
+      "dsrN1PassRate": 0.465,
+      "dsrN14PassRate": 0,
+      "cpcvAgreeRate": 0.9275,
+      "threeClauseFullPassRateN1": 0.42,
+      "threeClauseFullPassRateN14": 0
+    },
+    {
+      "rhoBar": 0.8,
+      "trueAnnualizedSharpe": 0.8,
+      "meanE1CiWidth": 1.0933323333726546,
+      "economicPower": 0.13,
+      "robustnessHoldRate": 0.9325,
+      "verdictCounts": {
+        "not_significant": 385,
+        "significant_negative": 6,
+        "significant_positive": 9
+      },
+      "dsrN1PassRate": 0.71,
+      "dsrN14PassRate": 0,
+      "cpcvAgreeRate": 0.9225,
+      "threeClauseFullPassRateN1": 0.655,
+      "threeClauseFullPassRateN14": 0
+    },
+    {
+      "rhoBar": 0.8,
+      "trueAnnualizedSharpe": 1.2,
+      "meanE1CiWidth": 1.0837380645877315,
+      "economicPower": 0.59,
+      "robustnessHoldRate": 1,
+      "verdictCounts": {
+        "not_significant": 378,
+        "significant_positive": 16,
+        "significant_negative": 6
+      },
+      "dsrN1PassRate": 0.98,
+      "dsrN14PassRate": 0,
+      "cpcvAgreeRate": 0.9225,
+      "threeClauseFullPassRateN1": 0.9075,
+      "threeClauseFullPassRateN14": 0
+    }
+  ]
+}
