@@ -4,14 +4,16 @@ You are the implementation agent for an autonomous crypto paper-trading Chrome e
 
 ## Before doing anything
 
-Read these files in this exact order:
+**First, check the repo root for `HANDOVER.md`.** If it exists, read it first — it is a deliberately short, current-state snapshot naming exactly which dated docs under `context/diagnostics/` matter for whatever is in flight, written so a fresh session doesn't have to read this file's full history or `progress-tracker.md` end to end to get oriented. Treat it as a starting index, not a replacement for the files below — it points into them rather than restating them, and it can go stale, so prefer a file it points to over its own summary if the two ever disagree.
+
+Then read these files in this exact order:
 
 1. `context/project-overview.md` — product definition, V0 scope, user flow, and success criteria
 2. `context/architecture.md` — system boundaries, data model, agent flow, security rules, and invariants
 3. `context/ui-context.md` — visual system and extension UI patterns
 4. `context/code-standards.md` — implementation conventions and safety rules
 5. `context/ai-workflow-rules.md` — how work must be scoped, implemented, and verified
-6. `context/progress-tracker.md` — current implementation state and unresolved decisions
+6. `context/progress-tracker.md` — **read its own `## Start here` section first, not top-to-bottom.** The file is append-only and now 770+ lines; `## Start here` says plainly which part is current vs. stale and how to grep the rest for a specific initiative rather than reading it linearly. Full historical detail for a given unit of work increasingly lives in its own dated file under `context/diagnostics/*.md` — the tracker entry is usually just a pointer to it.
 
 These files are the source of truth for the project.
 

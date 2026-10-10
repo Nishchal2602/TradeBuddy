@@ -2,6 +2,18 @@
 
 Update this file after every meaningful implementation change.
 
+## Start here (added 2026-10-10)
+
+This file is long (770+ lines) and append-only by design — it is an audit trail, not meant to be read linearly every session. **Before reading further, check the repo root for `HANDOVER.md`** — if present, it is the current, deliberately short entry point and names exactly which dated docs matter for whatever is in flight. Read it first; it will tell you whether you need anything below at all.
+
+If there is no handover doc (or it's stale and you're doing an initial read anyway), use this index rather than scrolling: grep this file for the initiative name you care about (`DT-1`, `EXP-1`, `STRAT-1`, `CFG-1`, `RESEARCH-1`, `WEB-1`/`WEB-2`, `ASSET-4`) rather than reading top to bottom. Most of a session's actual answer lives in a dated file under `context/diagnostics/*.md`, not in this file's own prose — this file increasingly just points at those.
+
+**The `## Current Phase` section immediately below is STALE** (last meaningfully true 2026-10-01, Strategy V4 Phase 0) — nothing has trimmed or replaced it as work moved on, and newer state lives further down in `## Completed`, chronological, newest at the bottom. Read `## Completed`'s last ~15 entries (or grep for the initiative you're touching) for the actual current state; do not trust `## Current Phase`'s own heading to mean what it says.
+
+As of 2026-10-10, the two most recent, currently-live threads are:
+- **DT-1** (does R4's daily-trend strategy generalize beyond BTC/ETH?) — **answered**: no, it inverts to a confidently negative result. `context/diagnostics/dt1-results-2026-10-09.md` is the full writeup; grep `## Completed` for `DT-1` for the tracker's own summary and links to the pre-registration/Stage-A/Stage-B docs that preceded it.
+- **The DT-1 forward paper experiment** (`dt1-forward-btc`/`dt1-forward-eth` portfolios, a standalone cron isolated from the live trading system) — **running unattended**, 5-day window started 2026-10-09, no action needed unless it's past 2026-10-14 or a position needs review. Grep `## Completed` for `forward paper experiment`.
+
 ## Current Phase
 
 - **Strategy V4 (`intraday_ls`) — Phase 0 in progress, 2026-10-01.** Full plan at `/Users/nishchal/.claude/plans/pricing-and-model-selection-ethereal-fox.md` (approved, including an 8-point review round covering consumed-opportunity lifecycle, population separation in the reward loop, shrinkage-not-posterior naming, horizon-matched expected-move evaluation, the 60-min cadence limitation, advisory→blocking evidence rules, split-sample threshold validation, and funding-accrual semantics). **Phase 0 items completed this pass, code committed but NOT YET DEPLOYED** (deploy blocked by the auto-mode permission classifier — needs the user to run `npx supabase functions deploy agent-cycle` themselves, or grant Bash permission for it):

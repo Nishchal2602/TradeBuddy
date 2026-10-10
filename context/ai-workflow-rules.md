@@ -102,6 +102,13 @@ Update the relevant context file when implementation changes:
 
 Always update `progress-tracker.md` after a meaningful implementation change.
 
+**Context-budget discipline (added 2026-10-10, after the tracker crossed ~770 lines and a session needed a handover document to work around it).** `progress-tracker.md` is read in full at the start of nearly every session (`CLAUDE.md`'s own mandatory read-order) — every line in it is a line every future session pays to load, whether or not that session's task touches it. Two rules, going forward:
+
+- **A new `## Completed` entry for a finished unit is a pointer, not a reproduction.** If the unit produced its own dated document (a plan section, a `context/diagnostics/*.md` writeup, a migration with its own header comment), the tracker entry should be 2–5 sentences: what shipped, the headline result/number if there is one, and the exact path to read for full detail. Do not copy paragraphs of reasoning, code excerpts, or verification transcripts into the tracker when they already live in the dated doc — that duplicates content across two files that can drift, and bloats the one file every session pays to read in full. Reserve a longer inline entry for the rare unit that has no other home for its detail.
+- **When starting a session against a large or multi-week task, check whether a handover document already exists** (grep for `HANDOVER` at the repo root, or ask) before reading `progress-tracker.md` linearly end to end. A handover document is a deliberately short, current-state-only entry point — read it first, then pull in only the specific dated docs it points to for the task at hand. Loading the full tracker is the fallback, not the default, once one exists.
+
+Neither rule asks anyone to retroactively rewrite the tracker's existing history — only to stop it growing the same way going forward.
+
 ## Verification Before Moving to the Next Unit
 
 1. The active unit works within its defined scope.
