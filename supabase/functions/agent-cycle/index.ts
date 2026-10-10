@@ -940,6 +940,11 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
               const hourOfDay = cycleClock.getUTCHours()
               const dayOfWeek = cycleClock.getUTCDay()
 
+              // Snapshot into a `const` — `rowFor` closes over this, and TS
+              // does not carry the enclosing `if (regimeStateForRow && ...)`
+              // narrowing into a nested function body for a `let` binding.
+              const resolvedBias: Bias = regimeStateForRow
+
               const rowFor = (
                 armId: ShadowCandidateRow['armId'],
                 armFamily: ShadowCandidateRow['armFamily'],
@@ -966,7 +971,7 @@ export async function runAgentCycle(deps: CycleDeps): Promise<CycleSummary> {
                   triggerBarTs,
                   regimeDaily: regime.regime,
                   regime4h,
-                  biasResolved: regimeStateForRow,
+                  biasResolved: resolvedBias,
                   shadowCause,
                   triggerBarClose,
                   referencePrice: assetMarketData.price,
